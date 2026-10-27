@@ -1,0 +1,13 @@
+rootProject.name = 'travelpay'
+
+include(
+    'common',
+    'eureka-server',
+    'gateway',
+    'user-service',
+    'wallet-service',
+    'payment-service',
+    'exchange-service',
+    'ledger-service',
+    'mock-bank'
+)

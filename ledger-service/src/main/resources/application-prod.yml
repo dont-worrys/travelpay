@@ -1,0 +1,37 @@
+spring:
+  application:
+    name: ledger-service
+  datasource:
+    url: ${LEDGER_DB_URL}
+    username: ${LEDGER_DB_USERNAME}
+    password: ${LEDGER_DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+
+server:
+  port: 8080
+
+eureka:
+  instance:
+    hostname: ledger-service
+  client:
+    register-with-eureka: true
+    fetch-registry: true
+    service-url:
+      defaultZone: http://eureka-server:8761/eureka/
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
+logging:
+  structured:
+    format:
+      console: logstash
+    json:
+      add:
+        service: ${spring.application.name}

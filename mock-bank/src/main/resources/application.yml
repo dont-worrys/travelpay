@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: mock-bank
+  datasource:
+    url: ${MOCK_BANK_DB_URL}
+    username: ${MOCK_BANK_DB_USERNAME}
+    password: ${MOCK_BANK_DB_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+
+server:
+  port: 8090
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
+logging:
+  structured:
+    format:
+      console: logstash
+    json:
+      add:
+        service: ${spring.application.name}

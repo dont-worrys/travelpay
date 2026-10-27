@@ -1,0 +1,87 @@
+import org.springframework.boot.gradle.plugin.SpringBootPlugin
+
+plugins {
+    id 'base'
+    id 'org.springframework.boot' version '4.1.2' apply false
+    id 'io.spring.dependency-management' version '1.1.7' apply false
+}
+
+ext {
+    springCloudVersion = '2025.1.4'
+}
+
+allprojects {
+    group = 'com.travelpay'
+    version = '0.0.1-SNAPSHOT'
+
+    repositories {
+        mavenCentral()
+    }
+}
+
+subprojects {
+    apply plugin: 'java'
+    apply plugin: 'io.spring.dependency-management'
+    apply plugin: 'jacoco'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release.set(21)
+        options.compilerArgs.add('-parameters')
+    }
+
+    dependencyManagement {
+        imports {
+            mavenBom SpringBootPlugin.BOM_COORDINATES
+            mavenBom "org.springframework.cloud:spring-cloud-dependencies:${rootProject.springCloudVersion}"
+        }
+    }
+
+    dependencies {
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+
+    pluginManager.withPlugin('org.springframework.boot') {
+        dependencies {
+            implementation 'org.springframework.boot:spring-boot-micrometer-tracing-opentelemetry'
+            implementation 'io.micrometer:micrometer-tracing-bridge-otel'
+        }
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        finalizedBy tasks.named('jacocoTestReport')
+    }
+
+    jacoco {
+        toolVersion = '0.8.16'
+    }
+
+    tasks.named('jacocoTestReport') {
+        dependsOn tasks.named('test')
+
+        reports {
+            xml.required = true
+            html.required = true
+        }
+    }
+}
+
+tasks.named('assemble') {
+    dependsOn subprojects.collect { it.tasks.named('assemble') }
+}
+
+tasks.named('check') {
+    dependsOn subprojects.collect { it.tasks.named('check') }
+}
+
+tasks.named('clean') {
+    dependsOn subprojects.collect { it.tasks.named('clean') }
+}
