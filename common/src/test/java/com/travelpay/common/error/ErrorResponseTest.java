@@ -23,7 +23,7 @@ class ErrorResponseTest {
 
         original.clear();
 
-        assertEquals(List.of(fieldError), response.errors());
-        assertThrows(UnsupportedOperationException.class, () -> response.errors().clear());
+        assertEquals(List.of(fieldError), response.details());
+        assertThrows(UnsupportedOperationException.class, () -> response.details().clear());
     }
 }

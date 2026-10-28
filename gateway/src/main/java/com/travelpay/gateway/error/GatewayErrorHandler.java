@@ -6,6 +6,7 @@ import java.util.Set;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.ErrorResponse;
+import com.travelpay.common.response.ApiResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.AnnotatedElementUtils;
@@ -41,26 +42,26 @@ public class GatewayErrorHandler implements WebExceptionHandler {
         }
 
         HttpStatusCode status = HttpStatusCode.valueOf(500);
-        ErrorResponse body = ErrorResponse.fromHttpStatus(500);
+        ErrorResponse error = ErrorResponse.fromHttpStatus(500);
         HttpHeaders headers = new HttpHeaders();
         Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Throwable current = exception; current != null && visited.add(current); current = current.getCause()) {
             if (current instanceof BusinessException businessException) {
                 var errorCode = businessException.getErrorCode();
                 status = HttpStatusCode.valueOf(errorCode.getStatus());
-                body = ErrorResponse.of(errorCode);
+                error = ErrorResponse.of(errorCode);
                 break;
             }
             if (current instanceof org.springframework.web.ErrorResponse frameworkError) {
                 status = frameworkError.getStatusCode();
-                body = ErrorResponse.fromHttpStatus(status.value());
+                error = ErrorResponse.fromHttpStatus(status.value());
                 headers.putAll(frameworkError.getHeaders());
                 break;
             }
             var responseStatus = AnnotatedElementUtils.findMergedAnnotation(current.getClass(), ResponseStatus.class);
             if (responseStatus != null) {
                 status = responseStatus.code();
-                body = ErrorResponse.fromHttpStatus(status.value());
+                error = ErrorResponse.fromHttpStatus(status.value());
                 break;
             }
         }
@@ -75,7 +76,7 @@ public class GatewayErrorHandler implements WebExceptionHandler {
             return response.setComplete();
         }
 
-        byte[] payload = mapper.writeValueAsBytes(body);
+        byte[] payload = mapper.writeValueAsBytes(ApiResponse.failure(error));
         return response.writeWith(Mono.fromSupplier(() -> response.bufferFactory().wrap(payload)));
     }
 }

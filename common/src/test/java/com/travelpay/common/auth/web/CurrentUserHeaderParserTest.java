@@ -148,8 +148,8 @@ class CurrentUserHeaderParserTest {
                         .header(AuthHeaders.USER_ID, "DO_NOT_ECHO_HEADER_VALUE")
                         .header(AuthHeaders.USER_ROLE, "USER"))
                 .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"))
-                .andExpect(jsonPath("$.errors").isEmpty())
+                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"))
+                .andExpect(jsonPath("$.error.details").isEmpty())
                 .andReturn();
 
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_ECHO"));

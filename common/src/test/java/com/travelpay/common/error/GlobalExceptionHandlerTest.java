@@ -8,6 +8,7 @@ import jakarta.validation.constraints.Pattern;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -27,6 +28,7 @@ import tools.jackson.databind.json.JsonMapper;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -50,9 +52,9 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/business"))
                 .andExpect(status().isConflict()).andReturn();
 
-        assertEquals("USER_EMAIL_ALREADY_EXISTS", body(result).get("code").stringValue());
-        assertEquals("이미 사용 중인 이메일입니다.", body(result).get("message").stringValue());
-        assertEquals(0, body(result).get("errors").size());
+        assertEquals("USER_EMAIL_ALREADY_EXISTS", errorBody(result).get("code").stringValue());
+        assertEquals("이미 사용 중인 이메일입니다.", errorBody(result).get("message").stringValue());
+        assertEquals(0, errorBody(result).get("details").size());
     }
 
     @Test
@@ -62,8 +64,8 @@ class GlobalExceptionHandlerTest {
                         .content("{\"value\":\"DO_NOT_ECHO_THIS_INPUT\"}"))
                 .andExpect(status().isBadRequest()).andReturn();
 
-        assertEquals("COMMON_INVALID_REQUEST", body(result).get("code").stringValue());
-        var detail = body(result).get("errors").get(0);
+        assertEquals("COMMON_INVALID_REQUEST", errorBody(result).get("code").stringValue());
+        var detail = errorBody(result).get("details").get(0);
         assertEquals("value", detail.get("field").stringValue());
         assertEquals("숫자만 입력해 주세요.", detail.get("message").stringValue());
         assertEquals(2, detail.size());
@@ -76,7 +78,7 @@ class GlobalExceptionHandlerTest {
                         .contentType(MediaType.APPLICATION_JSON).content("{DO_NOT_ECHO_PARSER_INPUT"))
                 .andExpect(status().isBadRequest()).andReturn();
 
-        assertEquals("COMMON_INVALID_REQUEST", body(result).get("code").stringValue());
+        assertEquals("COMMON_INVALID_REQUEST", errorBody(result).get("code").stringValue());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_ECHO"));
     }
 
@@ -86,7 +88,7 @@ class GlobalExceptionHandlerTest {
                 .andExpect(status().isMethodNotAllowed()).andReturn();
 
         assertTrue(result.getResponse().getHeader("Allow").contains("POST"));
-        assertEquals("COMMON_METHOD_NOT_ALLOWED", body(result).get("code").stringValue());
+        assertEquals("COMMON_METHOD_NOT_ALLOWED", errorBody(result).get("code").stringValue());
     }
 
     @Test
@@ -95,7 +97,7 @@ class GlobalExceptionHandlerTest {
                         .contentType(MediaType.TEXT_PLAIN).content("DO_NOT_ECHO_THIS_INPUT"))
                 .andExpect(status().isUnsupportedMediaType()).andReturn();
 
-        assertEquals("COMMON_UNSUPPORTED_MEDIA_TYPE", body(result).get("code").stringValue());
+        assertEquals("COMMON_UNSUPPORTED_MEDIA_TYPE", errorBody(result).get("code").stringValue());
     }
 
     @Test
@@ -103,7 +105,7 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/missing"))
                 .andExpect(status().isNotFound()).andReturn();
 
-        assertEquals("COMMON_NOT_FOUND", body(result).get("code").stringValue());
+        assertEquals("COMMON_NOT_FOUND", errorBody(result).get("code").stringValue());
     }
 
     @Test
@@ -111,7 +113,7 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/number").param("number", "DO_NOT_ECHO_THIS_INPUT"))
                 .andExpect(status().isBadRequest()).andReturn();
 
-        assertEquals("COMMON_INVALID_REQUEST", body(result).get("code").stringValue());
+        assertEquals("COMMON_INVALID_REQUEST", errorBody(result).get("code").stringValue());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_ECHO"));
     }
 
@@ -120,7 +122,7 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/unavailable"))
                 .andExpect(status().isServiceUnavailable()).andReturn();
 
-        assertEquals("COMMON_SERVICE_UNAVAILABLE", body(result).get("code").stringValue());
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(result).get("code").stringValue());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_EXPOSE"));
     }
 
@@ -129,8 +131,8 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/unexpected"))
                 .andExpect(status().isInternalServerError()).andReturn();
 
-        assertEquals("COMMON_INTERNAL_SERVER_ERROR", body(result).get("code").stringValue());
-        assertEquals(0, body(result).get("errors").size());
+        assertEquals("COMMON_INTERNAL_SERVER_ERROR", errorBody(result).get("code").stringValue());
+        assertEquals(0, errorBody(result).get("details").size());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_EXPOSE"));
     }
 
@@ -139,8 +141,8 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/form").param("count", "DO_NOT_ECHO_BINDING_VALUE"))
                 .andExpect(status().isBadRequest()).andReturn();
 
-        assertEquals("COMMON_INVALID_REQUEST", body(result).get("code").stringValue());
-        assertEquals("count", body(result).get("errors").get(0).get("field").stringValue());
+        assertEquals("COMMON_INVALID_REQUEST", errorBody(result).get("code").stringValue());
+        assertEquals("count", errorBody(result).get("details").get(0).get("field").stringValue());
         var response = result.getResponse().getContentAsString(UTF_8);
         assertFalse(response.contains("DO_NOT_ECHO"));
         assertFalse(response.contains("Failed to convert"));
@@ -151,7 +153,7 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/annotated"))
                 .andExpect(status().isNotFound()).andReturn();
 
-        assertEquals("COMMON_NOT_FOUND", body(result).get("code").stringValue());
+        assertEquals("COMMON_NOT_FOUND", errorBody(result).get("code").stringValue());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_EXPOSE"));
     }
 
@@ -160,7 +162,7 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/wrapped-unavailable"))
                 .andExpect(status().isServiceUnavailable()).andReturn();
 
-        assertEquals("COMMON_SERVICE_UNAVAILABLE", body(result).get("code").stringValue());
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(result).get("code").stringValue());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_EXPOSE"));
     }
 
@@ -170,7 +172,7 @@ class GlobalExceptionHandlerTest {
                 .andExpect(status().isMethodNotAllowed()).andReturn();
 
         assertEquals("POST", result.getResponse().getHeader("Allow"));
-        assertEquals("COMMON_METHOD_NOT_ALLOWED", body(result).get("code").stringValue());
+        assertEquals("COMMON_METHOD_NOT_ALLOWED", errorBody(result).get("code").stringValue());
     }
 
     @Test
@@ -178,7 +180,7 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/wrapped-business"))
                 .andExpect(status().isConflict()).andReturn();
 
-        assertEquals("USER_EMAIL_ALREADY_EXISTS", body(result).get("code").stringValue());
+        assertEquals("USER_EMAIL_ALREADY_EXISTS", errorBody(result).get("code").stringValue());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_EXPOSE"));
     }
 
@@ -187,7 +189,7 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/wrapped-annotated"))
                 .andExpect(status().isNotFound()).andReturn();
 
-        assertEquals("COMMON_NOT_FOUND", body(result).get("code").stringValue());
+        assertEquals("COMMON_NOT_FOUND", errorBody(result).get("code").stringValue());
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_EXPOSE"));
     }
 
@@ -196,7 +198,16 @@ class GlobalExceptionHandlerTest {
         var result = mvc.perform(get("/test/annotated-with-cause"))
                 .andExpect(status().isNotFound()).andReturn();
 
-        assertEquals("COMMON_NOT_FOUND", body(result).get("code").stringValue());
+        assertEquals("COMMON_NOT_FOUND", errorBody(result).get("code").stringValue());
+    }
+
+    @Test
+    void unmappedFrameworkStatusKeepsItsStatusAndUsesTheFallbackCode() throws Exception {
+        var result = mvc.perform(get("/test/unmapped-status"))
+                .andExpect(status().is(498)).andReturn();
+
+        assertEquals("COMMON_HTTP_ERROR", errorBody(result).get("code").stringValue());
+        assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -211,8 +222,16 @@ class GlobalExceptionHandlerTest {
         });
     }
 
-    private JsonNode body(MvcResult result) throws Exception {
-        return mapper.readTree(result.getResponse().getContentAsString(UTF_8));
+    private JsonNode errorBody(MvcResult result) throws Exception {
+        var body = mapper.readTree(result.getResponse().getContentAsString(UTF_8));
+        assertEquals(3, body.size());
+        assertNotNull(body.get("success"));
+        assertFalse(body.get("success").booleanValue());
+        assertNotNull(body.get("data"));
+        assertTrue(body.get("data").isNull());
+        assertNotNull(body.get("error"));
+        assertTrue(body.get("error").isObject());
+        return body.get("error");
     }
 
     @RestController
@@ -276,6 +295,12 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/test/unavailable")
         String unavailable() {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "DO_NOT_EXPOSE_INTERNAL_REASON");
+        }
+
+        @GetMapping("/test/unmapped-status")
+        String unmappedStatus() {
+            throw new ResponseStatusException(
+                    HttpStatusCode.valueOf(498), "DO_NOT_EXPOSE_INTERNAL_REASON");
         }
 
         @GetMapping("/test/unexpected")

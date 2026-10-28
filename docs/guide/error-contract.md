@@ -1,14 +1,38 @@
-# 공통 오류 사용 방법
+# 공통 응답·오류 사용 방법
 
-공통 오류 응답은 다음 형식입니다. MVC 서비스는 common의 처리기를 사용하고, Gateway는 WebFlux용 오류 어댑터에서 같은 ErrorResponse를 사용합니다.
+JSON 본문이 있는 업무 API는 `success`·`data`·`error` 구조를 사용합니다. 성공하면 `data`에 결과를 담고 `error`는 null, 실패하면 `data`는 null이고 `error`에 오류 정보를 담습니다. 기존 HTTP 상태 코드는 유지합니다.
+
+성공 응답은 컨트롤러에서 `ApiResponse.success(responseDto)`로 반환합니다. 다음은 회원가입 성공 응답의 예시이며, 실제 회원가입 API는 아직 구현하지 않았습니다.
 
 ```json
 {
-  "code": "USER_EMAIL_ALREADY_EXISTS",
-  "message": "이미 사용 중인 이메일입니다.",
-  "errors": []
+  "success": true,
+  "data": {
+    "userId": "550e8400-e29b-41d4-a716-446655440000"
+  },
+  "error": null
 }
 ```
+
+성공 안내 문구는 프런트엔드에서 정하므로 공통 성공 메시지 필드를 두지 않습니다. 실패 원인 안내는 `error.message`로 제공합니다. 충전처럼 접수와 완료를 구분해야 하는 기능은 응답 DTO에 처리 상태를 담습니다.
+
+MVC 오류는 common의 처리기가 `ApiResponse.failure(errorResponse)`로 반환합니다.
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "USER_EMAIL_ALREADY_EXISTS",
+    "message": "이미 사용 중인 이메일입니다.",
+    "details": []
+  }
+}
+```
+
+`details`는 필드별 상세 안내 목록입니다. 각 항목은 `field`와 `message`를 담으며, 상세 안내가 없으면 빈 배열 `[]`을 반환합니다. 이전 `errors` 필드는 `details`로 변경했습니다.
+
+Gateway 자체 오류도 `ApiResponse.failure(errorResponse)`로 반환합니다. 서비스에서 받은 응답은 다시 감싸지 않고 전달합니다. `204`·`HEAD` 응답에는 JSON 본문을 넣지 않습니다.
 
 ## 공통 파일의 역할
 
@@ -17,7 +41,8 @@
 | ErrorCode | 오류 코드·안내 메시지·HTTP 상태의 공통 규격 |
 | CommonErrorCode | 입력 형식·인증·권한·HTTP 처리·서버 장애의 공통 오류 |
 | BusinessException | ErrorCode를 담아 전달하는 업무 예외 |
-| ErrorResponse | code·message·errors로 구성한 불변 응답 |
+| ApiResponse | success·data·error로 구성한 공통 응답 |
+| ErrorResponse | code·message·details로 구성한 오류 정보 |
 | AuthHeaders | User-Id·User-Role·Request-Id 헤더 이름 |
 
 `common`은 실행 애플리케이션이 아닌 단일 Java 라이브러리입니다. 오류 계약은 Spring 타입 없이 HTTP 상태를 `int`로 표현하고, MVC 오류 처리·자동 설정에 필요한 Spring API는 `compileOnly`로 선언합니다. 각 실행 앱이 필요한 starter를 직접 선택합니다.
@@ -44,14 +69,14 @@ public enum UserErrorCode implements ErrorCode {
 }
 ```
 
-업무 실패는 `throw new BusinessException(UserErrorCode.EMAIL_ALREADY_EXISTS);`처럼 전달합니다. 위 enum은 사용 예시이며 실제 회원 기능은 구현하지 않았습니다. 서비스 간에는 응답의 `code` 문자열을 계약으로 사용합니다.
+업무 실패는 `throw new BusinessException(UserErrorCode.EMAIL_ALREADY_EXISTS);`처럼 전달합니다. 위 enum은 사용 예시이며 실제 회원 기능은 구현하지 않았습니다. 새 응답 규격에서는 `error.code` 문자열을 계약으로 사용합니다.
 
 ## 처리 위치
 
 | 발생 위치 | 처리기 |
 |---|---|
 | 업무 서비스 5개·Mock Bank의 MVC 요청 | common의 error/GlobalExceptionHandler를 조건부 자동 등록 |
-| Gateway의 WebFlux 요청 | gateway의 error/GatewayErrorHandler에서 공통 ErrorResponse 사용 |
+| Gateway의 WebFlux 요청 | gateway의 error/GatewayErrorHandler에서 공통 ApiResponse 실패 응답 작성 |
 | 로그인·인가·CSRF 보안 필터 | 해당 보안 기능을 구현할 때 인증 실패 처리기에 연결 |
 
 MVC 처리기는 `ResponseEntityExceptionHandler`를 확장해 요청 검증·JSON 파싱·메소드·미디어 타입 오류의 상태를 유지합니다. 프레임워크의 `Allow` 같은 응답 헤더도 보존합니다. Gateway의 공통 오류 응답 어댑터와 대응 테스트는 오류 계약을 연결하는 범위로 포함합니다. Gateway의 회원 인증·세션 검증 호출 기능은 포함하지 않습니다.
@@ -81,14 +106,18 @@ spring:
 
 ```json
 {
-  "code": "COMMON_INVALID_REQUEST",
-  "message": "잘못된 요청입니다.",
-  "errors": [
-    {
-      "field": "email",
-      "message": "이메일 형식을 확인해 주세요."
-    }
-  ]
+  "success": false,
+  "data": null,
+  "error": {
+    "code": "COMMON_INVALID_REQUEST",
+    "message": "잘못된 요청입니다.",
+    "details": [
+      {
+        "field": "email",
+        "message": "이메일 형식을 확인해 주세요."
+      }
+    ]
+  }
 }
 ```
 
