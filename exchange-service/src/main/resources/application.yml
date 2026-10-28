@@ -10,6 +10,11 @@ spring:
     hibernate:
       ddl-auto: update
 
+travelpay:
+  auth:
+    header-context:
+      enabled: true
+
 server:
   port: 8084
 
