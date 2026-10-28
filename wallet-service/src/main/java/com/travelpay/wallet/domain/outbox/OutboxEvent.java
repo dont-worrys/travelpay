@@ -1,6 +1,7 @@
 package com.travelpay.wallet.domain.outbox;
 
 import jakarta.persistence.*;
+import lombok.Getter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -9,6 +10,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 /** 범용 Outbox. 업무 데이터와 같은 트랜잭션에서 저장하고, 발행기가 Kafka로 보낸다. */
+@Getter
 @Entity
 @Table(name = "outbox_events")
 public class OutboxEvent {

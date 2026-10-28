@@ -2,6 +2,7 @@ package com.travelpay.ledger.domain.transaction;
 
 import com.travelpay.ledger.domain.Currency;
 import jakarta.persistence.*;
+import lombok.Getter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -10,6 +11,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 /** 거래의 각 줄. INSERT만 한다. POSTED 거래에만 존재. */
+@Getter
 @Entity
 @Table(name = "ledger_entries")
 public class LedgerEntry{

@@ -3,6 +3,7 @@ package com.travelpay.ledger.domain.account;
 import com.travelpay.ledger.domain.Currency;
 import com.travelpay.ledger.domain.transaction.Direction;
 import jakarta.persistence.*;
+import lombok.Getter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -15,6 +16,7 @@ import java.util.UUID;
  * 잔액 변경은 거래 등록 트랜잭션 안에서 계정 ID 순 FOR UPDATE로 잠근 뒤에만 한다.
  * CREDIT은 잔액 증가, DEBIT은 잔액 감소.
  */
+@Getter
 @Entity
 @Table(name = "ledger_accounts")
 public class LedgerAccount {
