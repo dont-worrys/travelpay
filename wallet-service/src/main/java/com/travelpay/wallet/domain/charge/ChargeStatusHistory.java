@@ -49,12 +49,13 @@ public class ChargeStatusHistory {
 
     private ChargeStatusHistory(UUID chargeId, ChargeStatus fromStatus, ChargeStatus toStatus,
                                 String reasonCode, String reasonDetail, String traceId) {
-        if (fromStatus == null && toStatus != ChargeStatus.REQUESTED) {
-            throw new IllegalArgumentException("최초 접수가 아닌 이력은 이전 상태가 필요합니다: " + toStatus);
-        }
         this.chargeId = Objects.requireNonNull(chargeId, "chargeId");
         this.fromStatus = fromStatus;
         this.toStatus = Objects.requireNonNull(toStatus, "toStatus");
+        if ((fromStatus == null) != (toStatus == ChargeStatus.REQUESTED)) {
+            throw new IllegalArgumentException(
+                    "최초 접수(REQUESTED)만 이전 상태 없이 기록할 수 있습니다: " + fromStatus + " -> " + toStatus);
+        }
         this.reasonCode = reasonCode;
         this.reasonDetail = truncate(reasonDetail);
         this.traceId = traceId;
