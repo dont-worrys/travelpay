@@ -87,7 +87,7 @@ class CurrentUserArgumentResolverTest {
                         .header(AuthHeaders.USER_ID, OTHER_USER_ID)
                         .header(AuthHeaders.USER_ROLE, "MASTER"))
                 .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"));
+                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
     }
 
     @Test
@@ -98,7 +98,7 @@ class CurrentUserArgumentResolverTest {
 
         mvc.perform(get("/test/current-user"))
                 .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.code").value("COMMON_SERVICE_UNAVAILABLE"));
+                .andExpect(jsonPath("$.error.code").value("COMMON_SERVICE_UNAVAILABLE"));
     }
 
     @Test
@@ -107,7 +107,7 @@ class CurrentUserArgumentResolverTest {
 
         var result = mvc.perform(get("/test/invalid-current-user").param("user", "DO_NOT_ECHO_QUERY"))
                 .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.code").value("COMMON_INTERNAL_SERVER_ERROR"))
+                .andExpect(jsonPath("$.error.code").value("COMMON_INTERNAL_SERVER_ERROR"))
                 .andReturn();
 
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_ECHO"));

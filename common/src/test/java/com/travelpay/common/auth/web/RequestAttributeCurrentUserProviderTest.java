@@ -142,7 +142,7 @@ class RequestAttributeCurrentUserProviderTest {
                         .header(AuthHeaders.USER_ID, SECOND_USER.userId().toString())
                         .header(AuthHeaders.USER_ROLE, "MASTER"))
                 .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"));
+                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
     }
 
     @Test
@@ -153,7 +153,7 @@ class RequestAttributeCurrentUserProviderTest {
                         .requestAttr(RequestAttributeCurrentUserProvider.CURRENT_USER_ATTRIBUTE,
                                 "DO_NOT_ECHO_INVALID_ATTRIBUTE"))
                 .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.code").value("COMMON_INTERNAL_SERVER_ERROR"))
+                .andExpect(jsonPath("$.error.code").value("COMMON_INTERNAL_SERVER_ERROR"))
                 .andReturn();
 
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_ECHO"));

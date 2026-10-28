@@ -147,7 +147,7 @@ class CommonAuthWebAutoConfigurationTest {
                             .header(AuthHeaders.USER_ID, CUSTOM_USER.userId().toString())
                             .header(AuthHeaders.USER_ROLE, "MASTER"))
                     .andExpect(status().isUnauthorized())
-                    .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"));
+                    .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
         });
     }
 
@@ -197,7 +197,7 @@ class CommonAuthWebAutoConfigurationTest {
 
             mvc.perform(get("/test/current-user"))
                     .andExpect(status().isUnauthorized())
-                    .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"));
+                    .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
         });
     }
 
@@ -210,8 +210,8 @@ class CommonAuthWebAutoConfigurationTest {
             var result = mvc.perform(get("/test/public")
                             .header(AuthHeaders.USER_ID, "DO_NOT_ECHO_INVALID_HEADER"))
                     .andExpect(status().isUnauthorized())
-                    .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"))
-                    .andExpect(jsonPath("$.errors").isEmpty())
+                    .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"))
+                    .andExpect(jsonPath("$.error.details").isEmpty())
                     .andReturn();
 
             assertThat(result.getResponse().getContentAsString()).doesNotContain("DO_NOT_ECHO");
@@ -230,7 +230,7 @@ class CommonAuthWebAutoConfigurationTest {
                                     .header(AuthHeaders.USER_ID, STORED_USER.userId().toString())
                                     .header(AuthHeaders.USER_ROLE, "USER"))
                             .andExpect(status().isUnauthorized())
-                            .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"));
+                            .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
                 });
     }
 

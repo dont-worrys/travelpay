@@ -20,9 +20,11 @@ import tools.jackson.databind.json.JsonMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GatewayErrorHandlerTest {
 
@@ -37,8 +39,8 @@ class GatewayErrorHandlerTest {
 
         assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
         assertEquals(MediaType.APPLICATION_JSON, exchange.getResponse().getHeaders().getContentType());
-        assertEquals("COMMON_UNAUTHORIZED", body(exchange).get("code").stringValue());
-        assertEquals(0, body(exchange).get("errors").size());
+        assertEquals("COMMON_UNAUTHORIZED", errorBody(exchange).get("code").stringValue());
+        assertEquals(0, errorBody(exchange).get("details").size());
     }
 
     @Test
@@ -49,8 +51,8 @@ class GatewayErrorHandlerTest {
                 "DO_NOT_EXPOSE_INTERNAL_REASON")).block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
-        assertEquals("COMMON_SERVICE_UNAVAILABLE", body(exchange).get("code").stringValue());
-        assertFalse(body(exchange).toString().contains("DO_NOT_EXPOSE"));
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -62,7 +64,7 @@ class GatewayErrorHandlerTest {
 
         assertEquals(HttpStatus.METHOD_NOT_ALLOWED, exchange.getResponse().getStatusCode());
         assertEquals(Set.of(HttpMethod.POST), exchange.getResponse().getHeaders().getAllow());
-        assertEquals("COMMON_METHOD_NOT_ALLOWED", body(exchange).get("code").stringValue());
+        assertEquals("COMMON_METHOD_NOT_ALLOWED", errorBody(exchange).get("code").stringValue());
     }
 
     @Test
@@ -73,8 +75,8 @@ class GatewayErrorHandlerTest {
                 .block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, exchange.getResponse().getStatusCode());
-        assertEquals("COMMON_INTERNAL_SERVER_ERROR", body(exchange).get("code").stringValue());
-        assertFalse(body(exchange).toString().contains("DO_NOT_EXPOSE"));
+        assertEquals("COMMON_INTERNAL_SERVER_ERROR", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -85,8 +87,8 @@ class GatewayErrorHandlerTest {
                 .block(Duration.ofSeconds(2));
 
         assertEquals(418, exchange.getResponse().getStatusCode().value());
-        assertEquals("COMMON_HTTP_ERROR", body(exchange).get("code").stringValue());
-        assertFalse(body(exchange).toString().contains("DO_NOT_EXPOSE"));
+        assertEquals("COMMON_HTTP_ERROR", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -108,8 +110,8 @@ class GatewayErrorHandlerTest {
         handler.handle(exchange, new AnnotatedNotFoundException()).block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.NOT_FOUND, exchange.getResponse().getStatusCode());
-        assertEquals("COMMON_NOT_FOUND", body(exchange).get("code").stringValue());
-        assertFalse(body(exchange).toString().contains("DO_NOT_EXPOSE"));
+        assertEquals("COMMON_NOT_FOUND", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -121,8 +123,8 @@ class GatewayErrorHandlerTest {
         handler.handle(exchange, failure).block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
-        assertEquals("COMMON_SERVICE_UNAVAILABLE", body(exchange).get("code").stringValue());
-        assertFalse(body(exchange).toString().contains("DO_NOT_EXPOSE"));
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -135,7 +137,7 @@ class GatewayErrorHandlerTest {
 
         assertEquals(HttpStatus.METHOD_NOT_ALLOWED, exchange.getResponse().getStatusCode());
         assertEquals(Set.of(HttpMethod.POST), exchange.getResponse().getHeaders().getAllow());
-        assertEquals("COMMON_METHOD_NOT_ALLOWED", body(exchange).get("code").stringValue());
+        assertEquals("COMMON_METHOD_NOT_ALLOWED", errorBody(exchange).get("code").stringValue());
     }
 
     @Test
@@ -147,8 +149,8 @@ class GatewayErrorHandlerTest {
         handler.handle(exchange, failure).block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.UNAUTHORIZED, exchange.getResponse().getStatusCode());
-        assertEquals("COMMON_UNAUTHORIZED", body(exchange).get("code").stringValue());
-        assertFalse(body(exchange).toString().contains("DO_NOT_EXPOSE"));
+        assertEquals("COMMON_UNAUTHORIZED", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -159,8 +161,8 @@ class GatewayErrorHandlerTest {
         handler.handle(exchange, failure).block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.NOT_FOUND, exchange.getResponse().getStatusCode());
-        assertEquals("COMMON_NOT_FOUND", body(exchange).get("code").stringValue());
-        assertFalse(body(exchange).toString().contains("DO_NOT_EXPOSE"));
+        assertEquals("COMMON_NOT_FOUND", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
     }
 
     @Test
@@ -172,7 +174,18 @@ class GatewayErrorHandlerTest {
         handler.handle(exchange, failure).block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.NOT_FOUND, exchange.getResponse().getStatusCode());
-        assertEquals("COMMON_NOT_FOUND", body(exchange).get("code").stringValue());
+        assertEquals("COMMON_NOT_FOUND", errorBody(exchange).get("code").stringValue());
+    }
+
+    @Test
+    void headFailureKeepsItsStatusWithoutWritingAJsonBody() {
+        var exchange = MockServerWebExchange.from(MockServerHttpRequest.head("/test").build());
+
+        handler.handle(exchange, new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE))
+                .block(Duration.ofSeconds(2));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
+        assertEquals("", exchange.getResponse().getBodyAsString().defaultIfEmpty("").block(Duration.ofSeconds(2)));
     }
 
     @Test
@@ -196,7 +209,17 @@ class GatewayErrorHandlerTest {
         return MockServerWebExchange.from(MockServerHttpRequest.get("/test").build());
     }
 
-    private JsonNode body(MockServerWebExchange exchange) {
-        return mapper.readTree(exchange.getResponse().getBodyAsString().block(Duration.ofSeconds(2)));
+    private JsonNode errorBody(MockServerWebExchange exchange) {
+        var body = mapper.readTree(exchange.getResponse().getBodyAsString().block(Duration.ofSeconds(2)));
+        assertEquals(3, body.size());
+        assertNotNull(body.get("success"));
+        assertFalse(body.get("success").booleanValue());
+        assertNotNull(body.get("data"));
+        assertTrue(body.get("data").isNull());
+        assertNotNull(body.get("error"));
+        assertTrue(body.get("error").isObject());
+        assertNotNull(body.get("error").get("details"));
+        assertTrue(body.get("error").get("details").isArray());
+        return body.get("error");
     }
 }

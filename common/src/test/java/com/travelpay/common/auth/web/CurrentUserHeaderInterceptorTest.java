@@ -81,7 +81,7 @@ class CurrentUserHeaderInterceptorTest {
                         .param("userId", SECOND_USER_ID)
                         .param("role", "MASTER"))
                 .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"));
+                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
     }
 
     @ParameterizedTest
@@ -96,8 +96,8 @@ class CurrentUserHeaderInterceptorTest {
 
         var result = mvc.perform(request)
                 .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.code").value("COMMON_UNAUTHORIZED"))
-                .andExpect(jsonPath("$.errors").isEmpty())
+                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"))
+                .andExpect(jsonPath("$.error.details").isEmpty())
                 .andReturn();
 
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_ECHO"));
@@ -123,7 +123,7 @@ class CurrentUserHeaderInterceptorTest {
                         .header(AuthHeaders.USER_ID, FIRST_USER_ID)
                         .header(AuthHeaders.USER_ROLE, "USER"))
                 .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.code").value("COMMON_INTERNAL_SERVER_ERROR"))
+                .andExpect(jsonPath("$.error.code").value("COMMON_INTERNAL_SERVER_ERROR"))
                 .andReturn();
 
         assertFalse(result.getResponse().getContentAsString(UTF_8).contains("DO_NOT_ECHO"));
