@@ -137,16 +137,34 @@ class ExchangeRateCollectorTest {
     @Test
     void startupWalksBackToMostRecentPublishedDateWhenNothingIsStored() {
         // 일요일·토요일은 비어 있고 금요일 고시분이 있는 상황
-        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        when(store.latestRateDate(RateSource.KOREAEXIM))
+                .thenReturn(Optional.empty(), Optional.of(TODAY.minusDays(2)));
         when(provider.fetch(TODAY)).thenReturn(List.of());
         when(provider.fetch(TODAY.minusDays(1))).thenReturn(List.of());
-        List<CollectedRate> friday = List.of(rate(TODAY.minusDays(2)));
+        List<CollectedRate> friday = List.of(rate(TODAY.minusDays(2)), cny(TODAY.minusDays(2)));
         when(provider.fetch(TODAY.minusDays(2))).thenReturn(friday);
 
         collector.collectLatestIfEmpty();
 
         verify(store).saveNew(friday, NOW);
         verify(provider, never()).fetch(TODAY.minusDays(3));
+    }
+
+    @Test
+    void startupKeepsWalkingBackUntilEveryCurrencyIsStored() {
+        // 오늘 고시분에 JPY만 있어, 어제 고시분에서 CNY를 채우는 상황
+        when(store.latestRateDate(RateSource.KOREAEXIM))
+                .thenReturn(Optional.empty(), Optional.empty(), Optional.of(TODAY.minusDays(1)));
+        List<CollectedRate> jpyOnly = List.of(rate(TODAY));
+        List<CollectedRate> yesterday = List.of(rate(TODAY.minusDays(1)), cny(TODAY.minusDays(1)));
+        when(provider.fetch(TODAY)).thenReturn(jpyOnly);
+        when(provider.fetch(TODAY.minusDays(1))).thenReturn(yesterday);
+
+        collector.collectLatestIfEmpty();
+
+        verify(store).saveNew(jpyOnly, NOW);
+        verify(store).saveNew(yesterday, NOW);
+        verify(provider, never()).fetch(TODAY.minusDays(2));
     }
 
     @Test
@@ -183,6 +201,12 @@ class ExchangeRateCollectorTest {
     private static CollectedRate rate(LocalDate date) {
         return new CollectedRate(ForeignCurrency.JPY, 100,
                 new BigDecimal("838.3"), new BigDecimal("846.68"), new BigDecimal("829.91"),
+                date, RateSource.KOREAEXIM);
+    }
+
+    private static CollectedRate cny(LocalDate date) {
+        return new CollectedRate(ForeignCurrency.CNY, 1,
+                new BigDecimal("198.69"), new BigDecimal("200.67"), new BigDecimal("196.7"),
                 date, RateSource.KOREAEXIM);
     }
 }

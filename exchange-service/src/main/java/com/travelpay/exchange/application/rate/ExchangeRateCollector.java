@@ -45,8 +45,9 @@ public class ExchangeRateCollector {
     }
 
     /**
-     * 저장된 환율이 하나도 없으면 오늘부터 거슬러 올라가며 가장 최근 고시분을 한 번 저장합니다.
+     * 저장된 환율이 하나도 없으면 오늘부터 거슬러 올라가며 가장 최근 고시분을 저장합니다.
      * 서버를 처음 띄웠을 때 고시 전이거나 휴일이어도 조회할 환율이 있게 합니다.
+     * 한 고시분에 일부 통화만 있었다면 모든 통화가 채워질 때까지 더 거슬러 올라갑니다.
      */
     public void collectLatestIfEmpty() {
         if (store.latestRateDate(provider.source()).isPresent()) {
@@ -61,7 +62,9 @@ public class ExchangeRateCollector {
             }
             if (!rates.get().isEmpty()) {
                 save(date, rates.get());
-                return;
+                if (store.latestRateDate(provider.source()).isPresent()) {
+                    return;
+                }
             }
         }
         log.warn("최근 {}일 동안 고시된 환율을 찾지 못했습니다. source={}", INITIAL_LOOKBACK_DAYS, provider.source());
