@@ -30,4 +30,9 @@ public class KoreaEximCollectionPolicy implements RateCollectionPolicy {
         Objects.requireNonNull(today, "today");
         return latestRateDate.map(latest -> latest.isBefore(today)).orElse(true);
     }
+
+    @Override
+    public boolean publishesOncePerDay() {
+        return true;
+    }
 }

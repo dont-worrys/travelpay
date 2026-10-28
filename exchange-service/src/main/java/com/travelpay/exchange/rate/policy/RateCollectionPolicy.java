@@ -18,4 +18,10 @@ public interface RateCollectionPolicy {
      * @param latestRateDate 이미 저장된 최신 고시일 (저장된 환율이 없으면 empty)
      */
     boolean shouldCollect(LocalDate today, Optional<LocalDate> latestRateDate);
+
+    /**
+     * 출처가 하루에 한 번만 고시하는지입니다.
+     * true이면 같은 출처·통화·고시일의 환율은 한 건만 저장합니다.
+     */
+    boolean publishesOncePerDay();
 }

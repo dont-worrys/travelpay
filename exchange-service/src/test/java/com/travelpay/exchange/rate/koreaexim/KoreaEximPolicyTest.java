@@ -28,6 +28,7 @@ class KoreaEximPolicyTest {
         assertTrue(collectionPolicy.shouldCollect(TODAY, Optional.empty()));
         assertTrue(collectionPolicy.shouldCollect(TODAY, Optional.of(TODAY.minusDays(1))));
         assertFalse(collectionPolicy.shouldCollect(TODAY, Optional.of(TODAY)));
+        assertTrue(collectionPolicy.publishesOncePerDay());
     }
 
     @Test
