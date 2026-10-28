@@ -2,6 +2,7 @@ package com.travelpay.exchange.presentation.rate;
 
 import com.travelpay.exchange.application.rate.ExchangeRateCollector;
 import com.travelpay.exchange.application.rate.RateCollectionPolicy;
+import lombok.RequiredArgsConstructor;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Configuration;
@@ -17,15 +18,11 @@ import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 @Configuration(proxyBeanMethods = false)
 @EnableScheduling
 @ConditionalOnProperty(prefix = "exchange.rate.collection", name = "enabled", havingValue = "true", matchIfMissing = true)
+@RequiredArgsConstructor
 public class ExchangeRateCollectionScheduler implements SchedulingConfigurer {
 
     private final ExchangeRateCollector collector;
     private final RateCollectionPolicy policy;
-
-    public ExchangeRateCollectionScheduler(ExchangeRateCollector collector, RateCollectionPolicy policy) {
-        this.collector = collector;
-        this.policy = policy;
-    }
 
     @Override
     public void configureTasks(ScheduledTaskRegistrar registrar) {

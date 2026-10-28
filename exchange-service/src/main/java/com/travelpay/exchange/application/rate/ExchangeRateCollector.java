@@ -9,8 +9,8 @@ import com.travelpay.exchange.domain.rate.CollectedRate;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateFetchException;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Component;
 
@@ -18,30 +18,18 @@ import org.springframework.stereotype.Component;
  * 외부 환율을 가져와 저장합니다. 모드별 차이는 Provider와 정책이 결정하며, 이 클래스는 모드를 알지 못합니다.
  * 외부 호출 실패는 다음 주기에 다시 시도하도록 로그만 남깁니다.
  */
+@Slf4j
 @Component
+@RequiredArgsConstructor
 public class ExchangeRateCollector {
 
     /** 저장된 환율이 없을 때 최근 고시일을 찾아 거슬러 올라가는 최대 일수입니다. (긴 연휴 포함) */
     static final int INITIAL_LOOKBACK_DAYS = 10;
 
-    private static final Logger log = LoggerFactory.getLogger(ExchangeRateCollector.class);
-
     private final ExchangeRateProvider provider;
     private final RateCollectionPolicy policy;
     private final ExchangeRateStore store;
     private final Clock clock;
-
-    public ExchangeRateCollector(
-            ExchangeRateProvider provider,
-            RateCollectionPolicy policy,
-            ExchangeRateStore store,
-            Clock clock
-    ) {
-        this.provider = provider;
-        this.policy = policy;
-        this.store = store;
-        this.clock = clock;
-    }
 
     /** 스케줄러가 깨어날 때마다 호출됩니다. 정책이 허용할 때만 오늘 환율을 가져옵니다. */
     public void collectIfNeeded() {

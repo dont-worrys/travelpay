@@ -14,6 +14,9 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -24,6 +27,8 @@ import org.hibernate.type.SqlTypes;
  */
 @Entity
 @Table(name = "exchange_rates")
+@Getter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class ExchangeRate {
 
     private static final String PRICE_CURRENCY = "KRW";
@@ -64,9 +69,6 @@ public class ExchangeRate {
     @Column(name = "collected_at", nullable = false)
     private Instant collectedAt;
 
-    protected ExchangeRate() {
-    }
-
     private ExchangeRate(CollectedRate rate, Instant collectedAt) {
         this.currency = rate.currency();
         this.priceCurrency = PRICE_CURRENCY;
@@ -81,45 +83,5 @@ public class ExchangeRate {
 
     public static ExchangeRate collected(CollectedRate rate, Instant collectedAt) {
         return new ExchangeRate(Objects.requireNonNull(rate, "rate"), collectedAt);
-    }
-
-    public UUID getId() {
-        return id;
-    }
-
-    public ForeignCurrency getCurrency() {
-        return currency;
-    }
-
-    public String getPriceCurrency() {
-        return priceCurrency;
-    }
-
-    public int getUnit() {
-        return unit;
-    }
-
-    public BigDecimal getMidRate() {
-        return midRate;
-    }
-
-    public BigDecimal getBuyRate() {
-        return buyRate;
-    }
-
-    public BigDecimal getSellRate() {
-        return sellRate;
-    }
-
-    public RateSource getSource() {
-        return source;
-    }
-
-    public LocalDate getRateDate() {
-        return rateDate;
-    }
-
-    public Instant getCollectedAt() {
-        return collectedAt;
     }
 }

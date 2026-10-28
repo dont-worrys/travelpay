@@ -11,20 +11,17 @@ import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /** 수집한 환율을 저장하고, 수집 판단에 필요한 최신 고시일을 조회합니다. */
 @Component
+@RequiredArgsConstructor
 public class ExchangeRateStore {
 
     private final ExchangeRateRepository repository;
     private final RateCollectionPolicy policy;
-
-    public ExchangeRateStore(ExchangeRateRepository repository, RateCollectionPolicy policy) {
-        this.repository = repository;
-        this.policy = policy;
-    }
 
     /**
      * 아직 저장되지 않은 환율만 저장합니다.
