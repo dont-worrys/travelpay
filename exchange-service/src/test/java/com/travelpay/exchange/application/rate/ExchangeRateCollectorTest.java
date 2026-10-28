@@ -100,13 +100,28 @@ class ExchangeRateCollectorTest {
     }
 
     @Test
-    void treatsUniqueViolationFromConcurrentCollectionAsAlreadySaved() {
+    void retriesOnceInNewTransactionAfterConcurrentDuplicate() {
+        // 다른 인스턴스가 JPY만 저장해, 이번 트랜잭션이 롤백되며 CNY까지 빠진 상황
+        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        List<CollectedRate> rates = List.of(rate(TODAY));
+        when(provider.fetch(TODAY)).thenReturn(rates);
+        when(store.saveNew(rates, NOW))
+                .thenThrow(new DuplicateExchangeRateException("already saved"))
+                .thenReturn(List.of());
+
+        assertDoesNotThrow(collector::collectIfNeeded);
+        verify(store, times(2)).saveNew(rates, NOW);
+    }
+
+    @Test
+    void treatsRepeatedDuplicateAsAlreadySaved() {
         when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
         List<CollectedRate> rates = List.of(rate(TODAY));
         when(provider.fetch(TODAY)).thenReturn(rates);
         when(store.saveNew(rates, NOW)).thenThrow(new DuplicateExchangeRateException("already saved"));
 
         assertDoesNotThrow(collector::collectIfNeeded);
+        verify(store, times(2)).saveNew(rates, NOW);
     }
 
     @Test
