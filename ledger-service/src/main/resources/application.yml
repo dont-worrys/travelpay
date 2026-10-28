@@ -5,10 +5,14 @@ spring:
     url: ${LEDGER_DB_URL}
     username: ${LEDGER_DB_USERNAME}
     password: ${LEDGER_DB_PASSWORD}
+  flyway:
+    default-schema: ledger_service
+    schemas: ledger_service
+    locations: classpath:db/migration
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
 
 travelpay:
   auth:

@@ -5,10 +5,12 @@ spring:
     url: ${WALLET_DB_URL}
     username: ${WALLET_DB_USERNAME}
     password: ${WALLET_DB_PASSWORD}
+  flyway:
+    default-schema: wallet_service
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
 
 travelpay:
   auth:
