@@ -36,7 +36,7 @@ class ExchangeRateQueryServiceTest {
         when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
         when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.of(cny));
 
-        assertEquals(List.of(jpy, cny), service.findLatest(Optional.empty()));
+        assertEquals(List.of(jpy, cny), service.findLatest(List.of(ForeignCurrency.values())));
     }
 
     @Test
@@ -45,7 +45,7 @@ class ExchangeRateQueryServiceTest {
         ExchangeRate cny = rate(ForeignCurrency.CNY);
         when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.of(cny));
 
-        assertEquals(List.of(cny), service.findLatest(Optional.of(ForeignCurrency.CNY)));
+        assertEquals(List.of(cny), service.findLatest(List.of(ForeignCurrency.CNY)));
         verify(repository, never()).findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY);
     }
 
@@ -56,7 +56,7 @@ class ExchangeRateQueryServiceTest {
         when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
         when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.empty());
 
-        assertEquals(List.of(jpy), service.findLatest(Optional.empty()));
+        assertEquals(List.of(jpy), service.findLatest(List.of(ForeignCurrency.values())));
     }
 
     @Test
@@ -64,7 +64,7 @@ class ExchangeRateQueryServiceTest {
         ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
         when(repository.findLatest(any(), any())).thenReturn(Optional.empty());
 
-        service.findLatest(Optional.empty());
+        service.findLatest(List.of(ForeignCurrency.values()));
 
         verify(repository).findLatest(RateSource.MOCK, ForeignCurrency.JPY);
         verify(repository, never()).findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY);

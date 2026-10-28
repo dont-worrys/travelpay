@@ -1,7 +1,6 @@
 package com.travelpay.exchange.application.rate;
 
 import java.time.LocalDate;
-import java.util.Optional;
 
 import org.springframework.scheduling.Trigger;
 
@@ -13,11 +12,12 @@ public interface RateCollectionPolicy {
 
     /**
      * 스케줄러가 깨어났을 때 실제로 외부 데이터를 가져올지 판단합니다.
+     * 저장된 환율이 하나도 없으면 호출되지 않고 항상 수집합니다.
      *
      * @param today          수집 기준 날짜
-     * @param latestRateDate 이미 저장된 최신 고시일 (저장된 환율이 없으면 empty)
+     * @param latestRateDate 이미 저장된 최신 고시일
      */
-    boolean shouldCollect(LocalDate today, Optional<LocalDate> latestRateDate);
+    boolean shouldCollect(LocalDate today, LocalDate latestRateDate);
 
     /**
      * 출처가 하루에 한 번만 고시하는지입니다.

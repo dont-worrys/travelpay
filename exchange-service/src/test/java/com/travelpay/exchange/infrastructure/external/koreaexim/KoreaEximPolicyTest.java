@@ -5,7 +5,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
-import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.support.SimpleTriggerContext;
@@ -25,9 +24,8 @@ class KoreaEximPolicyTest {
 
     @Test
     void collectsUntilTodaysRateIsStored() {
-        assertTrue(collectionPolicy.shouldCollect(TODAY, Optional.empty()));
-        assertTrue(collectionPolicy.shouldCollect(TODAY, Optional.of(TODAY.minusDays(1))));
-        assertFalse(collectionPolicy.shouldCollect(TODAY, Optional.of(TODAY)));
+        assertTrue(collectionPolicy.shouldCollect(TODAY, TODAY.minusDays(1)));
+        assertFalse(collectionPolicy.shouldCollect(TODAY, TODAY));
         assertTrue(collectionPolicy.publishesOncePerDay());
     }
 

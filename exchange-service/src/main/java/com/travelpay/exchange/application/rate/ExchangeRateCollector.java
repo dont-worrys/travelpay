@@ -31,10 +31,14 @@ public class ExchangeRateCollector {
     private final ExchangeRateStore store;
     private final Clock clock;
 
-    /** 스케줄러가 깨어날 때마다 호출됩니다. 정책이 허용할 때만 오늘 환율을 가져옵니다. */
+    /**
+     * 스케줄러가 깨어날 때마다 호출됩니다. 오늘 환율을 가져올지 판단합니다.
+     * 저장된 환율이 없으면 모드와 관계없이 수집하고, 있으면 정책이 판단합니다.
+     */
     public void collectIfNeeded() {
         LocalDate today = LocalDate.now(clock);
-        if (!policy.shouldCollect(today, store.latestRateDate(provider.source()))) {
+        Optional<LocalDate> latestRateDate = store.latestRateDate(provider.source());
+        if (latestRateDate.isPresent() && !policy.shouldCollect(today, latestRateDate.get())) {
             return;
         }
         fetch(today).ifPresent(rates -> save(today, rates));
@@ -73,6 +77,10 @@ public class ExchangeRateCollector {
         }
     }
 
+    /**
+     * 가져온 환율을 저장합니다. 고시 전·휴일이라 비어 있으면 저장하지 않습니다.
+     * 다른 인스턴스가 먼저 저장해 유니크 인덱스에 막히면 이미 저장된 것으로 보고 넘어갑니다.
+     */
     private void save(LocalDate date, List<CollectedRate> rates) {
         if (rates.isEmpty()) {
             log.info("고시된 환율이 아직 없습니다: source={}, date={}", provider.source(), date);

@@ -46,7 +46,7 @@ class ExchangeRateCollectorTest {
     @Test
     void savesFetchedRatesWhenPolicyAllows() {
         when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.of(TODAY.minusDays(1)));
-        when(policy.shouldCollect(TODAY, Optional.of(TODAY.minusDays(1)))).thenReturn(true);
+        when(policy.shouldCollect(TODAY, TODAY.minusDays(1))).thenReturn(true);
         List<CollectedRate> rates = List.of(rate(TODAY));
         when(provider.fetch(TODAY)).thenReturn(rates);
 
@@ -58,7 +58,7 @@ class ExchangeRateCollectorTest {
     @Test
     void skipsFetchingWhenPolicyRefuses() {
         when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.of(TODAY));
-        when(policy.shouldCollect(TODAY, Optional.of(TODAY))).thenReturn(false);
+        when(policy.shouldCollect(TODAY, TODAY)).thenReturn(false);
 
         collector.collectIfNeeded();
 
@@ -67,9 +67,20 @@ class ExchangeRateCollectorTest {
     }
 
     @Test
+    void collectsWithoutAskingPolicyWhenNothingIsStored() {
+        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        List<CollectedRate> rates = List.of(rate(TODAY));
+        when(provider.fetch(TODAY)).thenReturn(rates);
+
+        collector.collectIfNeeded();
+
+        verify(policy, never()).shouldCollect(any(), any());
+        verify(store).saveNew(rates, NOW);
+    }
+
+    @Test
     void doesNotSaveWhenRatesAreNotPublishedYet() {
         when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
-        when(policy.shouldCollect(TODAY, Optional.empty())).thenReturn(true);
         when(provider.fetch(TODAY)).thenReturn(List.of());
 
         collector.collectIfNeeded();
@@ -80,7 +91,6 @@ class ExchangeRateCollectorTest {
     @Test
     void swallowsFetchFailureSoNextTriggerCanRetry() {
         when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
-        when(policy.shouldCollect(TODAY, Optional.empty())).thenReturn(true);
         when(provider.fetch(TODAY)).thenThrow(new ExchangeRateFetchException("down"));
 
         assertDoesNotThrow(collector::collectIfNeeded);
@@ -90,7 +100,6 @@ class ExchangeRateCollectorTest {
     @Test
     void treatsUniqueViolationFromConcurrentCollectionAsAlreadySaved() {
         when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
-        when(policy.shouldCollect(TODAY, Optional.empty())).thenReturn(true);
         List<CollectedRate> rates = List.of(rate(TODAY));
         when(provider.fetch(TODAY)).thenReturn(rates);
         when(store.saveNew(rates, NOW)).thenThrow(new DataIntegrityViolationException("uk_exchange_rates_koreaexim_daily"));

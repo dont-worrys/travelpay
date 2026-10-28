@@ -4,7 +4,6 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
-import java.util.Optional;
 
 import com.travelpay.common.error.GlobalExceptionHandler;
 import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
@@ -36,7 +35,7 @@ class ExchangeRateControllerTest {
 
     @Test
     void returnsLatestRatesOfAllCurrencies() throws Exception {
-        when(queryService.findLatest(Optional.empty())).thenReturn(List.of(jpy(), cny()));
+        when(queryService.findLatest(List.of(ForeignCurrency.JPY, ForeignCurrency.CNY))).thenReturn(List.of(jpy(), cny()));
 
         mockMvc.perform(get("/api/v1/exchange-rates"))
                 .andExpect(status().isOk())
@@ -58,7 +57,7 @@ class ExchangeRateControllerTest {
 
     @Test
     void returnsListEvenWhenFilteredToOneCurrency() throws Exception {
-        when(queryService.findLatest(Optional.of(ForeignCurrency.JPY))).thenReturn(List.of(jpy()));
+        when(queryService.findLatest(List.of(ForeignCurrency.JPY))).thenReturn(List.of(jpy()));
 
         mockMvc.perform(get("/api/v1/exchange-rates").param("currency", "JPY"))
                 .andExpect(status().isOk())
@@ -69,13 +68,13 @@ class ExchangeRateControllerTest {
 
     @Test
     void acceptsLowercaseCurrencyCode() throws Exception {
-        when(queryService.findLatest(Optional.of(ForeignCurrency.CNY))).thenReturn(List.of(cny()));
+        when(queryService.findLatest(List.of(ForeignCurrency.CNY))).thenReturn(List.of(cny()));
 
         mockMvc.perform(get("/api/v1/exchange-rates").param("currency", "cny"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[0].currency").value("CNY"));
 
-        verify(queryService).findLatest(Optional.of(ForeignCurrency.CNY));
+        verify(queryService).findLatest(List.of(ForeignCurrency.CNY));
     }
 
     @Test
@@ -92,12 +91,21 @@ class ExchangeRateControllerTest {
 
     @Test
     void returnsEmptyListWhenNothingIsCollectedYet() throws Exception {
-        when(queryService.findLatest(Optional.empty())).thenReturn(List.of());
+        when(queryService.findLatest(List.of(ForeignCurrency.JPY, ForeignCurrency.CNY))).thenReturn(List.of());
 
         mockMvc.perform(get("/api/v1/exchange-rates"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data").isArray())
                 .andExpect(jsonPath("$.data.length()").value(0));
+    }
+
+    @Test
+    void rejectsBlankCurrencyInsteadOfReturningAllCurrencies() throws Exception {
+        mockMvc.perform(get("/api/v1/exchange-rates").param("currency", ""))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("EXCHANGE_UNSUPPORTED_CURRENCY"));
+
+        verifyNoInteractions(queryService);
     }
 
     private static ExchangeRate jpy() {

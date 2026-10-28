@@ -3,7 +3,6 @@ package com.travelpay.exchange.infrastructure.external.koreaexim;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Objects;
-import java.util.Optional;
 
 import com.travelpay.exchange.application.rate.RateCollectionPolicy;
 import org.springframework.scheduling.Trigger;
@@ -25,10 +24,11 @@ public class KoreaEximCollectionPolicy implements RateCollectionPolicy {
         return trigger;
     }
 
+    /** 오늘 고시분이 아직 저장되지 않았으면 수집합니다. */
     @Override
-    public boolean shouldCollect(LocalDate today, Optional<LocalDate> latestRateDate) {
+    public boolean shouldCollect(LocalDate today, LocalDate latestRateDate) {
         Objects.requireNonNull(today, "today");
-        return latestRateDate.map(latest -> latest.isBefore(today)).orElse(true);
+        return Objects.requireNonNull(latestRateDate, "latestRateDate").isBefore(today);
     }
 
     @Override
