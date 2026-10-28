@@ -3,11 +3,14 @@ package com.travelpay.exchange.infrastructure.persistence.rate;
 import java.time.LocalDate;
 import java.util.Optional;
 
+import com.travelpay.exchange.domain.rate.DuplicateExchangeRateException;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
 import lombok.RequiredArgsConstructor;
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Repository;
 
 /** 도메인 환율 저장소를 Spring Data JPA로 구현합니다. */
@@ -15,11 +18,26 @@ import org.springframework.stereotype.Repository;
 @RequiredArgsConstructor
 class ExchangeRateRepositoryAdapter implements ExchangeRateRepository {
 
+    /** V1__create_exchange_rates.sql의 하루 1건 유니크 인덱스입니다. */
+    static final String DAILY_UNIQUE_INDEX = "uk_exchange_rates_koreaexim_daily";
+
     private final ExchangeRateJpaRepository jpaRepository;
 
+    /**
+     * 유니크 위반을 이 자리에서 구분하도록 커밋까지 미루지 않고 바로 INSERT합니다.
+     * 하루 1건 유니크 인덱스 위반만 도메인 예외로 바꾸고, CHECK·자릿수 초과 같은 다른 위반은 그대로 던집니다.
+     */
     @Override
     public ExchangeRate save(ExchangeRate exchangeRate) {
-        return jpaRepository.save(exchangeRate);
+        try {
+            return jpaRepository.saveAndFlush(exchangeRate);
+        } catch (DataIntegrityViolationException e) {
+            if (violates(e, DAILY_UNIQUE_INDEX)) {
+                throw new DuplicateExchangeRateException("이미 저장된 고시분입니다: source=" + exchangeRate.getSource()
+                        + ", currency=" + exchangeRate.getCurrency() + ", rateDate=" + exchangeRate.getRateDate());
+            }
+            throw e;
+        }
     }
 
     @Override
@@ -30,5 +48,15 @@ class ExchangeRateRepositoryAdapter implements ExchangeRateRepository {
     @Override
     public boolean existsByRateDate(RateSource source, ForeignCurrency currency, LocalDate rateDate) {
         return jpaRepository.existsBySourceAndCurrencyAndRateDate(source, currency, rateDate);
+    }
+
+    /** 예외 원인 중 Hibernate가 해석한 제약 이름이 주어진 이름과 같은지 확인합니다. */
+    private static boolean violates(Throwable e, String constraintName) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ConstraintViolationException violation) {
+                return constraintName.equalsIgnoreCase(violation.getConstraintName());
+            }
+        }
+        return false;
     }
 }

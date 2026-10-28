@@ -6,12 +6,12 @@ import java.util.List;
 import java.util.Optional;
 
 import com.travelpay.exchange.domain.rate.CollectedRate;
+import com.travelpay.exchange.domain.rate.DuplicateExchangeRateException;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateFetchException;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Component;
 
 /**
@@ -79,7 +79,8 @@ public class ExchangeRateCollector {
 
     /**
      * 가져온 환율을 저장합니다. 고시 전·휴일이라 비어 있으면 저장하지 않습니다.
-     * 다른 인스턴스가 먼저 저장해 유니크 인덱스에 막히면 이미 저장된 것으로 보고 넘어갑니다.
+     * 다른 인스턴스가 먼저 저장해 하루 1건 유니크 인덱스에 막히면 이미 저장된 것으로 보고 넘어갑니다.
+     * 그 밖의 저장 실패는 숨기지 않고 던집니다. (스케줄러가 오류 로그를 남기고 다음 주기에 재시도)
      */
     private void save(LocalDate date, List<CollectedRate> rates) {
         if (rates.isEmpty()) {
@@ -90,8 +91,8 @@ public class ExchangeRateCollector {
             List<ExchangeRate> saved = store.saveNew(rates, clock.instant());
             log.info("환율 저장: source={}, date={}, fetched={}, saved={}",
                     provider.source(), date, rates.size(), saved.size());
-        } catch (DataIntegrityViolationException e) {
-            // 다른 인스턴스가 같은 고시분을 먼저 저장하면 유니크 인덱스에 막힙니다. 이미 저장된 상태이므로 정상 흐름입니다.
+        } catch (DuplicateExchangeRateException e) {
+            // 다른 인스턴스가 같은 고시분을 먼저 저장했습니다. 이미 저장된 상태이므로 정상 흐름입니다.
             log.info("다른 수집이 먼저 저장해 건너뜁니다: source={}, date={}", provider.source(), date);
         }
     }

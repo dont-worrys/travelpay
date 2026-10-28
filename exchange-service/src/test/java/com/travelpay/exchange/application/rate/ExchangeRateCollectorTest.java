@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Optional;
 
 import com.travelpay.exchange.domain.rate.CollectedRate;
+import com.travelpay.exchange.domain.rate.DuplicateExchangeRateException;
 import com.travelpay.exchange.domain.rate.ExchangeRateFetchException;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
@@ -102,9 +104,19 @@ class ExchangeRateCollectorTest {
         when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
         List<CollectedRate> rates = List.of(rate(TODAY));
         when(provider.fetch(TODAY)).thenReturn(rates);
-        when(store.saveNew(rates, NOW)).thenThrow(new DataIntegrityViolationException("uk_exchange_rates_koreaexim_daily"));
+        when(store.saveNew(rates, NOW)).thenThrow(new DuplicateExchangeRateException("already saved"));
 
         assertDoesNotThrow(collector::collectIfNeeded);
+    }
+
+    @Test
+    void doesNotHideOtherIntegrityViolationsAsConcurrentCollection() {
+        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        List<CollectedRate> rates = List.of(rate(TODAY));
+        when(provider.fetch(TODAY)).thenReturn(rates);
+        when(store.saveNew(rates, NOW)).thenThrow(new DataIntegrityViolationException("numeric field overflow"));
+
+        assertThrows(DataIntegrityViolationException.class, collector::collectIfNeeded);
     }
 
     @Test
