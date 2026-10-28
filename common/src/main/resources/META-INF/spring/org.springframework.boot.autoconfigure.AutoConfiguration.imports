@@ -1,0 +1,2 @@
+com.travelpay.common.config.CommonWebAutoConfiguration
+com.travelpay.common.config.CommonAuthWebAutoConfiguration
