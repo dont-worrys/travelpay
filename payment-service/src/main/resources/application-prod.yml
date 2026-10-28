@@ -9,6 +9,15 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  flyway:
+    default-schema: payment_service
+  cloud:
+    openfeign:
+      client:
+        config:
+          wallet-service:
+            connect-timeout: 2000
+            read-timeout: 3000
 
 travelpay:
   auth:
