@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
@@ -101,6 +102,18 @@ class KoreaEximRateProviderTest {
 
         assertTrue(exception.getMessage().contains("result=" + result));
         assertTrue(exception.getMessage().contains(description));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"JPY", "JPY(1)", "CNH(100)"})
+    void rejectsUnitThatDiffersFromQuoteUnit(String curUnit) {
+        // 단위만 바뀌고 값은 그대로면 환율이 100배 틀어지므로 저장하지 않습니다.
+        respondWith("[{\"result\":1,\"cur_unit\":\"" + curUnit
+                + "\",\"ttb\":\"896.07\",\"tts\":\"914.18\",\"deal_bas_r\":\"905.12\"}]");
+
+        ExchangeRateFetchException exception =
+                assertThrows(ExchangeRateFetchException.class, () -> provider.fetch(DATE));
+        assertTrue(exception.getMessage().contains(curUnit));
     }
 
     @Test

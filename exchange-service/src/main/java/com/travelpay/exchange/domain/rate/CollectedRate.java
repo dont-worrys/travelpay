@@ -21,13 +21,17 @@ public record CollectedRate(
         RateSource source
 ) {
 
-    /** 필수 값이 비어 있거나 단위·환율이 양수가 아니면 만들 수 없습니다. */
+    /**
+     * 필수 값이 비어 있거나, 단위가 통화의 표시 단위와 다르거나, 환율이 양수가 아니면 만들 수 없습니다.
+     * 단위가 다르면 환율 해석이 몇 배씩 틀어지므로 저장하지 않습니다.
+     */
     public CollectedRate {
         Objects.requireNonNull(currency, "currency");
         Objects.requireNonNull(rateDate, "rateDate");
         Objects.requireNonNull(source, "source");
-        if (unit <= 0) {
-            throw new IllegalArgumentException("unit must be positive");
+        if (unit != currency.quoteUnit()) {
+            throw new IllegalArgumentException(
+                    "unit must be " + currency.quoteUnit() + " for " + currency + " but was " + unit);
         }
         requirePositive(midRate, "midRate");
         requirePositive(buyRate, "buyRate");
