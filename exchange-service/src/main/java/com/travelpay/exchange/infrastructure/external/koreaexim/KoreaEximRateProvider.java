@@ -63,6 +63,7 @@ public class KoreaEximRateProvider implements ExchangeRateProvider {
         return parse(request(date), date);
     }
 
+    /** 지정한 고시일의 환율 응답 본문을 받아옵니다. 호출 실패 메시지에서는 인증키를 가립니다. */
     private String request(LocalDate date) {
         try {
             // 응답 Content-Type을 신뢰하지 않고 본문을 직접 해석합니다.
@@ -76,10 +77,14 @@ public class KoreaEximRateProvider implements ExchangeRateProvider {
                     .body(String.class);
         } catch (RestClientException e) {
             // 예외 메시지에 요청 URL(인증키 포함)이 들어가므로 키를 가리고, 원인 예외도 연결하지 않습니다.
-            throw new ExchangeRateFetchException("수출입은행 환율 API 호출 실패: " + mask(e.getMessage()));
+            throw callFailed(mask(e.getMessage()));
         }
     }
 
+    /**
+     * 응답 본문을 지원 통화의 환율 목록으로 바꿉니다. 지원하지 않는 통화는 건너뜁니다.
+     * 본문이 비어 있으면 고시 전·휴일로 보고 빈 목록을, result 코드가 오류면 예외를 던집니다.
+     */
     private List<CollectedRate> parse(String body, LocalDate date) {
         if (body == null || body.isBlank()) {
             return List.of();
@@ -89,20 +94,23 @@ public class KoreaEximRateProvider implements ExchangeRateProvider {
         try {
             responses = JSON.readValue(body, RESPONSE_TYPE);
         } catch (JacksonException e) {
-            throw new ExchangeRateFetchException("수출입은행 환율 응답 해석 실패: " + e.getOriginalMessage());
+            throw unreadableResponse(e.getOriginalMessage());
         }
 
         List<CollectedRate> rates = new ArrayList<>();
         for (KoreaEximRateResponse response : responses) {
             if (response.result() != null && response.result() != RESULT_SUCCESS) {
-                throw new ExchangeRateFetchException("수출입은행 환율 API 오류: result=" + response.result()
-                        + " (" + RESULT_ERRORS.getOrDefault(response.result(), "알 수 없는 오류") + ")");
+                throw apiError(response.result());
             }
             toCollectedRate(response, date).ifPresent(rates::add);
         }
         return List.copyOf(rates);
     }
 
+    /**
+     * 응답 한 건을 우리 통화 코드와 단위로 바꿉니다. 예: JPY(100)은 JPY·100, CNH는 CNY·1입니다.
+     * 지원하지 않는 통화면 empty를, 환율 값이 비었거나 숫자가 아니면 예외를 던집니다.
+     */
     private Optional<CollectedRate> toCollectedRate(KoreaEximRateResponse response, LocalDate date) {
         if (response.curUnit() == null) {
             return Optional.empty();
@@ -128,8 +136,7 @@ public class KoreaEximRateProvider implements ExchangeRateProvider {
                     RateSource.KOREAEXIM
             ));
         } catch (IllegalArgumentException | NullPointerException e) {
-            throw new ExchangeRateFetchException(
-                    "수출입은행 환율 값이 올바르지 않습니다: " + response.curUnit() + " " + e.getMessage());
+            throw invalidRate(response.curUnit(), e.getMessage());
         }
     }
 
@@ -138,10 +145,28 @@ public class KoreaEximRateProvider implements ExchangeRateProvider {
         return new BigDecimal(value.replace(",", "").trim());
     }
 
+    /** 예외 메시지에 들어간 인증키를 가립니다. */
     private String mask(String message) {
         if (message == null || apiKey.isEmpty()) {
             return message;
         }
         return message.replace(apiKey, "****");
+    }
+
+    private static ExchangeRateFetchException callFailed(String reason) {
+        return new ExchangeRateFetchException("수출입은행 환율 API 호출 실패: " + reason);
+    }
+
+    private static ExchangeRateFetchException unreadableResponse(String reason) {
+        return new ExchangeRateFetchException("수출입은행 환율 응답 해석 실패: " + reason);
+    }
+
+    private static ExchangeRateFetchException apiError(int result) {
+        return new ExchangeRateFetchException("수출입은행 환율 API 오류: result=" + result
+                + " (" + RESULT_ERRORS.getOrDefault(result, "알 수 없는 오류") + ")");
+    }
+
+    private static ExchangeRateFetchException invalidRate(String curUnit, String reason) {
+        return new ExchangeRateFetchException("수출입은행 환율 값이 올바르지 않습니다: " + curUnit + " " + reason);
     }
 }
