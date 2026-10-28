@@ -5,10 +5,12 @@ spring:
     url: ${EXCHANGE_DB_URL}
     username: ${EXCHANGE_DB_USERNAME}
     password: ${EXCHANGE_DB_PASSWORD}
+  flyway:
+    default-schema: exchange_service
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
 
 travelpay:
   auth:

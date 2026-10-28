@@ -12,6 +12,7 @@ import com.travelpay.exchange.rate.provider.ExchangeRateFetchException;
 import com.travelpay.exchange.rate.provider.ExchangeRateProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Component;
 
 /**
@@ -90,8 +91,13 @@ public class ExchangeRateCollector {
             log.info("고시된 환율이 아직 없습니다: source={}, date={}", provider.source(), date);
             return;
         }
-        List<ExchangeRate> saved = store.saveNew(rates, clock.instant());
-        log.info("환율 저장: source={}, date={}, fetched={}, saved={}",
-                provider.source(), date, rates.size(), saved.size());
+        try {
+            List<ExchangeRate> saved = store.saveNew(rates, clock.instant());
+            log.info("환율 저장: source={}, date={}, fetched={}, saved={}",
+                    provider.source(), date, rates.size(), saved.size());
+        } catch (DataIntegrityViolationException e) {
+            // 다른 인스턴스가 같은 고시분을 먼저 저장하면 유니크 인덱스에 막힙니다. 이미 저장된 상태이므로 정상 흐름입니다.
+            log.info("다른 수집이 먼저 저장해 건너뜁니다: source={}, date={}", provider.source(), date);
+        }
     }
 }

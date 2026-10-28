@@ -16,6 +16,7 @@ import com.travelpay.exchange.rate.provider.ExchangeRateFetchException;
 import com.travelpay.exchange.rate.provider.ExchangeRateProvider;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.ArgumentMatchers.any;
@@ -85,6 +86,17 @@ class ExchangeRateCollectorTest {
 
         assertDoesNotThrow(collector::collectIfNeeded);
         verify(store, never()).saveNew(anyList(), any());
+    }
+
+    @Test
+    void treatsUniqueViolationFromConcurrentCollectionAsAlreadySaved() {
+        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        when(policy.shouldCollect(TODAY, Optional.empty())).thenReturn(true);
+        List<CollectedRate> rates = List.of(rate(TODAY));
+        when(provider.fetch(TODAY)).thenReturn(rates);
+        when(store.saveNew(rates, NOW)).thenThrow(new DataIntegrityViolationException("uk_exchange_rates_koreaexim_daily"));
+
+        assertDoesNotThrow(collector::collectIfNeeded);
     }
 
     @Test

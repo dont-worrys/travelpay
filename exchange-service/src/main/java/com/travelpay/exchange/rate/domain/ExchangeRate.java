@@ -14,17 +14,17 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
-import jakarta.persistence.Index;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * 수집한 환율 이력 한 건입니다. 환율 값은 unit 단위 외화의 원화 가격입니다.
  * 저장 후에는 바뀌지 않으며, 통화별 최신 행이 현재 환율입니다.
+ * 테이블과 제약·인덱스는 Flyway 마이그레이션(V1__create_exchange_rates.sql)이 관리합니다.
  */
 @Entity
-@Table(name = "exchange_rates", indexes = @Index(
-        name = "ix_exchange_rates_latest",
-        columnList = "source, target_currency, rate_date DESC, collected_at DESC"))
+@Table(name = "exchange_rates")
 public class ExchangeRate {
 
     private static final String PRICE_CURRENCY = "KRW";
@@ -35,9 +35,11 @@ public class ExchangeRate {
     private UUID id;
 
     @Enumerated(EnumType.STRING)
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "target_currency", length = 3, nullable = false)
     private ForeignCurrency currency;
 
+    @JdbcTypeCode(SqlTypes.CHAR)
     @Column(name = "price_currency", length = 3, nullable = false)
     private String priceCurrency;
 
