@@ -21,6 +21,7 @@ public record CollectedRate(
         RateSource source
 ) {
 
+    /** 필수 값이 비어 있거나 단위·환율이 양수가 아니면 만들 수 없습니다. */
     public CollectedRate {
         Objects.requireNonNull(currency, "currency");
         Objects.requireNonNull(rateDate, "rateDate");
@@ -33,6 +34,7 @@ public record CollectedRate(
         requirePositive(sellRate, "sellRate");
     }
 
+    /** 환율 값이 있고 0보다 큰지 확인합니다. */
     private static void requirePositive(BigDecimal value, String name) {
         Objects.requireNonNull(value, name);
         if (value.signum() <= 0) {

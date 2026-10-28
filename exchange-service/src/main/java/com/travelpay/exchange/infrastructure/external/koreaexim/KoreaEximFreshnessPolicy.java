@@ -16,6 +16,10 @@ public class KoreaEximFreshnessPolicy implements RateFreshnessPolicy {
     private final int staleAfterDays;
     private final ZoneId zone;
 
+    /**
+     * @param staleAfterDays 고시일이 오늘보다 이 일수보다 오래되면 최신이 아닙니다. 양수여야 합니다.
+     * @param zone           오늘 날짜를 판단할 시간대
+     */
     public KoreaEximFreshnessPolicy(int staleAfterDays, ZoneId zone) {
         if (staleAfterDays <= 0) {
             throw new IllegalArgumentException("staleAfterDays must be positive");
