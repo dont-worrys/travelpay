@@ -15,6 +15,7 @@ public enum PaymentErrorCode implements ErrorCode {
     INVALID_STATUS_TRANSITION("PAYMENT_INVALID_STATUS_TRANSITION", "현재 상태에서 처리할 수 없는 결제입니다.", 409),
     DECLINED("PAYMENT_DECLINED", "결제가 거절되었습니다.", 422),
     IDEMPOTENCY_KEY_REUSED("PAYMENT_IDEMPOTENCY_KEY_REUSED", "이미 다른 결제에 사용된 요청 키입니다.", 409),
+    PAYMENT_NOT_FOUND("PAYMENT_NOT_FOUND", "결제를 찾을 수 없습니다.", 404),
     ;
     private final String code;
     private final String message;

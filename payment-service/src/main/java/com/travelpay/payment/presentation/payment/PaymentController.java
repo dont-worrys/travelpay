@@ -13,6 +13,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.UUID;
+
 @RestController
 @RequestMapping("/api/v1/payments")
 @RequiredArgsConstructor
@@ -27,5 +29,12 @@ public class PaymentController {
         PaymentCommand command = request.toCommand(user.userId(), idempotencyKey);
         PaymentResponse response = PaymentResponse.from(paymentService.paymentRequest(command));
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.success(response));
+    }
+
+    @GetMapping("/{paymentId}")
+    public ResponseEntity<ApiResponse<PaymentResponse>> getPayment(@CurrentUser AuthenticatedUser user,
+                                                                  @PathVariable UUID paymentId) {
+        PaymentResponse response = PaymentResponse.from(paymentService.getPayment(user.userId(), paymentId));
+        return ResponseEntity.ok(ApiResponse.success(response));
     }
 }

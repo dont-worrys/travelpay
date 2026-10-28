@@ -13,6 +13,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -93,6 +94,14 @@ public class PaymentService {
         }
 
         return PaymentResult.from(completedPayment);
+    }
+
+    public PaymentResult getPayment(UUID userId, UUID paymentId) {
+        Payment payment = paymentRepository.findById(paymentId)
+                .filter(found -> found.isOwnedBy(userId))
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+
+        return PaymentResult.from(payment);
     }
 
 }
