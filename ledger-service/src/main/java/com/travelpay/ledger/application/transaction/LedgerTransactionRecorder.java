@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -84,22 +85,27 @@ class LedgerTransactionRecorder {
             return reject(command, requestHash, RejectReason.ACCOUNT_NOT_FOUND);
         }
 
-        Optional<RejectReason> rejectReason = judge(command, accountIds, accounts);
+        List<ResolvedEntry> resolvedEntries = inApplyOrder(command, accountIds);
+        Map<UUID, Long> netChanges = netChanges(resolvedEntries);
+        Optional<RejectReason> rejectReason = judge(accounts, netChanges);
         if (rejectReason.isPresent()) {
             return reject(command, requestHash, rejectReason.get());
         }
 
+        Map<UUID, Long> lockedBalances = accounts.values().stream()
+                .collect(Collectors.toMap(LedgerAccount::getId, LedgerAccount::getBalance));
         LedgerTransaction transaction = transactionRepository.save(LedgerTransaction.posted(
                 command.referenceType(), command.referenceId(), requestHash,
                 command.userId(), command.originalTransactionId(), command.description()));
-        List<LedgerEntry> entries = new ArrayList<>(command.entries().size());
-        for (int i = 0; i < command.entries().size(); i++) {
-            RegisterTransactionCommand.Entry entry = command.entries().get(i);
-            LedgerAccount account = accounts.get(accountIds.get(i));
+        List<LedgerEntry> entries = new ArrayList<>(resolvedEntries.size());
+        for (ResolvedEntry resolved : resolvedEntries) {
+            RegisterTransactionCommand.Entry entry = resolved.entry();
+            LedgerAccount account = accounts.get(resolved.accountId());
             long balanceAfter = account.apply(entry.direction(), entry.amount());
             entries.add(LedgerEntry.create(transaction.getId(), account.getId(), entry.currency(),
                     entry.entryType(), entry.direction(), entry.amount(), balanceAfter));
         }
+        verifyFinalBalances(accounts, lockedBalances, netChanges);
         transactionRepository.saveEntries(entries);
         return TransactionResult.of(transaction, true);
     }
@@ -120,29 +126,61 @@ class LedgerTransactionRecorder {
     }
 
     /**
-     * 잠금 후의 값으로 상태·잔액을 판단한다. 엔티티는 바꾸지 않는다(거절 시 변경이 커밋되지 않도록).
-     * 같은 계정이 여러 항목에 나와도 맞도록 요청 순서대로 누적 잔액을 계산하고,
-     * USER 계정 DEBIT은 LedgerAccount.canApply와 같은 규칙(잔액 >= 금액)으로 확인한다. SYSTEM 계정은 음수 허용.
+     * 항목을 반영 순서로 정렬한다. 요청 해시가 항목 순서를 무시하므로 반영도 요청 순서와 무관해야 한다.
+     * 계정 ID 순(잠금 순서와 같음), 같은 계정 안에서는 CREDIT 먼저: 순변동이 0 이상이면
+     * 중간 잔액이 음수가 되지 않아 USER 계정 apply가 실패하지 않는다.
      */
-    private Optional<RejectReason> judge(RegisterTransactionCommand command, List<UUID> accountIds,
-                                         Map<UUID, LedgerAccount> accounts) {
+    private static List<ResolvedEntry> inApplyOrder(RegisterTransactionCommand command, List<UUID> accountIds) {
+        List<ResolvedEntry> resolved = new ArrayList<>(command.entries().size());
+        for (int i = 0; i < command.entries().size(); i++) {
+            resolved.add(new ResolvedEntry(accountIds.get(i), command.entries().get(i)));
+        }
+        resolved.sort(Comparator.comparing(ResolvedEntry::accountId)
+                .thenComparing(resolvedEntry -> resolvedEntry.entry().direction() == Direction.CREDIT ? 0 : 1));
+        return resolved;
+    }
+
+    /** 계정별 순변동(CREDIT 합 - DEBIT 합) */
+    private static Map<UUID, Long> netChanges(List<ResolvedEntry> resolvedEntries) {
+        Map<UUID, Long> netChanges = new HashMap<>();
+        for (ResolvedEntry resolved : resolvedEntries) {
+            RegisterTransactionCommand.Entry entry = resolved.entry();
+            long signed = entry.direction() == Direction.CREDIT ? entry.amount() : Math.negateExact(entry.amount());
+            netChanges.merge(resolved.accountId(), signed, Math::addExact);
+        }
+        return netChanges;
+    }
+
+    /**
+     * 잠금 후의 값으로 상태·잔액을 판단한다. 엔티티는 바꾸지 않는다(거절 시 변경이 커밋되지 않도록).
+     * 항목 순서와 무관하게 계정별 순변동으로 판단한다: USER 계정은 현재 잔액 + 순변동이 음수면 거절.
+     * SYSTEM 계정은 음수 허용.
+     */
+    private static Optional<RejectReason> judge(Map<UUID, LedgerAccount> accounts, Map<UUID, Long> netChanges) {
         if (accounts.values().stream().anyMatch(account -> !account.isActive())) {
             return Optional.of(RejectReason.WALLET_SUSPENDED);
         }
-        Map<UUID, Long> runningBalances = new HashMap<>();
-        for (int i = 0; i < command.entries().size(); i++) {
-            RegisterTransactionCommand.Entry entry = command.entries().get(i);
-            LedgerAccount account = accounts.get(accountIds.get(i));
-            long balance = runningBalances.getOrDefault(account.getId(), account.getBalance());
-            if (account.isUserAccount() && entry.direction() == Direction.DEBIT && balance < entry.amount()) {
+        for (Map.Entry<UUID, Long> netChange : netChanges.entrySet()) {
+            LedgerAccount account = accounts.get(netChange.getKey());
+            if (account.isUserAccount() && Math.addExact(account.getBalance(), netChange.getValue()) < 0) {
                 return Optional.of(RejectReason.INSUFFICIENT_BALANCE);
             }
-            long next = entry.direction() == Direction.CREDIT
-                    ? Math.addExact(balance, entry.amount())
-                    : Math.subtractExact(balance, entry.amount());
-            runningBalances.put(account.getId(), next);
         }
         return Optional.empty();
+    }
+
+    /** 반영 후 잔액이 잠금 시점 잔액 + 순변동과 다르면 예외로 트랜잭션 전체를 롤백한다 */
+    private static void verifyFinalBalances(Map<UUID, LedgerAccount> accounts, Map<UUID, Long> lockedBalances,
+                                            Map<UUID, Long> netChanges) {
+        for (Map.Entry<UUID, Long> netChange : netChanges.entrySet()) {
+            UUID accountId = netChange.getKey();
+            long expected = Math.addExact(lockedBalances.get(accountId), netChange.getValue());
+            long actual = accounts.get(accountId).getBalance();
+            if (actual != expected) {
+                throw new IllegalStateException(
+                        "반영 후 잔액이 예상과 다릅니다: " + accountId + " expected=" + expected + " actual=" + actual);
+            }
+        }
     }
 
     /** 확정 거절은 REJECTED 거래만 남기고 항목은 없다 */
@@ -158,5 +196,9 @@ class LedgerTransactionRecorder {
             throw new BusinessException(LedgerErrorCode.LEDGER_REFERENCE_CONFLICT);
         }
         return TransactionResult.of(existing, false);
+    }
+
+    /** 요청 항목과 그 항목이 가리키는 계정 ID */
+    private record ResolvedEntry(UUID accountId, RegisterTransactionCommand.Entry entry) {
     }
 }
