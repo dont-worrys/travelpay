@@ -60,6 +60,21 @@ class TransferWalletReaderTest {
         assertEquals(Optional.empty(), walletReader.findActiveWalletId(USER_ID));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"ACTIVE", "SUSPENDED"})
+    void returnsWalletRegardlessOfStatus(String status) {
+        when(walletClient.getWallet(USER_ID)).thenReturn(ApiResponse.success(new WalletResponse(WALLET_ID, status)));
+
+        assertEquals(Optional.of(new WalletResponse(WALLET_ID, status)), walletReader.findWallet(USER_ID));
+    }
+
+    @Test
+    void returnsEmptyWhenWalletIsMissing() {
+        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(404));
+
+        assertEquals(Optional.empty(), walletReader.findWallet(USER_ID));
+    }
+
     @Test
     void reportsConnectionProblemsAsServiceUnavailable() {
         when(walletClient.getWallet(USER_ID)).thenThrow(mock(RetryableException.class));

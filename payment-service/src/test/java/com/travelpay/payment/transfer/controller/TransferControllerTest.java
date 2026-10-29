@@ -17,6 +17,7 @@ import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.domain.TransferDirection;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
 import com.travelpay.payment.transfer.domain.TransferStatus;
+import com.travelpay.payment.transfer.dto.RecipientResponse;
 import com.travelpay.payment.transfer.dto.TransferCreateRequest;
 import com.travelpay.payment.transfer.dto.TransferResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -162,6 +163,57 @@ class TransferControllerTest {
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
         verifyNoInteractions(transferService);
+    }
+
+    @Test
+    void returnsRecipientWithOnlyTransferableFlag() throws Exception {
+        when(transferService.findRecipient(SENDER.userId(), RECEIVER_ID))
+                .thenReturn(new RecipientResponse(RECEIVER_ID, true));
+
+        mvc(SENDER).perform(get("/api/v1/transfers/recipients/{receiverId}", RECEIVER_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.receiverId").value(RECEIVER_ID.toString()))
+                .andExpect(jsonPath("$.data.transferable").value(true))
+                .andExpect(jsonPath("$.data.walletId").doesNotExist())
+                .andExpect(jsonPath("$.error").doesNotExist());
+    }
+
+    @Test
+    void returnsNotFoundForMissingRecipient() throws Exception {
+        when(transferService.findRecipient(SENDER.userId(), RECEIVER_ID))
+                .thenThrow(new BusinessException(TransferErrorCode.RECEIVER_NOT_FOUND));
+
+        mvc(SENDER).perform(get("/api/v1/transfers/recipients/{receiverId}", RECEIVER_ID))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("TRANSFER_RECEIVER_NOT_FOUND"));
+    }
+
+    @Test
+    void rejectsMalformedRecipientId() throws Exception {
+        mvc(SENDER).perform(get("/api/v1/transfers/recipients/{receiverId}", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+        verifyNoInteractions(transferService);
+    }
+
+    @Test
+    void requiresAuthenticatedUserToFindRecipient() throws Exception {
+        mvc(null).perform(get("/api/v1/transfers/recipients/{receiverId}", RECEIVER_ID))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
+        verifyNoInteractions(transferService);
+    }
+
+    @Test
+    void returnsServiceUnavailableWhenWalletServiceIsDown() throws Exception {
+        when(transferService.findRecipient(SENDER.userId(), RECEIVER_ID))
+                .thenThrow(new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE));
+
+        mvc(SENDER).perform(get("/api/v1/transfers/recipients/{receiverId}", RECEIVER_ID))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error.code").value("COMMON_SERVICE_UNAVAILABLE"));
     }
 
     @Test

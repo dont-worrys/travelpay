@@ -17,8 +17,6 @@ import org.springframework.stereotype.Component;
 @Component
 public class TransferWalletReader {
 
-    private static final String ACTIVE = "ACTIVE";
-
     private final WalletClient walletClient;
 
     public TransferWalletReader(WalletClient walletClient) {
@@ -27,6 +25,13 @@ public class TransferWalletReader {
 
     /** 송금 가능한(ACTIVE) 지갑의 ID를 반환하고, 지갑이 없거나 송금할 수 없는 상태면 empty를 반환합니다. */
     public Optional<UUID> findActiveWalletId(UUID userId) {
+        return findWallet(userId)
+                .filter(WalletResponse::isActive)
+                .map(WalletResponse::walletId);
+    }
+
+    /** 회원의 지갑을 상태와 관계없이 조회하며, 지갑이 없으면 empty를 반환합니다. */
+    public Optional<WalletResponse> findWallet(UUID userId) {
         ApiResponse<WalletResponse> response;
         try {
             response = walletClient.getWallet(userId);
@@ -43,7 +48,6 @@ public class TransferWalletReader {
                 || response.data().walletId() == null) {
             throw new BusinessException(CommonErrorCode.BAD_GATEWAY);
         }
-        WalletResponse wallet = response.data();
-        return ACTIVE.equals(wallet.status()) ? Optional.of(wallet.walletId()) : Optional.empty();
+        return Optional.of(response.data());
     }
 }
