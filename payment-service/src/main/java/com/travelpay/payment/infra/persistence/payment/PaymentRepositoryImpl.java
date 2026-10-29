@@ -2,7 +2,10 @@ package com.travelpay.payment.infra.persistence.payment;
 
 import com.travelpay.payment.domain.payment.Payment;
 import com.travelpay.payment.domain.payment.PaymentRepository;
+import com.travelpay.payment.domain.payment.PaymentStatus;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
 import java.util.Optional;
@@ -27,6 +30,14 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
     @Override
     public Optional<Payment> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey) {
         return paymentJpaRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey);
+    }
+
+    @Override
+    public Page<Payment> findPageByUserId(UUID userId, PaymentStatus status, Pageable pageable) {
+        if (status == null) {
+            return paymentJpaRepository.findByUserId(userId, pageable);
+        }
+        return paymentJpaRepository.findByUserIdAndStatus(userId, status, pageable);
     }
 
 }

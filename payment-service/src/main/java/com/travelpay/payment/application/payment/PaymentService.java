@@ -2,6 +2,7 @@ package com.travelpay.payment.application.payment;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.util.PageableUtils;
 import com.travelpay.payment.application.payment.client.ledger.LedgerClient;
 import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
@@ -9,6 +10,7 @@ import com.travelpay.payment.application.payment.client.ledger.LedgerTransaction
 import com.travelpay.payment.application.payment.client.wallet.CurrencyWallet;
 import com.travelpay.payment.application.payment.client.wallet.WalletClient;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
+import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
 import com.travelpay.payment.application.payment.dto.RefundResult;
@@ -16,11 +18,16 @@ import com.travelpay.payment.domain.payment.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -28,6 +35,9 @@ import java.util.UUID;
 public class PaymentService {
 
     private static final String LEDGER_REFUND_REFERENCE_TYPE = "PAYMENT_REFUND";
+    private static final int MAX_PAGE_SIZE = 100;
+    private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
+    private static final Set<String> LIST_SORT_FIELDS = Set.of("createdAt", "id");
 
     private final PaymentRepository paymentRepository;
     private final PaymentHistoryRepository paymentHistoryRepository;
@@ -122,6 +132,17 @@ public class PaymentService {
             throw new BusinessException(PaymentErrorCode.DECLINED);
         }
         return PaymentResult.from(existingPayment);
+    }
+
+    public Page<PaymentListResult> getPayments(UUID userId, PaymentStatus status, int page, int size) {
+        if (page < 0 || size < 1) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        Pageable pageable = PageableUtils.toStablePageable(
+                PageRequest.of(page, size, LIST_SORT), LIST_SORT_FIELDS, "id", MAX_PAGE_SIZE);
+
+        return paymentRepository.findPageByUserId(userId, status, pageable)
+                .map(PaymentListResult::from);
     }
 
     public PaymentResult getPayment(UUID userId, UUID paymentId) {

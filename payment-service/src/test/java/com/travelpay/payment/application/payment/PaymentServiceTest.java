@@ -1,11 +1,13 @@
 package com.travelpay.payment.application.payment;
 
 import java.util.ArrayList;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.payment.application.payment.client.ledger.LedgerClient;
 import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
@@ -13,6 +15,7 @@ import com.travelpay.payment.application.payment.client.ledger.LedgerTransaction
 import com.travelpay.payment.application.payment.client.wallet.CurrencyWallet;
 import com.travelpay.payment.application.payment.client.wallet.WalletClient;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
+import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
 import com.travelpay.payment.domain.payment.CurrencyCode;
@@ -32,6 +35,10 @@ import com.travelpay.payment.domain.payment.RefundStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -40,8 +47,11 @@ import org.springframework.transaction.support.TransactionOperations;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -61,6 +71,8 @@ class PaymentServiceTest {
     private static final UUID REFUND_ID = UUID.fromString("cccccccc-cccc-cccc-cccc-cccccccccccc");
     private static final UUID REFUND_TRANSACTION_ID = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
     private static final UUID OTHER_PAYMENT_ID = UUID.fromString("99999999-9999-9999-9999-999999999999");
+    private static final UUID OLDER_PAYMENT_ID = UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd");
+    private static final LocalDateTime CREATED_AT = LocalDateTime.of(2026, 10, 29, 9, 12, 34, 567_000_000);
     private static final String KEY = "payment-key-1";
     private static final String REFUND_KEY = "refund-key-1";
     private static final String REFUND_REASON = "단순 변심";
@@ -678,5 +690,90 @@ class PaymentServiceTest {
         Refund refund = Refund.request(PAYMENT_ID, USER_ID, REFUND_KEY, 10_000L, CurrencyCode.KRW, REFUND_REASON);
         ReflectionTestUtils.setField(refund, "id", REFUND_ID);
         return refund;
+    }
+
+    // ---------- 목록 조회 ----------
+
+    @Test
+    void requestsLatestFirstPageWithFixedSort() {
+        when(paymentRepository.findPageByUserId(any(), any(), any())).thenReturn(Page.empty());
+
+        paymentService.getPayments(USER_ID, null, 0, 20);
+
+        Pageable pageable = queriedPageable(null);
+        assertEquals(0, pageable.getPageNumber());
+        assertEquals(20, pageable.getPageSize());
+        assertEquals(Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")), pageable.getSort());
+    }
+
+    @Test
+    void returnsPaymentSummariesWithPageInfo() {
+        Payment newer = savedPayment(PAYMENT_ID, CREATED_AT);
+        Payment older = savedPayment(OLDER_PAYMENT_ID, CREATED_AT.minusMinutes(1));
+        when(paymentRepository.findPageByUserId(any(), any(), any()))
+                .thenAnswer(invocation -> new PageImpl<>(List.of(newer, older), invocation.getArgument(2), 35));
+
+        Page<PaymentListResult> result = paymentService.getPayments(USER_ID, null, 0, 2);
+
+        assertEquals(2, result.getContent().size());
+        PaymentListResult first = result.getContent().get(0);
+        assertEquals(PAYMENT_ID, first.paymentId());
+        assertEquals(PaymentStatus.PENDING, first.status());
+        assertEquals(10_000L, first.amount());
+        assertEquals(CurrencyCode.KRW, first.currency());
+        assertEquals("테스트 가맹점", first.merchantName());
+        assertNotNull(first.createdAt());
+        assertEquals(35, result.getTotalElements());
+        assertEquals(18, result.getTotalPages());
+    }
+
+    @Test
+    void passesStatusFilterToRepository() {
+        when(paymentRepository.findPageByUserId(any(), any(), any())).thenReturn(Page.empty());
+
+        paymentService.getPayments(USER_ID, PaymentStatus.APPROVED, 0, 20);
+
+        queriedPageable(PaymentStatus.APPROVED);
+    }
+
+    @Test
+    void limitsSizeToMaximum() {
+        when(paymentRepository.findPageByUserId(any(), any(), any())).thenReturn(Page.empty());
+
+        paymentService.getPayments(USER_ID, null, 0, 1_000);
+
+        assertEquals(100, queriedPageable(null).getPageSize());
+    }
+
+    @Test
+    void throwsWhenSizeIsNotPositive() {
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.getPayments(USER_ID, null, 0, 0));
+
+        assertEquals(CommonErrorCode.INVALID_REQUEST, exception.getErrorCode());
+        verify(paymentRepository, never()).findPageByUserId(any(), any(), any());
+    }
+
+    @Test
+    void throwsWhenPageIsNegative() {
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.getPayments(USER_ID, null, -1, 20));
+
+        assertEquals(CommonErrorCode.INVALID_REQUEST, exception.getErrorCode());
+        verify(paymentRepository, never()).findPageByUserId(any(), any(), any());
+    }
+
+    private Pageable queriedPageable(PaymentStatus status) {
+        ArgumentCaptor<Pageable> captor = ArgumentCaptor.forClass(Pageable.class);
+        verify(paymentRepository).findPageByUserId(eq(USER_ID), eq(status), captor.capture());
+        return captor.getValue();
+    }
+
+    // id·createdAt은 저장 시 채워지므로 테스트에서는 직접 넣습니다.
+    private Payment savedPayment(UUID id, LocalDateTime createdAt) {
+        Payment payment = existingPayment(10_000L);
+        ReflectionTestUtils.setField(payment, "id", id);
+        ReflectionTestUtils.setField(payment, "createdAt", createdAt);
+        return payment;
     }
 }

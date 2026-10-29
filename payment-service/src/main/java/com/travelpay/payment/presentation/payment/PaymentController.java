@@ -3,13 +3,17 @@ package com.travelpay.payment.presentation.payment;
 import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.auth.web.CurrentUser;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
+import com.travelpay.payment.domain.payment.PaymentStatus;
+import com.travelpay.payment.presentation.payment.dto.PaymentListResponse;
 import com.travelpay.payment.presentation.payment.dto.PaymentRequest;
 import com.travelpay.payment.presentation.payment.dto.PaymentResponse;
 import com.travelpay.payment.presentation.payment.dto.RefundRequest;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Min;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -31,6 +35,16 @@ public class PaymentController {
         PaymentCommand command = request.toCommand(user.userId(), idempotencyKey);
         PaymentResponse response = PaymentResponse.from(paymentService.paymentRequest(command));
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.success(response));
+    }
+
+    @GetMapping
+    public ResponseEntity<ApiResponse<PageResponse<PaymentListResponse>>> getPayments(@CurrentUser AuthenticatedUser user,
+                                                                                     @RequestParam(required = false) PaymentStatus status,
+                                                                                     @RequestParam(defaultValue = "0") @Min(0) int page,
+                                                                                     @RequestParam(defaultValue = "20") @Min(1) int size) {
+        PageResponse<PaymentListResponse> response = PageResponse.from(
+                paymentService.getPayments(user.userId(), status, page, size), PaymentListResponse::from);
+        return ResponseEntity.ok(ApiResponse.success(response));
     }
 
     @GetMapping("/{paymentId}")
