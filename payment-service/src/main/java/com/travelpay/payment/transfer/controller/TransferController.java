@@ -54,6 +54,15 @@ public class TransferController {
         return ApiResponse.success(transferService.get(user.userId(), transferId));
     }
 
+    /** 접수 상태의 송금만 취소하며, 이미 취소된 송금은 현재 상태를 그대로 반환합니다. */
+    @PostMapping("/{transferId}/cancel")
+    public ApiResponse<TransferResponse> cancel(
+            @CurrentUser AuthenticatedUser user,
+            @PathVariable UUID transferId
+    ) {
+        return ApiResponse.success(transferService.cancel(user.userId(), transferId));
+    }
+
     /** 생성 시각 내림차순 고정이며, page는 0부터 시작합니다. */
     @GetMapping
     public ApiResponse<PageResponse<TransferResponse>> list(

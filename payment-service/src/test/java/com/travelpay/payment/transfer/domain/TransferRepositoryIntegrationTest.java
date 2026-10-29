@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
+import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.dto.TransferResponse;
@@ -20,6 +21,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -140,6 +142,44 @@ class TransferRepositoryIntegrationTest {
         assertEquals(1, page.items().size());
         assertEquals(1, page.totalElements());
         assertEquals(1, page.totalPages());
+    }
+
+    @Test
+    void cancelChangesRequestedTransferOnceAndKeepsCancelledOnRetry() {
+        UUID senderId = UUID.randomUUID();
+        Transfer saved = transferRepository.saveAndFlush(transfer(senderId, UUID.randomUUID(), "cancel", 1_000L));
+
+        TransferResponse first = transferService.cancel(senderId, saved.getId());
+        TransferResponse retry = transferService.cancel(senderId, saved.getId());
+
+        assertEquals(TransferStatus.CANCELLED, first.status());
+        assertEquals(TransferStatus.CANCELLED, retry.status());
+        assertEquals("CANCELLED", jdbcTemplate.queryForObject(
+                "select status from transfer where id = ?", String.class, saved.getId()));
+    }
+
+    @Test
+    void receiverAndOtherUserCannotCancelAndStatusStaysRequested() {
+        UUID receiverId = UUID.randomUUID();
+        Transfer saved = transferRepository.saveAndFlush(transfer(UUID.randomUUID(), receiverId, "keep", 1_000L));
+
+        var receiver = assertThrows(BusinessException.class,
+                () -> transferService.cancel(receiverId, saved.getId()));
+        var otherUser = assertThrows(BusinessException.class,
+                () -> transferService.cancel(UUID.randomUUID(), saved.getId()));
+
+        assertSame(TransferErrorCode.NOT_FOUND, receiver.getErrorCode());
+        assertSame(TransferErrorCode.NOT_FOUND, otherUser.getErrorCode());
+        assertEquals("REQUESTED", jdbcTemplate.queryForObject(
+                "select status from transfer where id = ?", String.class, saved.getId()));
+    }
+
+    @Test
+    void unknownStatusViolatesCheckConstraint() {
+        Transfer saved = transferRepository.saveAndFlush(transfer(UUID.randomUUID(), UUID.randomUUID(), "ck", 1_000L));
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update transfer set status = 'COMPLETED' where id = ?", saved.getId()));
     }
 
     private List<UUID> collectAllPages(UUID userId, TransferDirection direction, int size) {

@@ -1,5 +1,7 @@
 package com.travelpay.payment.transfer.application;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -14,6 +16,7 @@ import com.travelpay.payment.transfer.domain.TransferCurrency;
 import com.travelpay.payment.transfer.domain.TransferDirection;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
 import com.travelpay.payment.transfer.domain.TransferRepository;
+import com.travelpay.payment.transfer.domain.TransferStatus;
 import com.travelpay.payment.transfer.dto.TransferCreateRequest;
 import com.travelpay.payment.transfer.dto.TransferResponse;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -25,7 +28,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 송금 접수와 조회를 처리합니다.
+ * 송금 접수·취소와 조회를 처리합니다.
  * 1차 MVP는 원장 연동 전이라 잔액을 변경하지 않고 REQUESTED 상태로 접수만 기록합니다.
  */
 @Service
@@ -107,6 +110,24 @@ public class TransferService {
                 .filter(transfer -> transfer.isParticipant(userId))
                 .map(transfer -> TransferResponse.of(transfer, userId))
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.NOT_FOUND));
+    }
+
+    /**
+     * 접수(REQUESTED) 상태의 송금을 취소합니다. 1차 MVP는 자금 이동이 없어 복구할 금액이 없습니다.
+     * 송금인만 취소할 수 있고 수취인·제3자에게는 없는 송금과 같은 404를 반환하며, 이미 취소된 송금은 현재 상태를 그대로 반환합니다.
+     * 동시 요청은 조건부 UPDATE로 한 번만 상태가 바뀝니다.
+     */
+    @Transactional
+    public TransferResponse cancel(UUID senderId, UUID transferId) {
+        transferRepository.cancelRequested(transferId, senderId, Instant.now().truncatedTo(ChronoUnit.MICROS));
+        Transfer transfer = transferRepository.findById(transferId)
+                .filter(found -> found.getSenderId().equals(senderId))
+                .orElseThrow(() -> new BusinessException(TransferErrorCode.NOT_FOUND));
+        // 원장 연동 후 처리 중·완료 같은 상태가 추가되면 UPDATE 대상이 아니므로 여기서 거절됩니다.
+        if (transfer.getStatus() != TransferStatus.CANCELLED) {
+            throw new BusinessException(CommonErrorCode.CONFLICT);
+        }
+        return TransferResponse.of(transfer, senderId);
     }
 
     /**

@@ -10,6 +10,7 @@ import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.auth.CurrentUserProvider;
 import com.travelpay.common.auth.web.CurrentUserArgumentResolver;
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.GlobalExceptionHandler;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.transfer.application.TransferService;
@@ -115,6 +116,52 @@ class TransferControllerTest {
         mvc(SENDER).perform(get("/api/v1/transfers/{transferId}", transferId))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
+    }
+
+    @Test
+    void cancelsTransferWithOkAndCancelledStatus() throws Exception {
+        UUID transferId = UUID.randomUUID();
+        when(transferService.cancel(SENDER.userId(), transferId))
+                .thenReturn(new TransferResponse(transferId, TransferDirection.SENT, SENDER.userId(), RECEIVER_ID,
+                        10_000L, "KRW", TransferStatus.CANCELLED, null, Instant.parse("2026-10-29T01:02:03Z")));
+
+        mvc(SENDER).perform(post("/api/v1/transfers/{transferId}/cancel", transferId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.transferId").value(transferId.toString()))
+                .andExpect(jsonPath("$.data.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.error").doesNotExist());
+    }
+
+    @Test
+    void returnsNotFoundWhenCancellingTransferOutsideSenderScope() throws Exception {
+        UUID transferId = UUID.randomUUID();
+        when(transferService.cancel(SENDER.userId(), transferId))
+                .thenThrow(new BusinessException(TransferErrorCode.NOT_FOUND));
+
+        mvc(SENDER).perform(post("/api/v1/transfers/{transferId}/cancel", transferId))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
+    }
+
+    @Test
+    void returnsConflictWhenTransferCannotBeCancelled() throws Exception {
+        UUID transferId = UUID.randomUUID();
+        when(transferService.cancel(SENDER.userId(), transferId))
+                .thenThrow(new BusinessException(CommonErrorCode.CONFLICT));
+
+        mvc(SENDER).perform(post("/api/v1/transfers/{transferId}/cancel", transferId))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
+    }
+
+    @Test
+    void requiresAuthenticatedUserToCancel() throws Exception {
+        mvc(null).perform(post("/api/v1/transfers/{transferId}/cancel", UUID.randomUUID()))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
+        verifyNoInteractions(transferService);
     }
 
     @Test
