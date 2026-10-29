@@ -79,7 +79,6 @@ public class PaymentService {
                 command.currency(),
                 command.amount());
 
-        // [트랜잭션 1] 결제 생성(PENDING) + 생성 이력을 함께 저장
         Payment savedPayment;
         try {
             savedPayment = transactionOperations.execute(status -> {
@@ -88,7 +87,6 @@ public class PaymentService {
                 return saved;
             });
         } catch (DataIntegrityViolationException e) {
-            // 같은 요청 키로 동시에 들어온 요청이 먼저 결제를 만들었습니다. 순서대로 온 재요청과 같이 응답합니다.
             Payment existingPayment = paymentRepository.findByUserIdAndIdempotencyKey(
                             command.userId(), command.idempotencyKey())
                     .orElseThrow(() -> e);
@@ -107,7 +105,6 @@ public class PaymentService {
             return PaymentResult.from(savedPayment);
         }
 
-        // [트랜잭션 2] 원장 결과(승인·거절)를 결제 상태와 이력에 함께 반영
         Payment completedPayment = transactionOperations.execute(status -> {
             PaymentHistory history = ledgerResult.status() == LedgerResult.Status.APPROVED
                     ? savedPayment.approvedHistory(ledgerResult.transactionId())
@@ -131,7 +128,7 @@ public class PaymentService {
         if (existingPayment.getStatus() == PaymentStatus.DECLINED) {
             throw new BusinessException(PaymentErrorCode.DECLINED);
         }
-        return PaymentResult.from(existingPayment);
+        return toResult(existingPayment);
     }
 
     public Page<PaymentListResult> getPayments(UUID userId, PaymentStatus status, int page, int size) {

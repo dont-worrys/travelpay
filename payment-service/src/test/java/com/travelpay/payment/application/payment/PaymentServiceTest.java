@@ -312,6 +312,24 @@ class PaymentServiceTest {
         verifyNoInteractions(ledgerClient);
     }
 
+    @Test
+    void returnsRefundsWhenReplayingRefundedPayment() {
+        Payment refunded = refundPendingPayment();
+        refunded.refundedHistory();
+        Refund refund = existingRefund();
+        refund.complete(REFUND_TRANSACTION_ID);
+        savedRefunds.add(refund);
+        when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.of(refunded));
+
+        PaymentResult result = paymentService.paymentRequest(command(10_000L));
+
+        assertEquals(PaymentStatus.REFUNDED, result.status());
+        assertEquals(1, result.refunds().size());
+        assertEquals(REFUND_ID, result.refunds().get(0).refundId());
+        assertEquals(RefundStatus.COMPLETED, result.refunds().get(0).status());
+        verifyNoInteractions(merchantRepository, walletClient, ledgerClient, paymentHistoryRepository);
+    }
+
     private PaymentCommand command(long amount) {
         return new PaymentCommand(USER_ID, KEY, MERCHANT_ID, CurrencyCode.KRW, amount, "테스트 주문");
     }
