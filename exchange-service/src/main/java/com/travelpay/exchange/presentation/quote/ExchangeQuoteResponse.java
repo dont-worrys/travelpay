@@ -32,6 +32,7 @@ public record ExchangeQuoteResponse(
         Instant createdAt
 ) {
 
+    /** 최소 단위 금액을 통화 단위 문자열로 바꿉니다. 조회 시각에 만료됐으면 저장 상태와 관계없이 EXPIRED입니다. */
     public static ExchangeQuoteResponse from(ExchangeQuoteView view) {
         ExchangeQuote quote = view.quote();
         return new ExchangeQuoteResponse(

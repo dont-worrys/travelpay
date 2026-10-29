@@ -13,6 +13,7 @@ import com.travelpay.common.error.BusinessException;
  */
 public record Money(Currency currency, long minorUnits) {
 
+    /** 통화가 없거나 금액이 음수면 만들 수 없습니다. */
     public Money {
         Objects.requireNonNull(currency, "currency");
         if (minorUnits < 0) {
@@ -61,6 +62,7 @@ public record Money(Currency currency, long minorUnits) {
         return minorUnits > other.minorUnits;
     }
 
+    /** 통화가 다른 금액끼리는 계산하지 않습니다. KRW와 JPY를 더하는 실수를 막습니다. */
     private void requireSameCurrency(Money other) {
         if (currency != Objects.requireNonNull(other, "other").currency) {
             throw new IllegalArgumentException("currency mismatch: " + currency + " vs " + other.currency);

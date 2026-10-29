@@ -17,6 +17,7 @@ import org.springframework.context.annotation.Configuration;
 @EnableConfigurationProperties(QuoteProperties.class)
 public class QuoteConfiguration {
 
+    /** 통화 단위 설정값(예: CNY 10.00)을 최소 단위 Money로 바꿔 견적 규칙을 만듭니다. */
     @Bean
     public QuotePolicy quotePolicy(QuoteProperties properties) {
         Map<Currency, AmountRange> limits = new EnumMap<>(Currency.class);

@@ -16,6 +16,7 @@ public record FeeRate(BigDecimal value) {
 
     private static final int MAX_SCALE = 6;
 
+    /** 범위 [0, 1)과 소수 6자리 이하를 확인합니다. 설정이 잘못되면 서버 시작 단계에서 실패합니다. */
     public FeeRate {
         Objects.requireNonNull(value, "value");
         if (value.signum() < 0 || value.compareTo(BigDecimal.ONE) >= 0) {

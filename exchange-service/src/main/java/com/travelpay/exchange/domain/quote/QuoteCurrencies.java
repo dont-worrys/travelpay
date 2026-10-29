@@ -12,6 +12,7 @@ import com.travelpay.exchange.domain.rate.ForeignCurrency;
  */
 public record QuoteCurrencies(Currency from, Currency to) {
 
+    /** 정확히 한쪽만 원화여야 합니다. 원화끼리나 외화끼리면 EXCHANGE_UNSUPPORTED_PAIR 오류입니다. */
     public QuoteCurrencies {
         Objects.requireNonNull(from, "from");
         Objects.requireNonNull(to, "to");

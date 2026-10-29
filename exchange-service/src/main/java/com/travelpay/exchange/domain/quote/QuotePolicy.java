@@ -18,6 +18,7 @@ import com.travelpay.exchange.domain.money.MoneyErrorCode;
  */
 public record QuotePolicy(Duration ttl, FeeRate feeRate, Map<Currency, AmountRange> limits) {
 
+    /** TTL은 양수이고, 모든 통화에 그 통화 단위의 1회 한도가 있어야 합니다. 한도 맵은 복사해 바뀌지 않게 둡니다. */
     public QuotePolicy {
         Objects.requireNonNull(ttl, "ttl");
         Objects.requireNonNull(feeRate, "feeRate");
