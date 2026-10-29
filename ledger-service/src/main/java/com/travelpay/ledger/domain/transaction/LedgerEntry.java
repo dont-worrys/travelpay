@@ -3,6 +3,7 @@ package com.travelpay.ledger.domain.transaction;
 import com.travelpay.ledger.domain.Currency;
 import jakarta.persistence.*;
 import lombok.Getter;
+import org.hibernate.annotations.Immutable;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
@@ -10,9 +11,13 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
-/** 거래의 각 줄. INSERT만 한다. POSTED 거래에만 존재. */
+/**
+ * 거래의 각 줄. INSERT만 한다. POSTED 거래에만 존재.
+ * {@code @Immutable}은 JPA(Hibernate) 경로의 UPDATE만 막는다. 네이티브 SQL·DB 직접 수정은 막지 못한다.
+ */
 @Getter
 @Entity
+@Immutable
 @Table(name = "ledger_entries")
 public class LedgerEntry{
 
