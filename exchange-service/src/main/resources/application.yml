@@ -23,6 +23,21 @@ exchange:
     mode: koreaexim
     koreaexim:
       api-key: ${KOREAEXIM_API_KEY:}
+  quote:
+    # 견적 유효 시간과 수수료율(0.01 = 1%)
+    ttl: 5m
+    fee-rate: 0.01
+    # 보내는 통화별 1회 금액 범위 (통화 단위, 팀 확정 전 임시값)
+    limits:
+      KRW:
+        min: 1000
+        max: 2000000
+      JPY:
+        min: 100
+        max: 200000
+      CNY:
+        min: 10.00
+        max: 10000.00
 
 server:
   port: 8084
