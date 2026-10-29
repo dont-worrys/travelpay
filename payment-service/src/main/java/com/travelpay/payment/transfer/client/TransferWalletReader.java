@@ -50,8 +50,9 @@ public class TransferWalletReader {
                 return Optional.empty();
             }
             throw new BusinessException(CommonErrorCode.BAD_GATEWAY, exception);
-        } catch (RetryableException exception) {
+        } catch (RetryableException | FeignException.ServiceUnavailable exception) {
             // 조회 요청이라 실패해도 데이터 변경은 없으며, 연결·응답 시간 문제는 일시적 장애로 알립니다.
+            // Eureka에 인스턴스가 없을 때 로드밸런서가 만드는 503과 Wallet 서비스의 503도 같은 일시적 장애로 봅니다.
             throw new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE, exception);
         } catch (FeignException exception) {
             throw new BusinessException(CommonErrorCode.BAD_GATEWAY, exception);
