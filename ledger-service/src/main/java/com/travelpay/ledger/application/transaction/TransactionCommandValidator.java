@@ -16,13 +16,14 @@ import java.util.Map;
 final class TransactionCommandValidator {
 
     private static final int MIN_ENTRIES = 2;
+    private static final int MAX_ENTRIES = 20;
 
     private TransactionCommandValidator() {
     }
 
     static void validate(RegisterTransactionCommand command) {
         if (command.referenceType() == null || command.referenceId() == null
-                || command.entries().size() < MIN_ENTRIES) {
+                || command.entries().size() < MIN_ENTRIES || command.entries().size() > MAX_ENTRIES) {
             throw invalid();
         }
         Map<Currency, Long> debits = new EnumMap<>(Currency.class);

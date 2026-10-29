@@ -80,10 +80,11 @@ public class LedgerTransaction {
 
     /** 확정 거절만 기록한다. 일시적 실패는 기록하지 않고 롤백 + 5xx */
     public static LedgerTransaction rejected(ReferenceType referenceType, UUID referenceId, String requestHash,
-                                             UUID userId, RejectReason rejectReason, String description) {
+                                             UUID userId, RejectReason rejectReason,
+                                             UUID originalTransactionId, String description) {
         return new LedgerTransaction(referenceType, referenceId, requestHash, userId,
                 LedgerTransactionStatus.REJECTED, Objects.requireNonNull(rejectReason, "rejectReason"),
-                null, description);
+                originalTransactionId, description);
     }
 
     public boolean isPosted() {

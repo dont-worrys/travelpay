@@ -23,7 +23,7 @@ public record RegisterTransactionRequest(
         @Size(max = 255, message = "설명은 255자 이하로 입력해 주세요.") String description,
         UUID originalTransactionId,
         @NotNull(message = "거래 항목을 입력해 주세요.")
-        @Size(min = 2, message = "거래 항목은 2개 이상이어야 합니다.")
+        @Size(min = 2, max = 20, message = "거래 항목은 2개 이상 20개 이하여야 합니다.")
         List<@NotNull(message = "거래 항목을 입력해 주세요.") @Valid EntryRequest> entries) {
 
     public RegisterTransactionCommand toCommand() {

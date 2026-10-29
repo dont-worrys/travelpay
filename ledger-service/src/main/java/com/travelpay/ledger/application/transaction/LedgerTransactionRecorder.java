@@ -127,9 +127,11 @@ class LedgerTransactionRecorder {
 
     /**
      * 항목을 반영 순서로 정렬한다. 요청 해시가 항목 순서를 무시하므로 반영도 요청 순서와 무관해야 한다.
-     * 계정 ID 순(잠금 순서와 같음), 같은 계정 안에서는 CREDIT 먼저: 순변동이 0 이상이면
+     * 반영 순서는 결정적이기만 하면 된다(같은 거래는 항상 같은 balance_after). 잠금 순서(DB의 ORDER BY id)와는
+     * 별개이며 UUID 비교 방식이 달라 두 순서가 같지 않을 수 있다.
+     * 계정 ID 순, 같은 계정 안에서는 CREDIT 먼저: 순변동이 0 이상이면
      * 중간 잔액이 음수가 되지 않아 USER 계정 apply가 실패하지 않는다.
-     * 같은 계정·방향 항목이 여럿이면 금액, entryType 순으로 정해 balance_after도 요청 순서와 무관하게 한다.
+     * 같은 계정·방향 항목이 여럿이면 금액, entryType 순으로 정한다.
      */
     private static List<ResolvedEntry> inApplyOrder(RegisterTransactionCommand command, List<UUID> accountIds) {
         List<ResolvedEntry> resolved = new ArrayList<>(command.entries().size());
@@ -190,7 +192,7 @@ class LedgerTransactionRecorder {
     private TransactionResult reject(RegisterTransactionCommand command, String requestHash, RejectReason reason) {
         LedgerTransaction transaction = transactionRepository.save(LedgerTransaction.rejected(
                 command.referenceType(), command.referenceId(), requestHash,
-                command.userId(), reason, command.description()));
+                command.userId(), reason, command.originalTransactionId(), command.description()));
         return TransactionResult.of(transaction, true);
     }
 
