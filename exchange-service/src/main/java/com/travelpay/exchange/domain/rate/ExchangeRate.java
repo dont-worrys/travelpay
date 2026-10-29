@@ -1,11 +1,14 @@
 package com.travelpay.exchange.domain.rate;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.Objects;
 import java.util.UUID;
 
+import com.travelpay.exchange.domain.money.Currency;
+import com.travelpay.exchange.domain.money.Money;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -83,5 +86,26 @@ public class ExchangeRate {
 
     public static ExchangeRate collected(CollectedRate rate, Instant collectedAt) {
         return new ExchangeRate(Objects.requireNonNull(rate, "rate"), collectedAt);
+    }
+
+    /**
+     * 매매기준율로 원화와 이 환율의 외화 사이를 환산합니다. 받는 금액은 받는 통화 자릿수로 내림합니다.
+     * 원화 → 외화는 {@code 원화 × unit ÷ 환율}, 외화 → 원화는 {@code 외화 × 환율 ÷ unit}입니다.
+     *
+     * @throws IllegalArgumentException 금액이 원화나 이 환율의 외화가 아닌 경우
+     */
+    public Money convertAtMidRate(Money amount) {
+        Currency foreign = currency.currency();
+        BigDecimal value = amount.amount();
+        BigDecimal quoteUnit = BigDecimal.valueOf(unit);
+        if (amount.currency() == Currency.KRW) {
+            return Money.of(foreign, value.multiply(quoteUnit)
+                    .divide(midRate, foreign.fractionDigits(), RoundingMode.DOWN));
+        }
+        if (amount.currency() == foreign) {
+            return Money.of(Currency.KRW, value.multiply(midRate)
+                    .divide(quoteUnit, Currency.KRW.fractionDigits(), RoundingMode.DOWN));
+        }
+        throw new IllegalArgumentException(amount.currency() + " cannot be converted with " + currency + " rate");
     }
 }
