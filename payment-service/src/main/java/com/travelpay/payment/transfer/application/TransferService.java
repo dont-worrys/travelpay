@@ -11,12 +11,14 @@ import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.common.util.PageableUtils;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
+import com.travelpay.payment.transfer.client.WalletResponse;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferCurrency;
 import com.travelpay.payment.transfer.domain.TransferDirection;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
 import com.travelpay.payment.transfer.domain.TransferRepository;
 import com.travelpay.payment.transfer.domain.TransferStatus;
+import com.travelpay.payment.transfer.dto.RecipientResponse;
 import com.travelpay.payment.transfer.dto.TransferCreateRequest;
 import com.travelpay.payment.transfer.dto.TransferResponse;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -128,6 +130,21 @@ public class TransferService {
             throw new BusinessException(CommonErrorCode.CONFLICT);
         }
         return TransferResponse.of(transfer, senderId);
+    }
+
+    /**
+     * 송금 전 수취인을 확인합니다. 지갑이 없으면 404, 지갑이 송금할 수 없는 상태면 transferable=false를 반환합니다.
+     * 송금 요청과 같은 기준(ACTIVE 지갑)으로 판단하며, 실제 송금 시점에 다시 검증합니다.
+     */
+    public RecipientResponse findRecipient(UUID userId, UUID receiverId) {
+        if (userId.equals(receiverId)) {
+            throw new BusinessException(TransferErrorCode.SELF_TRANSFER);
+        }
+        // TODO(user-service): 수취인 회원 상태(ACTIVE) 확인은 내부 회원 조회 API가 확정되면 송금 요청과 함께 추가합니다.
+        boolean transferable = walletReader.findWallet(receiverId)
+                .map(WalletResponse::isActive)
+                .orElseThrow(() -> new BusinessException(TransferErrorCode.RECEIVER_NOT_FOUND));
+        return new RecipientResponse(receiverId, transferable);
     }
 
     /**
