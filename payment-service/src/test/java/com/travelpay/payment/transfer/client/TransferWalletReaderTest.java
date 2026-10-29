@@ -102,6 +102,19 @@ class TransferWalletReaderTest {
         assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "Load balancer does not contain an instance for the service wallet-service",
+            "{\"success\":false,\"data\":null,\"error\":{\"code\":\"COMMON_SERVICE_UNAVAILABLE\",\"message\":\"서비스를 일시적으로 사용할 수 없습니다.\",\"details\":[]}}"
+    })
+    void reportsWalletServiceUnavailableAsServiceUnavailable(String body) {
+        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(503, body));
+
+        var exception = assertThrows(BusinessException.class, () -> walletReader.findWallet(USER_ID));
+
+        assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
+    }
+
     @Test
     void reportsOtherWalletErrorsAsBadGateway() {
         when(walletClient.getWallet(USER_ID)).thenThrow(feignError(500));
