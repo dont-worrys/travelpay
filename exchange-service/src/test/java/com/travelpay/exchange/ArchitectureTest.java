@@ -5,6 +5,8 @@ import com.tngtech.archunit.junit.AnalyzeClasses;
 import com.tngtech.archunit.junit.ArchTest;
 import com.tngtech.archunit.lang.ArchRule;
 
+import static com.tngtech.archunit.base.DescribedPredicate.not;
+import static com.tngtech.archunit.core.domain.JavaClass.Predicates.resideInAPackage;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.library.Architectures.layeredArchitecture;
 
@@ -27,9 +29,14 @@ class ArchitectureTest {
             .whereLayer("Domain").mayOnlyBeAccessedByLayers("Presentation", "Application", "Infrastructure")
             .whereLayer("Infrastructure").mayNotBeAccessedByAnyLayer();
 
-    /** 도메인에는 JPA 어노테이션만 허용하고 Spring에는 의존하지 않습니다. */
+    /**
+     * 도메인에는 JPA 어노테이션만 허용하고 Spring에는 의존하지 않습니다.
+     * 예외로 생성·수정 시각 표시 어노테이션(@CreatedDate, @LastModifiedDate)만 허용하고,
+     * 이를 채우는 감사 리스너는 META-INF/orm.xml에서 등록합니다.
+     */
     @ArchTest
     static final ArchRule domainDoesNotDependOnSpring = noClasses()
             .that().resideInAPackage("com.travelpay.exchange.domain..")
-            .should().dependOnClassesThat().resideInAPackage("org.springframework..");
+            .should().dependOnClassesThat(resideInAPackage("org.springframework..")
+                    .and(not(resideInAPackage("org.springframework.data.annotation"))));
 }
