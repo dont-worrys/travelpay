@@ -35,4 +35,10 @@ public class ExchangeRateQueryService {
                 .flatMap(Optional::stream)
                 .toList();
     }
+
+    /** 한 통화의 최신 환율입니다. 아직 수집된 환율이 없으면 empty입니다. */
+    @Transactional(readOnly = true)
+    public Optional<ExchangeRate> findLatest(ForeignCurrency currency) {
+        return repository.findLatest(activeSource, currency);
+    }
 }

@@ -60,6 +60,17 @@ class ExchangeRateQueryServiceTest {
     }
 
     @Test
+    void findsLatestRateOfOneCurrency() {
+        ExchangeRateQueryService service = serviceWithSource(RateSource.KOREAEXIM);
+        ExchangeRate jpy = rate(ForeignCurrency.JPY);
+        when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
+        when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.empty());
+
+        assertEquals(Optional.of(jpy), service.findLatest(ForeignCurrency.JPY));
+        assertEquals(Optional.empty(), service.findLatest(ForeignCurrency.CNY));
+    }
+
+    @Test
     void readsOnlyFromCurrentModeSourceAndNeverCallsExternalApi() {
         ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
         when(repository.findLatest(any(), any())).thenReturn(Optional.empty());
