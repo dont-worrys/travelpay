@@ -5,17 +5,33 @@ spring:
     url: ${WALLET_DB_URL}
     username: ${WALLET_DB_USERNAME}
     password: ${WALLET_DB_PASSWORD}
+    hikari:
+      # 트랜잭션 타임아웃은 커넥션을 얻은 뒤부터 적용되므로 획득 대기도 따로 제한
+      connection-timeout: 2000
+      validation-timeout: 1000
   flyway:
     default-schema: wallet_service
   jpa:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  cloud:
+    openfeign:
+      client:
+        config:
+          ledger-service:
+            # 원장 최대 응답(약 5초)보다 길게
+            connect-timeout: 1000
+            read-timeout: 6000
 
 travelpay:
   auth:
     header-context:
       enabled: true
+  client:
+    ledger:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
+      url: ${LEDGER_SERVICE_URL:}
 
 server:
   port: 8082
