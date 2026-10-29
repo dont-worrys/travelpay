@@ -1,6 +1,7 @@
 package com.travelpay.wallet.infra.crypto;
 
 import com.travelpay.wallet.domain.charge.AccountNumberCipher;
+import com.travelpay.wallet.domain.charge.AccountNumberCipherException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -18,7 +19,7 @@ import java.util.Objects;
 /**
  * AES-256-GCM 계좌번호 암호화. 저장 형식: "v1:" + Base64(IV 12바이트 + 암호문·태그).
  * 버전 접두사는 이후 키 교체 때 어느 키로 암호화했는지 구분하기 위해 둔다.
- * 키·평문은 예외 메시지에 넣지 않는다.
+ * 키·평문은 예외 메시지에 넣지 않고, 로그도 남기지 않는다 (chargeId를 아는 호출자가 남김).
  */
 @Component
 public class AesGcmAccountNumberCipher implements AccountNumberCipher {
@@ -48,7 +49,7 @@ public class AesGcmAccountNumberCipher implements AccountNumberCipher {
             byte[] stored = ByteBuffer.allocate(IV_BYTES + encrypted.length).put(iv).put(encrypted).array();
             return VERSION_PREFIX + Base64.getEncoder().encodeToString(stored);
         } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("계좌번호를 암호화하지 못했습니다.", e);
+            throw new AccountNumberCipherException("계좌번호를 암호화하지 못했습니다.", e);
         }
     }
 
@@ -56,19 +57,19 @@ public class AesGcmAccountNumberCipher implements AccountNumberCipher {
     public String decrypt(String accountNumberEnc) {
         Objects.requireNonNull(accountNumberEnc, "accountNumberEnc");
         if (!accountNumberEnc.startsWith(VERSION_PREFIX)) {
-            throw new IllegalStateException("지원하지 않는 계좌번호 암호문 형식입니다.");
+            throw new AccountNumberCipherException("지원하지 않는 계좌번호 암호문 형식입니다.");
         }
         try {
             byte[] stored = Base64.getDecoder().decode(accountNumberEnc.substring(VERSION_PREFIX.length()));
             if (stored.length <= IV_BYTES + TAG_BITS / 8) {
-                throw new IllegalStateException("계좌번호 암호문 길이가 올바르지 않습니다.");
+                throw new AccountNumberCipherException("계좌번호 암호문 길이가 올바르지 않습니다.");
             }
             Cipher cipher = Cipher.getInstance(TRANSFORMATION);
             cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, stored, 0, IV_BYTES));
             byte[] plain = cipher.doFinal(stored, IV_BYTES, stored.length - IV_BYTES);
             return new String(plain, StandardCharsets.UTF_8);
         } catch (GeneralSecurityException | IllegalArgumentException e) {
-            throw new IllegalStateException("계좌번호를 복호화하지 못했습니다.", e);
+            throw new AccountNumberCipherException("계좌번호를 복호화하지 못했습니다.", e);
         }
     }
 
