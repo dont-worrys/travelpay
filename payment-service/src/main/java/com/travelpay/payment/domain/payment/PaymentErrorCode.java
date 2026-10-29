@@ -16,6 +16,11 @@ public enum PaymentErrorCode implements ErrorCode {
     DECLINED("PAYMENT_DECLINED", "결제가 거절되었습니다.", 422),
     IDEMPOTENCY_KEY_REUSED("PAYMENT_IDEMPOTENCY_KEY_REUSED", "이미 다른 결제에 사용된 요청 키입니다.", 409),
     PAYMENT_NOT_FOUND("PAYMENT_NOT_FOUND", "결제를 찾을 수 없습니다.", 404),
+    NOT_REFUNDABLE("PAYMENT_NOT_REFUNDABLE", "환불할 수 없는 결제입니다.", 409),
+    REFUND_IN_PROGRESS("PAYMENT_REFUND_IN_PROGRESS", "환불이 진행 중인 결제입니다.", 409),
+    ALREADY_REFUNDED("PAYMENT_ALREADY_REFUNDED", "이미 환불된 결제입니다.", 409),
+    REFUND_DECLINED("PAYMENT_REFUND_DECLINED", "환불이 거절되었습니다.", 422),
+    REFUND_IDEMPOTENCY_KEY_REUSED("PAYMENT_REFUND_IDEMPOTENCY_KEY_REUSED", "이미 다른 환불에 사용된 요청 키입니다.", 409),
     ;
     private final String code;
     private final String message;

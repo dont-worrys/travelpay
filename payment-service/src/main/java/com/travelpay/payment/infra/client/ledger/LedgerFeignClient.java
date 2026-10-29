@@ -1,6 +1,7 @@
 package com.travelpay.payment.infra.client.ledger;
 
 import com.travelpay.payment.application.payment.client.ledger.LedgerClient;
+import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
 import com.travelpay.payment.application.payment.client.ledger.LedgerTransactionCommand;
 import org.springframework.context.annotation.Profile;
@@ -20,6 +21,12 @@ public class LedgerFeignClient implements LedgerClient {
             return LedgerResult.declined("잔액이 부족합니다.");
         }
         UUID transactionId = UUID.nameUUIDFromBytes(("ledger-tx:" + command.referenceId()).getBytes());
+        return LedgerResult.approved(transactionId);
+    }
+
+    @Override
+    public LedgerResult refundTransaction(LedgerRefundCommand command) {
+        UUID transactionId = UUID.nameUUIDFromBytes(("payment-refund:" + command.referenceId()).getBytes());
         return LedgerResult.approved(transactionId);
     }
 }

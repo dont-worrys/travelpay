@@ -5,8 +5,10 @@ import com.travelpay.common.auth.web.CurrentUser;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
+import com.travelpay.payment.application.payment.dto.RefundCommand;
 import com.travelpay.payment.presentation.payment.dto.PaymentRequest;
 import com.travelpay.payment.presentation.payment.dto.PaymentResponse;
+import com.travelpay.payment.presentation.payment.dto.RefundRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -35,6 +37,16 @@ public class PaymentController {
     public ResponseEntity<ApiResponse<PaymentResponse>> getPayment(@CurrentUser AuthenticatedUser user,
                                                                   @PathVariable UUID paymentId) {
         PaymentResponse response = PaymentResponse.from(paymentService.getPayment(user.userId(), paymentId));
+        return ResponseEntity.ok(ApiResponse.success(response));
+    }
+
+    @PostMapping("/{paymentId}/refunds")
+    public ResponseEntity<ApiResponse<PaymentResponse>> refundRequest(@CurrentUser AuthenticatedUser user,
+                                                                      @PathVariable UUID paymentId,
+                                                                      @RequestHeader("Idempotency-Key") String idempotencyKey,
+                                                                      @RequestBody @Valid RefundRequest request) {
+        RefundCommand command = request.toCommand(user.userId(), paymentId, idempotencyKey);
+        PaymentResponse response = PaymentResponse.from(paymentService.refundRequest(command));
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 }
