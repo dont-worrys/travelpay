@@ -129,6 +129,7 @@ class LedgerTransactionRecorder {
      * 항목을 반영 순서로 정렬한다. 요청 해시가 항목 순서를 무시하므로 반영도 요청 순서와 무관해야 한다.
      * 계정 ID 순(잠금 순서와 같음), 같은 계정 안에서는 CREDIT 먼저: 순변동이 0 이상이면
      * 중간 잔액이 음수가 되지 않아 USER 계정 apply가 실패하지 않는다.
+     * 같은 계정·방향 항목이 여럿이면 금액, entryType 순으로 정해 balance_after도 요청 순서와 무관하게 한다.
      */
     private static List<ResolvedEntry> inApplyOrder(RegisterTransactionCommand command, List<UUID> accountIds) {
         List<ResolvedEntry> resolved = new ArrayList<>(command.entries().size());
@@ -136,7 +137,9 @@ class LedgerTransactionRecorder {
             resolved.add(new ResolvedEntry(accountIds.get(i), command.entries().get(i)));
         }
         resolved.sort(Comparator.comparing(ResolvedEntry::accountId)
-                .thenComparing(resolvedEntry -> resolvedEntry.entry().direction() == Direction.CREDIT ? 0 : 1));
+                .thenComparing(resolvedEntry -> resolvedEntry.entry().direction() == Direction.CREDIT ? 0 : 1)
+                .thenComparingLong(resolvedEntry -> resolvedEntry.entry().amount())
+                .thenComparing(resolvedEntry -> resolvedEntry.entry().entryType()));
         return resolved;
     }
 
