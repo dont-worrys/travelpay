@@ -81,14 +81,31 @@ public class Payment {
     }
 
     public PaymentHistory approvedHistory(UUID ledgerId) {
-        PaymentStatus previous = changeStatus(PaymentStatus.APPROVED);
+        PaymentStatus previous = changeStatus(PaymentStatus.PENDING, PaymentStatus.APPROVED);
         this.ledgerId = ledgerId;
         return PaymentHistory.of(this.id, previous, this.status, null, PaymentActor.SYSTEM);
     }
 
     public PaymentHistory declinedHistory(String reason) {
-        PaymentStatus previous = changeStatus(PaymentStatus.DECLINED);
+        PaymentStatus previous = changeStatus(PaymentStatus.PENDING, PaymentStatus.DECLINED);
         this.declineReason = reason;
+        return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.SYSTEM);
+    }
+
+    public PaymentHistory refundRequestedHistory(String reason) {
+        validateRefundable();
+        PaymentStatus previous = changeStatus(PaymentStatus.APPROVED, PaymentStatus.REFUND_PENDING);
+        return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.USER);
+    }
+
+    public PaymentHistory refundedHistory() {
+        PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.REFUNDED);
+        return PaymentHistory.of(this.id, previous, this.status, null, PaymentActor.SYSTEM);
+    }
+
+    // 환불이 거절되면 결제는 그대로 유효하므로 APPROVED로 되돌립니다. 거절 사유는 이력과 환불 내역에 남깁니다.
+    public PaymentHistory refundDeclinedHistory(String reason) {
+        PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.APPROVED);
         return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.SYSTEM);
     }
 
@@ -102,8 +119,20 @@ public class Payment {
                 && this.amount.equals(amount);
     }
 
-    private PaymentStatus changeStatus(PaymentStatus next) {
-        if (this.status != PaymentStatus.PENDING) {
+    public void validateRefundable() {
+        if (this.status == PaymentStatus.REFUND_PENDING) {
+            throw new BusinessException(PaymentErrorCode.REFUND_IN_PROGRESS);
+        }
+        if (this.status == PaymentStatus.REFUNDED) {
+            throw new BusinessException(PaymentErrorCode.ALREADY_REFUNDED);
+        }
+        if (this.status != PaymentStatus.APPROVED) {
+            throw new BusinessException(PaymentErrorCode.NOT_REFUNDABLE);
+        }
+    }
+
+    private PaymentStatus changeStatus(PaymentStatus expected, PaymentStatus next) {
+        if (this.status != expected) {
             throw new BusinessException(PaymentErrorCode.INVALID_STATUS_TRANSITION);
         }
         PaymentStatus previous = this.status;
