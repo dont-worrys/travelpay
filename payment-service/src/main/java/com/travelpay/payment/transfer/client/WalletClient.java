@@ -9,9 +9,9 @@ import org.springframework.web.bind.annotation.RequestParam;
 
 /**
  * Wallet 서비스의 내부 지갑 조회 API입니다. 회원당 지갑은 1개이며, 통화별 계정은 원장이 관리합니다.
- * 경로와 반환 정보(지갑 ID, 지갑 상태)는 Wallet 담당자와 합의했습니다.
- * TODO(wallet-service): 응답 필드 이름(walletId, status)과 ApiResponse 감싸기, 지갑이 없을 때 404 여부는
- *  가정입니다. Wallet API가 제공되면 확인하고 맞춥니다.
+ * 응답은 ApiResponse로 감싼 지갑 ID·상태이며, 지갑이 없으면 404(WALLET_NOT_FOUND), userId 누락·형식 오류면 400입니다.
+ * Wallet은 내부 경로에도 회원 헤더 검사를 하므로 User-Id·User-Role은 둘 다 보내지 않거나 둘 다 보내야 합니다.
+ * 하나만 보내면 401이 나며, 이 클라이언트는 둘 다 보내지 않습니다.
  */
 @FeignClient(name = "wallet-service", path = "/internal/v1/wallets")
 public interface WalletClient {

@@ -8,6 +8,7 @@ import com.travelpay.common.response.ApiResponse;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.domain.TransferDirection;
+import com.travelpay.payment.transfer.dto.RecipientResponse;
 import com.travelpay.payment.transfer.dto.TransferCreateRequest;
 import com.travelpay.payment.transfer.dto.TransferResponse;
 import jakarta.validation.Valid;
@@ -52,6 +53,15 @@ public class TransferController {
             @PathVariable UUID transferId
     ) {
         return ApiResponse.success(transferService.get(user.userId(), transferId));
+    }
+
+    /** 송금 전 수취인 확인용이며, 송금 가능 여부만 반환합니다. */
+    @GetMapping("/recipients/{receiverId}")
+    public ApiResponse<RecipientResponse> getRecipient(
+            @CurrentUser AuthenticatedUser user,
+            @PathVariable UUID receiverId
+    ) {
+        return ApiResponse.success(transferService.findRecipient(user.userId(), receiverId));
     }
 
     /** 접수 상태의 송금만 취소하며, 이미 취소된 송금은 현재 상태를 그대로 반환합니다. */

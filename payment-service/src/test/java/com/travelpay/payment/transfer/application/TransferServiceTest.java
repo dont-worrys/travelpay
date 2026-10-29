@@ -9,6 +9,7 @@ import java.util.UUID;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
+import com.travelpay.payment.transfer.client.WalletResponse;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferDirection;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
@@ -29,6 +30,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -215,6 +217,55 @@ class TransferServiceTest {
 
         assertSame(TransferErrorCode.RECEIVER_UNAVAILABLE, exception.getErrorCode());
         verify(transferRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void showsRecipientWithActiveWalletAsTransferable() {
+        when(walletReader.findWallet(RECEIVER_ID)).thenReturn(Optional.of(new WalletResponse(TARGET_WALLET_ID, "ACTIVE")));
+
+        var response = transferService.findRecipient(SENDER_ID, RECEIVER_ID);
+
+        assertEquals(RECEIVER_ID, response.receiverId());
+        assertTrue(response.transferable());
+        verifyNoInteractions(transferRepository);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"PENDING", "SUSPENDED", "CLOSED"})
+    void showsRecipientWithNonActiveWalletAsNotTransferable(String status) {
+        when(walletReader.findWallet(RECEIVER_ID)).thenReturn(Optional.of(new WalletResponse(TARGET_WALLET_ID, status)));
+
+        assertFalse(transferService.findRecipient(SENDER_ID, RECEIVER_ID).transferable());
+    }
+
+    @Test
+    void returnsNotFoundForRecipientWithoutWallet() {
+        when(walletReader.findWallet(RECEIVER_ID)).thenReturn(Optional.empty());
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.findRecipient(SENDER_ID, RECEIVER_ID));
+
+        assertSame(TransferErrorCode.RECEIVER_NOT_FOUND, exception.getErrorCode());
+    }
+
+    @Test
+    void rejectsSelfAsRecipientWithoutCallingWallet() {
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.findRecipient(SENDER_ID, SENDER_ID));
+
+        assertSame(TransferErrorCode.SELF_TRANSFER, exception.getErrorCode());
+        verifyNoInteractions(walletReader);
+    }
+
+    @Test
+    void propagatesWalletServiceErrorOnRecipientLookup() {
+        when(walletReader.findWallet(RECEIVER_ID))
+                .thenThrow(new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE));
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.findRecipient(SENDER_ID, RECEIVER_ID));
+
+        assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
     }
 
     @Test
