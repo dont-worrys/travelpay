@@ -9,6 +9,7 @@ import com.travelpay.ledger.domain.account.LedgerAccount;
 import com.travelpay.ledger.domain.account.LedgerAccountRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
@@ -28,7 +29,7 @@ public class LedgerAccountService {
      * 지갑의 통화별 WALLET 계정을 개설한다. 이미 있는 통화는 건너뛰므로 재시도·동시 요청에도 멱등.
      * 재조회 결과가 통화 수와 다르면 전체 롤백한다.
      */
-    @Transactional(timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
     public WalletAccountsResult openWalletAccounts(OpenWalletAccountsCommand command) {
         UUID walletId = command.walletId();
         boolean created = false;

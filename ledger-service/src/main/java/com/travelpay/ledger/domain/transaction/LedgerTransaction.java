@@ -2,6 +2,7 @@ package com.travelpay.ledger.domain.transaction;
 
 import jakarta.persistence.*;
 import lombok.Getter;
+import org.hibernate.annotations.Immutable;
 
 import java.time.Instant;
 import java.util.Objects;
@@ -11,9 +12,11 @@ import java.util.UUID;
  * 돈이 움직인 사건. INSERT만 하고 수정하지 않는다.
  * 되돌릴 때는 반대 방향의 새 거래를 만들고 originalTransactionId로 원거래를 가리킨다.
  * 멱등 키: UNIQUE(reference_type, reference_id)
+ * {@code @Immutable}은 JPA(Hibernate) 경로의 UPDATE만 막는다. 네이티브 SQL·DB 직접 수정은 막지 못한다.
  */
 @Getter
 @Entity
+@Immutable
 @Table(name = "ledger_transactions")
 public class LedgerTransaction {
 
@@ -77,10 +80,11 @@ public class LedgerTransaction {
 
     /** 확정 거절만 기록한다. 일시적 실패는 기록하지 않고 롤백 + 5xx */
     public static LedgerTransaction rejected(ReferenceType referenceType, UUID referenceId, String requestHash,
-                                             UUID userId, RejectReason rejectReason, String description) {
+                                             UUID userId, RejectReason rejectReason,
+                                             UUID originalTransactionId, String description) {
         return new LedgerTransaction(referenceType, referenceId, requestHash, userId,
                 LedgerTransactionStatus.REJECTED, Objects.requireNonNull(rejectReason, "rejectReason"),
-                null, description);
+                originalTransactionId, description);
     }
 
     public boolean isPosted() {
