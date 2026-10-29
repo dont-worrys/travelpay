@@ -1,5 +1,6 @@
 package com.travelpay.payment.transfer.application;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -239,6 +240,80 @@ class TransferServiceTest {
 
         assertSame(TransferErrorCode.NOT_FOUND, otherUser.getErrorCode());
         assertSame(TransferErrorCode.NOT_FOUND, missing.getErrorCode());
+    }
+
+    @Test
+    void cancelsRequestedTransferBySender() {
+        Transfer existing = persisted(transfer(10_000L, "KRW", null));
+        when(transferRepository.cancelRequested(eq(existing.getId()), eq(SENDER_ID), any(Instant.class)))
+                .thenAnswer(invocation -> {
+                    // 조건부 UPDATE로 DB 상태가 바뀐 결과를 흉내 냅니다.
+                    ReflectionTestUtils.setField(existing, "status", TransferStatus.CANCELLED);
+                    return 1;
+                });
+        when(transferRepository.findById(existing.getId())).thenReturn(Optional.of(existing));
+
+        var response = transferService.cancel(SENDER_ID, existing.getId());
+
+        assertEquals(existing.getId(), response.transferId());
+        assertEquals(TransferStatus.CANCELLED, response.status());
+        assertEquals(TransferDirection.SENT, response.direction());
+    }
+
+    @Test
+    void returnsCurrentStateWhenTransferIsAlreadyCancelled() {
+        Transfer existing = persisted(transfer(10_000L, "KRW", null));
+        ReflectionTestUtils.setField(existing, "status", TransferStatus.CANCELLED);
+        when(transferRepository.cancelRequested(eq(existing.getId()), eq(SENDER_ID), any(Instant.class)))
+                .thenReturn(0);
+        when(transferRepository.findById(existing.getId())).thenReturn(Optional.of(existing));
+
+        var response = transferService.cancel(SENDER_ID, existing.getId());
+
+        assertEquals(TransferStatus.CANCELLED, response.status());
+    }
+
+    @Test
+    void hidesTransferFromReceiverAndNonParticipantOnCancel() {
+        Transfer existing = persisted(transfer(10_000L, "KRW", null));
+        when(transferRepository.cancelRequested(eq(existing.getId()), any(UUID.class), any(Instant.class)))
+                .thenReturn(0);
+        when(transferRepository.findById(existing.getId())).thenReturn(Optional.of(existing));
+
+        var receiver = assertThrows(BusinessException.class,
+                () -> transferService.cancel(RECEIVER_ID, existing.getId()));
+        var otherUser = assertThrows(BusinessException.class,
+                () -> transferService.cancel(OTHER_USER_ID, existing.getId()));
+
+        assertSame(TransferErrorCode.NOT_FOUND, receiver.getErrorCode());
+        assertSame(TransferErrorCode.NOT_FOUND, otherUser.getErrorCode());
+        assertEquals(TransferStatus.REQUESTED, existing.getStatus());
+    }
+
+    @Test
+    void returnsNotFoundWhenCancellingMissingTransfer() {
+        UUID missingId = UUID.randomUUID();
+        when(transferRepository.cancelRequested(eq(missingId), eq(SENDER_ID), any(Instant.class))).thenReturn(0);
+        when(transferRepository.findById(missingId)).thenReturn(Optional.empty());
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.cancel(SENDER_ID, missingId));
+
+        assertSame(TransferErrorCode.NOT_FOUND, exception.getErrorCode());
+    }
+
+    /** 1차에는 취소할 수 없는 상태가 없으므로, UPDATE 대상이 아니었는데 취소 상태도 아닌 경우로 2차의 처리 중·완료 상태를 대신합니다. */
+    @Test
+    void rejectsTransferThatWasNotCancelledAndIsNotAlreadyCancelled() {
+        Transfer existing = persisted(transfer(10_000L, "KRW", null));
+        when(transferRepository.cancelRequested(eq(existing.getId()), eq(SENDER_ID), any(Instant.class)))
+                .thenReturn(0);
+        when(transferRepository.findById(existing.getId())).thenReturn(Optional.of(existing));
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.cancel(SENDER_ID, existing.getId()));
+
+        assertSame(CommonErrorCode.CONFLICT, exception.getErrorCode());
     }
 
     @Test
