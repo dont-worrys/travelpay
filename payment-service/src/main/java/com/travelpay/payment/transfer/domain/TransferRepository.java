@@ -9,6 +9,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.transaction.annotation.Transactional;
 
 public interface TransferRepository extends JpaRepository<Transfer, UUID> {
 
@@ -35,4 +36,18 @@ public interface TransferRepository extends JpaRepository<Transfer, UUID> {
               and t.status = com.travelpay.payment.transfer.domain.TransferStatus.REQUESTED
             """)
     int cancelRequested(UUID transferId, UUID senderId, Instant updatedAt);
+
+    /**
+     * 처리 중(PROCESSING) 송금만 처리 결과 상태로 바꾸고 변경된 행 수(0 또는 1)를 반환합니다.
+     * 같은 송금의 재요청이 동시에 결과를 반영해도 한 번만 바뀌며, 지갑 호출 후 짧게 실행되도록 자체 트랜잭션으로 커밋합니다.
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Transfer t
+            set t.status = :status, t.updatedAt = :updatedAt
+            where t.id = :transferId
+              and t.status = com.travelpay.payment.transfer.domain.TransferStatus.PROCESSING
+            """)
+    int finishProcessing(UUID transferId, TransferStatus status, Instant updatedAt);
 }

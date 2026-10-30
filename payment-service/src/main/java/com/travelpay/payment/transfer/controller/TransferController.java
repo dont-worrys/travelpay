@@ -8,6 +8,7 @@ import com.travelpay.common.response.ApiResponse;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.domain.TransferDirection;
+import com.travelpay.payment.transfer.domain.TransferStatus;
 import com.travelpay.payment.transfer.dto.RecipientResponse;
 import com.travelpay.payment.transfer.dto.TransferCreateRequest;
 import com.travelpay.payment.transfer.dto.TransferResponse;
@@ -36,7 +37,10 @@ public class TransferController {
         this.transferService = transferService;
     }
 
-    /** 송금 접수만 처리하며, 실제 자금 이동 여부는 응답의 status로 구분합니다. */
+    /**
+     * 실제 자금 이동 여부는 응답의 status로 구분합니다.
+     * 지갑 처리 결과를 아직 모르는 송금(PROCESSING)은 202, 그 외(REQUESTED·COMPLETED 등)는 201입니다.
+     */
     @PostMapping
     public ResponseEntity<ApiResponse<TransferResponse>> request(
             @CurrentUser AuthenticatedUser user,
@@ -44,7 +48,8 @@ public class TransferController {
             @Valid @RequestBody TransferCreateRequest request
     ) {
         TransferResponse response = transferService.request(user.userId(), idempotencyKey, request);
-        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.success(response));
+        HttpStatus status = response.status() == TransferStatus.PROCESSING ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
+        return ResponseEntity.status(status).body(ApiResponse.success(response));
     }
 
     @GetMapping("/{transferId}")

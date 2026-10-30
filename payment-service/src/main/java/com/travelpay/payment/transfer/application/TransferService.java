@@ -2,6 +2,7 @@ package com.travelpay.payment.transfer.application;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -12,6 +13,9 @@ import com.travelpay.common.response.PageResponse;
 import com.travelpay.common.util.PageableUtils;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
 import com.travelpay.payment.transfer.client.WalletResponse;
+import com.travelpay.payment.transfer.client.WalletTransferClient;
+import com.travelpay.payment.transfer.client.WalletTransferRequest;
+import com.travelpay.payment.transfer.client.WalletTransferResult;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferCurrency;
 import com.travelpay.payment.transfer.domain.TransferDirection;
@@ -21,6 +25,8 @@ import com.travelpay.payment.transfer.domain.TransferStatus;
 import com.travelpay.payment.transfer.dto.RecipientResponse;
 import com.travelpay.payment.transfer.dto.TransferCreateRequest;
 import com.travelpay.payment.transfer.dto.TransferResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -31,10 +37,14 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * 송금 접수·취소와 조회를 처리합니다.
- * 1차 MVP는 원장 연동 전이라 잔액을 변경하지 않고 REQUESTED 상태로 접수만 기록합니다.
+ * 지갑 송금 처리 구현({@link WalletTransferClient})이 없으면 잔액을 변경하지 않고 REQUESTED 상태로 접수만 기록합니다.
+ * 구현이 있으면 PROCESSING으로 저장한 뒤 지갑 송금 처리를 요청하고 결과에 따라 COMPLETED·FAILED로 바꾸며,
+ * 결과를 모르면 PROCESSING으로 남겨 같은 Idempotency-Key 재요청 때 같은 송금 ID로 다시 요청합니다.
  */
 @Service
 public class TransferService {
+
+    private static final Logger log = LoggerFactory.getLogger(TransferService.class);
 
     public static final int DEFAULT_PAGE_SIZE = 20;
     public static final int MAX_PAGE_SIZE = 100;
@@ -47,15 +57,22 @@ public class TransferService {
 
     private final TransferRepository transferRepository;
     private final TransferWalletReader walletReader;
+    private final Optional<WalletTransferClient> walletTransferClient;
 
-    public TransferService(TransferRepository transferRepository, TransferWalletReader walletReader) {
+    public TransferService(
+            TransferRepository transferRepository,
+            TransferWalletReader walletReader,
+            Optional<WalletTransferClient> walletTransferClient
+    ) {
         this.transferRepository = transferRepository;
         this.walletReader = walletReader;
+        this.walletTransferClient = walletTransferClient;
     }
 
     /**
-     * 송금을 접수합니다. 같은 송금인·키·요청 내용의 재요청은 처음 접수 결과를 반환합니다.
-     * 지갑 조회(원격 호출) 동안 DB 트랜잭션을 잡지 않도록 메소드 전체를 트랜잭션으로 묶지 않습니다.
+     * 송금을 접수합니다. 같은 송금인·키·요청 내용의 재요청은 처음 접수 결과를 반환하며,
+     * 처리 중(PROCESSING)으로 남은 송금이면 지갑 송금 처리를 다시 요청합니다.
+     * 지갑 조회·처리(원격 호출) 동안 DB 트랜잭션을 잡지 않도록 메소드 전체를 트랜잭션으로 묶지 않습니다.
      */
     public TransferResponse request(UUID senderId, String idempotencyKey, TransferCreateRequest request) {
         if (idempotencyKey == null || !IDEMPOTENCY_KEY_PATTERN.matcher(idempotencyKey).matches()) {
@@ -84,25 +101,22 @@ public class TransferService {
         UUID targetWalletId = walletReader.findActiveWalletId(request.receiverId())
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.RECEIVER_UNAVAILABLE));
 
-        Transfer transfer = Transfer.request(
-                senderId,
-                request.receiverId(),
-                sourceWalletId,
-                targetWalletId,
-                request.amount(),
-                request.currency(),
-                memo,
-                idempotencyKey,
-                requestHash
-        );
+        // 지갑 송금 처리를 호출하기 전에 PROCESSING으로 커밋해, 결과를 모르는 송금도 기록에 남깁니다.
+        Transfer transfer = walletTransferClient.isPresent()
+                ? Transfer.process(senderId, request.receiverId(), sourceWalletId, targetWalletId,
+                        request.amount(), request.currency(), memo, idempotencyKey, requestHash)
+                : Transfer.request(senderId, request.receiverId(), sourceWalletId, targetWalletId,
+                        request.amount(), request.currency(), memo, idempotencyKey, requestHash);
+        Transfer saved;
         try {
-            return TransferResponse.of(transferRepository.saveAndFlush(transfer), senderId);
+            saved = transferRepository.saveAndFlush(transfer);
         } catch (DataIntegrityViolationException exception) {
             // 같은 키의 동시 요청이 먼저 저장되면 UNIQUE(sender_id, idempotency_key)에 걸립니다.
-            Transfer saved = transferRepository.findBySenderIdAndIdempotencyKey(senderId, idempotencyKey)
+            Transfer concurrent = transferRepository.findBySenderIdAndIdempotencyKey(senderId, idempotencyKey)
                     .orElseThrow(() -> exception);
-            return replay(saved, requestHash, senderId);
+            return replay(concurrent, requestHash, senderId);
         }
+        return respond(saved, senderId);
     }
 
     /** 송금 당사자가 아니면 송금의 존재를 알리지 않도록 없는 송금과 같은 404를 반환합니다. */
@@ -125,7 +139,7 @@ public class TransferService {
         Transfer transfer = transferRepository.findById(transferId)
                 .filter(found -> found.getSenderId().equals(senderId))
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.NOT_FOUND));
-        // 원장 연동 후 처리 중·완료 같은 상태가 추가되면 UPDATE 대상이 아니므로 여기서 거절됩니다.
+        // 처리 중·완료·실패 송금은 UPDATE 대상이 아니므로 여기서 거절됩니다.
         if (transfer.getStatus() != TransferStatus.CANCELLED) {
             throw new BusinessException(CommonErrorCode.CONFLICT);
         }
@@ -171,7 +185,49 @@ public class TransferService {
         if (!transfer.getRequestHash().equals(requestHash)) {
             throw new BusinessException(TransferErrorCode.IDEMPOTENCY_KEY_REUSED);
         }
-        return TransferResponse.of(transfer, senderId);
+        return respond(transfer, senderId);
+    }
+
+    /** 처리 중이면 지갑 송금 처리를 요청하고, 잔액 부족으로 실패한 송금은 재요청에도 처음과 같은 422를 반환합니다. */
+    private TransferResponse respond(Transfer transfer, UUID senderId) {
+        Transfer current = processFunds(transfer);
+        if (current.getStatus() == TransferStatus.FAILED) {
+            throw new BusinessException(TransferErrorCode.INSUFFICIENT_BALANCE);
+        }
+        return TransferResponse.of(current, senderId);
+    }
+
+    /**
+     * PROCESSING 송금의 지갑 송금 처리를 요청하고 결과 상태를 반영합니다. 그 외 상태는 다시 요청하지 않습니다.
+     * 요청은 저장된 송금 값으로 만들어 재전송도 처음과 같은 송금 ID·내용을 보내며, 중복 처리 방지는 구현체가 보장합니다.
+     * 결과를 모르면(UNKNOWN·예외) 실패로 단정하지 않고 PROCESSING으로 둡니다.
+     */
+    private Transfer processFunds(Transfer transfer) {
+        if (transfer.getStatus() != TransferStatus.PROCESSING || walletTransferClient.isEmpty()) {
+            return transfer;
+        }
+        WalletTransferResult result;
+        try {
+            result = walletTransferClient.get().transfer(WalletTransferRequest.of(transfer));
+        } catch (RuntimeException exception) {
+            log.warn("지갑 송금 처리 결과를 확인할 수 없어 처리 중으로 둡니다. transferId={}", transfer.getId(), exception);
+            return transfer;
+        }
+        if (result == null || result == WalletTransferResult.UNKNOWN) {
+            return transfer;
+        }
+        TransferStatus finished = result == WalletTransferResult.SUCCEEDED
+                ? TransferStatus.COMPLETED : TransferStatus.FAILED;
+        try {
+            // 동시 재요청이 먼저 반영했으면 0행이 바뀌며, 어느 쪽이든 다시 읽은 상태를 따릅니다.
+            transferRepository.finishProcessing(transfer.getId(), finished, Instant.now().truncatedTo(ChronoUnit.MICROS));
+            return transferRepository.findById(transfer.getId()).orElseThrow();
+        } catch (RuntimeException exception) {
+            // 지갑 처리 결과는 확정됐지만 반영하지 못했으므로 처리 중으로 응답하고, 같은 키 재요청의 재전송으로 반영합니다.
+            log.error("지갑 송금 처리 결과를 반영하지 못해 처리 중으로 둡니다. transferId={}, result={}",
+                    transfer.getId(), result, exception);
+            return transfer;
+        }
     }
 
     private static String normalizeMemo(String memo) {

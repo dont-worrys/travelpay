@@ -24,6 +24,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -71,6 +72,36 @@ class TransferControllerTest {
                 .andExpect(jsonPath("$.data.status").value("REQUESTED"))
                 .andExpect(jsonPath("$.data.createdAt").value("2026-10-28T01:02:03.123456Z"))
                 .andExpect(jsonPath("$.error").doesNotExist());
+    }
+
+    @Test
+    void returnsCreatedForCompletedTransfer() throws Exception {
+        givenTransferResult(TransferStatus.COMPLETED);
+
+        postTransfer()
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"));
+    }
+
+    @Test
+    void returnsAcceptedWhenWalletResultIsUnknown() throws Exception {
+        givenTransferResult(TransferStatus.PROCESSING);
+
+        postTransfer()
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.status").value("PROCESSING"));
+    }
+
+    @Test
+    void returnsUnprocessableEntityForInsufficientBalance() throws Exception {
+        when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
+                .thenThrow(new BusinessException(TransferErrorCode.INSUFFICIENT_BALANCE));
+
+        postTransfer()
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("TRANSFER_INSUFFICIENT_BALANCE"));
     }
 
     @Test
@@ -241,6 +272,19 @@ class TransferControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
         verifyNoInteractions(transferService);
+    }
+
+    private void givenTransferResult(TransferStatus status) {
+        when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
+                .thenReturn(new TransferResponse(UUID.randomUUID(), TransferDirection.SENT, SENDER.userId(),
+                        RECEIVER_ID, 10_000L, "KRW", status, "저녁값", Instant.parse("2026-10-30T01:02:03Z")));
+    }
+
+    private ResultActions postTransfer() throws Exception {
+        return mvc(SENDER).perform(post("/api/v1/transfers")
+                .header(TransferController.IDEMPOTENCY_KEY_HEADER, "key-1")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(VALID_BODY));
     }
 
     private MockMvc mvc(AuthenticatedUser user) {

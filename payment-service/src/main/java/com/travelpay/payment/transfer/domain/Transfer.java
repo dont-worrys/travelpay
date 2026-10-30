@@ -82,7 +82,8 @@ public class Transfer {
             String currency,
             String memo,
             String idempotencyKey,
-            String requestHash
+            String requestHash,
+            TransferStatus status
     ) {
         this.senderId = Objects.requireNonNull(senderId, "senderId");
         this.receiverId = Objects.requireNonNull(receiverId, "receiverId");
@@ -93,7 +94,7 @@ public class Transfer {
         this.memo = memo;
         this.idempotencyKey = Objects.requireNonNull(idempotencyKey, "idempotencyKey");
         this.requestHash = Objects.requireNonNull(requestHash, "requestHash");
-        this.status = TransferStatus.REQUESTED;
+        this.status = status;
     }
 
     /** 검증을 마친 송금 요청을 접수 상태로 생성합니다. */
@@ -117,7 +118,34 @@ public class Transfer {
                 currency,
                 memo,
                 idempotencyKey,
-                requestHash
+                requestHash,
+                TransferStatus.REQUESTED
+        );
+    }
+
+    /** 검증을 마친 송금 요청을 지갑 처리 진행 중 상태로 생성합니다. 지갑 송금 처리를 호출하기 전에 저장합니다. */
+    public static Transfer process(
+            UUID senderId,
+            UUID receiverId,
+            UUID sourceWalletId,
+            UUID targetWalletId,
+            long amount,
+            String currency,
+            String memo,
+            String idempotencyKey,
+            String requestHash
+    ) {
+        return new Transfer(
+                senderId,
+                receiverId,
+                sourceWalletId,
+                targetWalletId,
+                amount,
+                currency,
+                memo,
+                idempotencyKey,
+                requestHash,
+                TransferStatus.PROCESSING
         );
     }
 
