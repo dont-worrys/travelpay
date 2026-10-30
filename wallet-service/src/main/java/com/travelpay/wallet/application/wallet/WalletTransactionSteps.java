@@ -15,6 +15,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +90,21 @@ public class WalletTransactionSteps {
             throw new BusinessException(WalletErrorCode.WALLET_NOT_ACTIVE);
         }
         return wallet.getId();
+    }
+
+    /** 내부 잔액 조회의 DB 조회 단계. 이 트랜잭션이 끝난 뒤(DB 연결 반납) 원장을 호출한다. 지갑 상태로 막지 않고 응답에 담는다 */
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
+    public WalletCurrencyRows findWalletCurrencies(UUID userId) {
+        Wallet wallet = walletRepository.findByUserId(userId)
+                .orElseThrow(() -> new BusinessException(WalletErrorCode.WALLET_NOT_FOUND));
+        List<WalletCurrency> currencies = walletCurrencyRepository.findByWalletId(wallet.getId()).stream()
+                .sorted(Comparator.comparing(WalletCurrency::getCurrency))
+                .toList();
+        return new WalletCurrencyRows(wallet.getId(), wallet.getStatus(), currencies);
+    }
+
+    /** 지갑과 통화별 행. 행은 통화 순 */
+    public record WalletCurrencyRows(UUID walletId, WalletStatus status, List<WalletCurrency> currencies) {
     }
 
     private void requireOpenable(Wallet wallet) {
