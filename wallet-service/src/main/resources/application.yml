@@ -27,6 +27,20 @@ spring:
             # 실명 조회는 단건 조회라 짧게. 초과하면 503 (재시도는 호출자가 같은 키로)
             connect-timeout: 1000
             read-timeout: 2000
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        # 발행기 트랜잭션(10초)보다 먼저 포기하도록 짧게
+        delivery.timeout.ms: 5000
+        request.timeout.ms: 3000
+        linger.ms: 5
+        # Kafka가 꺼져 있으면 send() 자체가 기본 60초 멈춤 → 짧게 제한
+        max.block.ms: 3000
 
 travelpay:
   auth:
