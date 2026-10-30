@@ -11,51 +11,49 @@ import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
-import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.RestClient;
-import org.springframework.web.client.RestClientException;
-import org.springframework.web.client.RestClientResponseException;
+import feign.FeignException;
+import feign.codec.DecodeException;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * 지갑 서비스의 내부 잔액 API로 통화별 잔액을 가져옵니다.
- * 지갑 서비스의 상태 문자열은 ACTIVE 여부로만 바꾸고, 환전이 지원하지 않는 통화는 건너뜁니다.
+ * 지갑 서비스의 내부 잔액 API 응답을 환전의 지갑 잔액으로 바꿉니다. 응답 본문은 예외 메시지·로그에 싣지 않습니다.
+ * - 2xx: 지갑 서비스의 상태 문자열은 ACTIVE 여부로만 바꾸고, 환전이 지원하지 않는 통화는 건너뜁니다.
+ * - 404 WALLET_NOT_FOUND: 지갑 없음 (empty)
+ * - 그 밖의 4xx·5xx·타임아웃·연결 실패·형식 이상: WalletBalanceFetchException
  */
-public class WalletBalanceClient implements WalletBalanceReader {
+@Component
+@RequiredArgsConstructor
+public class WalletBalanceClientAdapter implements WalletBalanceReader {
 
     private static final String ACTIVE = "ACTIVE";
     private static final String WALLET_NOT_FOUND = "WALLET_NOT_FOUND";
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
-    private final RestClient restClient;
-
-    public WalletBalanceClient(RestClient restClient) {
-        this.restClient = Objects.requireNonNull(restClient, "restClient");
-    }
+    private final WalletFeignClient feignClient;
 
     @Override
     public Optional<WalletBalances> read(UUID userId) {
         Objects.requireNonNull(userId, "userId");
-        String body;
+        WalletBalancesResponse response;
         try {
-            body = restClient.get()
-                    .uri(builder -> builder.queryParam("userId", userId).build())
-                    .retrieve()
-                    .body(String.class);
-        } catch (HttpClientErrorException.NotFound e) {
+            response = feignClient.getBalances(userId);
+        } catch (DecodeException e) {
+            throw unreadableResponse("JSON을 해석하지 못했습니다.");
+        } catch (FeignException e) {
             // 경로가 틀린 404와 구분하려고, 지갑 서비스의 지갑 없음 코드일 때만 지갑이 없다고 봅니다.
-            if (isWalletNotFound(e.getResponseBodyAsString())) {
+            if (e.status() == 404 && isWalletNotFound(e.contentUTF8())) {
                 return Optional.empty();
             }
-            throw callFailed("HTTP 404");
-        } catch (RestClientResponseException e) {
-            // 응답 본문은 로그로 남기지 않고 상태 코드만 남깁니다.
-            throw callFailed("HTTP " + e.getStatusCode().value());
-        } catch (RestClientException e) {
-            throw callFailed(e.getMessage());
+            // 타임아웃·연결 실패는 응답이 없어 status가 음수입니다.
+            throw callFailed(e.status() < 0 ? "응답 없음" : "HTTP " + e.status());
         }
-        return Optional.of(toWalletBalances(parse(body)));
+        if (response == null) {
+            throw unreadableResponse("본문이 비어 있습니다.");
+        }
+        return Optional.of(toWalletBalances(response));
     }
 
     /**
@@ -85,27 +83,19 @@ public class WalletBalanceClient implements WalletBalanceReader {
         return new WalletBalances(data.walletId(), ACTIVE.equals(data.status()), accounts);
     }
 
+    /** 오류 응답 본문의 error.code만 봅니다. 본문을 해석하지 못하면 지갑 없음으로 보지 않습니다. */
     private static boolean isWalletNotFound(String body) {
+        if (body == null || body.isBlank()) {
+            return false;
+        }
         try {
-            WalletBalancesResponse response = parse(body);
+            WalletBalancesResponse response = JSON.readValue(body, WalletBalancesResponse.class);
             return response.error() != null && WALLET_NOT_FOUND.equals(response.error().code());
-        } catch (WalletBalanceFetchException e) {
+        } catch (JacksonException e) {
             return false;
         }
     }
 
-    private static WalletBalancesResponse parse(String body) {
-        if (body == null || body.isBlank()) {
-            throw unreadableResponse("본문이 비어 있습니다.");
-        }
-        try {
-            return JSON.readValue(body, WalletBalancesResponse.class);
-        } catch (JacksonException e) {
-            throw unreadableResponse(e.getOriginalMessage());
-        }
-    }
-
-    // 5XX, 타임 아웃 및 네트워크 오류
     private static WalletBalanceFetchException callFailed(String reason) {
         return new WalletBalanceFetchException("지갑 잔액 API 호출 실패: " + reason);
     }
