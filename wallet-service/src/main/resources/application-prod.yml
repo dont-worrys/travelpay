@@ -14,6 +14,9 @@ travelpay:
   auth:
     header-context:
       enabled: true
+  wallet:
+    # 계좌번호 AES-256-GCM 키 (Base64, 32바이트). 없으면 기동 실패
+    account-number-key: ${WALLET_ACCOUNT_NUMBER_KEY}
 
 server:
   port: 8080

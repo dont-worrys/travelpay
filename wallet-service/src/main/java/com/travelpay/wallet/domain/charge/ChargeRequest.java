@@ -44,12 +44,9 @@ public class ChargeRequest {
     @Column(name = "currency", nullable = false, updatable = false, length = 3)
     private Currency currency;
 
-    @Column(name = "bank_code", nullable = false, updatable = false, length = 10)
-    private String bankCode;
-
-    /** 암호화된 계좌번호. 마스킹 값은 복호화 후 서비스/응답 계층에서 만든다. */
-    @Column(name = "account_number_enc", nullable = false, updatable = false)
-    private String accountNumberEnc;
+    /** bank_code, account_number_enc(암호문). 마스킹 값은 응답을 만들 때만 복호화해 만든다 */
+    @Embedded
+    private BankAccount bankAccount;
 
     @Column(name = "holder_name_snapshot", nullable = false, updatable = false, length = 100)
     private String holderNameSnapshot;
@@ -96,8 +93,7 @@ public class ChargeRequest {
     }
 
     private ChargeRequest(UUID userId, UUID walletId, long amount, Currency currency,
-                          String bankCode, String accountNumberEnc, String holderNameSnapshot,
-                          UUID idempotencyKey) {
+                          BankAccount bankAccount, String holderNameSnapshot, UUID idempotencyKey) {
         if (amount <= 0) {
             throw new IllegalArgumentException("금액은 0보다 커야 합니다.");
         }
@@ -105,8 +101,7 @@ public class ChargeRequest {
         this.walletId = Objects.requireNonNull(walletId, "walletId");
         this.amount = amount;
         this.currency = Objects.requireNonNull(currency, "currency");
-        this.bankCode = Objects.requireNonNull(bankCode, "bankCode");
-        this.accountNumberEnc = Objects.requireNonNull(accountNumberEnc, "accountNumberEnc");
+        this.bankAccount = Objects.requireNonNull(bankAccount, "bankAccount");
         this.holderNameSnapshot = Objects.requireNonNull(holderNameSnapshot, "holderNameSnapshot");
         this.idempotencyKey = Objects.requireNonNull(idempotencyKey, "idempotencyKey");
         this.status = ChargeStatus.REQUESTED;
@@ -120,10 +115,18 @@ public class ChargeRequest {
     }
 
     public static ChargeRequest create(UUID userId, UUID walletId, long amount, Currency currency,
-                                       String bankCode, String accountNumberEnc,
-                                       String holderNameSnapshot, UUID idempotencyKey) {
+                                       BankAccount bankAccount, String holderNameSnapshot,
+                                       UUID idempotencyKey) {
         return new ChargeRequest(userId, walletId, amount, currency,
-                bankCode, accountNumberEnc, holderNameSnapshot, idempotencyKey);
+                bankAccount, holderNameSnapshot, idempotencyKey);
+    }
+
+    /** 같은 멱등 키 재요청이 처음 요청과 같은 내용인지. 계좌번호는 복호화해 비교한다 */
+    public boolean isSameRequest(long amount, Currency currency, String bankCode, String accountNumber,
+                                 AccountNumberCipher cipher) {
+        return this.amount == amount
+                && this.currency == currency
+                && bankAccount.matches(bankCode, accountNumber, cipher);
     }
 
     public boolean isOwnedBy(UUID requesterId) {
