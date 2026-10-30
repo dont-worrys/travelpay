@@ -60,7 +60,7 @@ class TransferServiceTest {
     void setUp() {
         transferRepository = mock(TransferRepository.class);
         walletReader = mock(TransferWalletReader.class);
-        // 지갑 송금 처리 구현이 없는 현재 운영 구성입니다. 구현이 있을 때의 흐름은 TransferWalletFlowTest에서 검증합니다.
+        // 원장 거래 등록 구현이 없는 현재 운영 구성입니다. 구현이 있을 때의 흐름은 TransferLedgerFlowTest에서 검증합니다.
         transferService = new TransferService(transferRepository, walletReader, Optional.empty());
     }
 
@@ -77,7 +77,7 @@ class TransferServiceTest {
         assertEquals(10_000L, response.amount());
         assertEquals("저녁값", response.memo());
         verify(transferRepository).saveAndFlush(any(Transfer.class));
-        verify(transferRepository, never()).finishProcessing(any(), any(), any());
+        verify(transferRepository, never()).finishProcessing(any(), any(), any(), any());
     }
 
     @Test

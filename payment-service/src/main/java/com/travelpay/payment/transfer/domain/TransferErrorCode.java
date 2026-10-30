@@ -12,7 +12,8 @@ public enum TransferErrorCode implements ErrorCode {
     IDEMPOTENCY_KEY_REUSED("TRANSFER_IDEMPOTENCY_KEY_REUSED", "같은 Idempotency-Key로 다른 송금을 요청할 수 없습니다.", 409),
     SENDER_WALLET_UNAVAILABLE("TRANSFER_SENDER_WALLET_UNAVAILABLE", "송금할 수 있는 지갑이 없습니다.", 422),
     RECEIVER_UNAVAILABLE("TRANSFER_RECEIVER_UNAVAILABLE", "송금할 수 없는 수취인입니다.", 422),
-    INSUFFICIENT_BALANCE("TRANSFER_INSUFFICIENT_BALANCE", "잔액이 부족합니다.", 422);
+    INSUFFICIENT_BALANCE("TRANSFER_INSUFFICIENT_BALANCE", "잔액이 부족합니다.", 422),
+    ACCOUNT_UNAVAILABLE("TRANSFER_ACCOUNT_UNAVAILABLE", "송금할 수 없는 계정입니다.", 422);
 
     private final String code;
     private final String message;

@@ -14,6 +14,8 @@ import com.travelpay.payment.transfer.dto.TransferResponse;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -179,7 +181,33 @@ class TransferRepositoryIntegrationTest {
         Transfer saved = transferRepository.saveAndFlush(transfer(UUID.randomUUID(), UUID.randomUUID(), "ck", 1_000L));
 
         assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
-                "update transfer set status = 'COMPLETED' where id = ?", saved.getId()));
+                "update transfer set status = 'UNKNOWN_STATUS' where id = ?", saved.getId()));
+    }
+
+    /** PostgreSQL은 제약 위반 후 트랜잭션을 더 쓸 수 없으므로 위반 하나씩 따로 실행합니다. */
+    @ParameterizedTest
+    @CsvSource(value = {"FAILED, NULL", "COMPLETED, INSUFFICIENT_BALANCE", "FAILED, UNKNOWN_REASON"}, nullValues = "NULL")
+    void failureReasonIsRequiredOnlyForFailedTransfer(String status, String failureReason) {
+        Transfer saved = transferRepository.saveAndFlush(processing(UUID.randomUUID(), "reason"));
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update transfer set status = ?, failure_reason = ? where id = ?", status, failureReason, saved.getId()));
+    }
+
+    @Test
+    void finishProcessingUpdatesOnlyProcessingTransferOnce() {
+        Transfer saved = transferRepository.saveAndFlush(processing(UUID.randomUUID(), "finish"));
+        Instant now = Instant.now();
+
+        int first = transferRepository.finishProcessing(saved.getId(), TransferStatus.FAILED,
+                TransferFailureReason.INSUFFICIENT_BALANCE, now);
+        int second = transferRepository.finishProcessing(saved.getId(), TransferStatus.COMPLETED, null, now);
+
+        assertEquals(1, first);
+        assertEquals(0, second);
+        Transfer found = transferRepository.findById(saved.getId()).orElseThrow();
+        assertEquals(TransferStatus.FAILED, found.getStatus());
+        assertEquals(TransferFailureReason.INSUFFICIENT_BALANCE, found.getFailureReason());
     }
 
     private List<UUID> collectAllPages(UUID userId, TransferDirection direction, int size) {
@@ -201,6 +229,11 @@ class TransferRepositoryIntegrationTest {
                 createdAt.atOffset(ZoneOffset.UTC), saved.getId());
         entityManager.detach(saved);
         return transferRepository.findById(saved.getId()).orElseThrow();
+    }
+
+    private static Transfer processing(UUID senderId, String idempotencyKey) {
+        return Transfer.process(senderId, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+                1_000L, "KRW", null, idempotencyKey, REQUEST_HASH);
     }
 
     private static Transfer transfer(UUID senderId, UUID receiverId, String idempotencyKey, long amount) {
