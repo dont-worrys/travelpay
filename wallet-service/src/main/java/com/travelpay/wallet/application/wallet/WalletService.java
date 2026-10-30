@@ -1,6 +1,8 @@
 package com.travelpay.wallet.application.wallet;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.wallet.application.wallet.WalletTransactionSteps.WalletCurrencyRows;
+import com.travelpay.wallet.application.wallet.dto.InternalWalletBalancesResult;
 import com.travelpay.wallet.application.wallet.dto.LedgerAccount;
 import com.travelpay.wallet.application.wallet.dto.OpenWalletCommand;
 import com.travelpay.wallet.application.wallet.dto.OpenWalletResult;
@@ -18,7 +20,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -74,6 +78,35 @@ public class WalletService {
         return new WalletBalancesResult(accounts.stream()
                 .map(account -> new WalletBalancesResult.Balance(account.currency(), account.balance()))
                 .toList());
+    }
+
+    /** 환전용. 지갑에 행이 있는 통화만, 원장 잔액을 그대로 돌려준다 (캐시 없음) */
+    public InternalWalletBalancesResult getInternalBalances(UUID userId) {
+        Objects.requireNonNull(userId, "userId");
+        WalletCurrencyRows rows = steps.findWalletCurrencies(userId);
+        UUID walletId = rows.walletId();
+        if (rows.currencies().isEmpty()) {
+            return new InternalWalletBalancesResult(walletId, rows.status(), List.of());
+        }
+        Map<Currency, Long> ledgerBalances = new EnumMap<>(Currency.class);
+        callLedger(walletId, userId, () -> ledgerAccountClient.findAccounts(walletId))
+                .orElseThrow(() -> {
+                    log.error("통화 행이 있는 지갑의 원장 계정 없음 walletId={} userId={}", walletId, userId);
+                    return new IllegalStateException("지갑과 원장 계정 상태가 일치하지 않습니다.");
+                })
+                .forEach(account -> ledgerBalances.put(account.currency(), account.balance()));
+        List<InternalWalletBalancesResult.Balance> balances = rows.currencies().stream()
+                .map(row -> {
+                    Long balance = ledgerBalances.get(row.getCurrency());
+                    if (balance == null) {
+                        log.error("원장에 통화 계정 없음 walletId={} userId={} currency={}",
+                                walletId, userId, row.getCurrency());
+                        throw new IllegalStateException("지갑과 원장 계정 상태가 일치하지 않습니다.");
+                    }
+                    return new InternalWalletBalancesResult.Balance(row.getCurrency(), balance, row.getStatus());
+                })
+                .toList();
+        return new InternalWalletBalancesResult(walletId, rows.status(), balances);
     }
 
     /** 재시도로 풀리지 않는 원장 응답은 지갑·회원 식별자와 함께 ERROR로 남긴다. 원장 응답 내용은 남기지 않는다 */
