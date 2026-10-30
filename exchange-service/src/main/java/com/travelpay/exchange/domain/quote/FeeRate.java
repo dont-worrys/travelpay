@@ -36,4 +36,14 @@ public record FeeRate(BigDecimal value) {
                 .setScale(amount.currency().fractionDigits(), RoundingMode.UP);
         return Money.of(amount.currency(), fee);
     }
+
+    /**
+     * 수수료까지 더해도 {@code total}을 넘지 않는 가장 큰 보내는 금액입니다. {@link #feeFor}의 역계산입니다.
+     * total ÷ (1 + 수수료율)을 통화 자릿수로 버림합니다. 수수료를 올림해도 합계가 total 이하이고, 최소 단위 하나만 더 보내면 넘습니다.
+     */
+    public Money maxAmountWithin(Money total) {
+        BigDecimal amount = total.amount().divide(BigDecimal.ONE.add(value),
+                total.currency().fractionDigits(), RoundingMode.DOWN);
+        return Money.of(total.currency(), amount);
+    }
 }
