@@ -37,7 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
-        "travelpay.wallet.outbox.publisher.enabled=false"
+        "travelpay.wallet.outbox.publisher.enabled=false",
+        "spring.kafka.admin.auto-create=false"
 })
 class ChargeStatusTransitionerIntegrationTest {
 
