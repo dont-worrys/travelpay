@@ -5,9 +5,13 @@ import com.travelpay.payment.domain.payment.PaymentRepository;
 import com.travelpay.payment.domain.payment.PaymentStatus;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -38,6 +42,12 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
             return paymentJpaRepository.findByUserId(userId, pageable);
         }
         return paymentJpaRepository.findByUserIdAndStatus(userId, status, pageable);
+    }
+
+    @Override
+    public List<Payment> findStalePending(Instant before, int limit) {
+        return paymentJpaRepository.findByStatusAndUpdatedAtBefore(
+                PaymentStatus.PENDING, before, PageRequest.of(0, limit, Sort.by("updatedAt")));
     }
 
 }

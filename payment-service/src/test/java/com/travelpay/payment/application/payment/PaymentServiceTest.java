@@ -1,7 +1,7 @@
 package com.travelpay.payment.application.payment;
 
 import java.util.ArrayList;
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -12,7 +12,7 @@ import com.travelpay.payment.application.payment.client.ledger.LedgerClient;
 import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
 import com.travelpay.payment.application.payment.client.ledger.LedgerTransactionCommand;
-import com.travelpay.payment.application.payment.client.wallet.CurrencyWallet;
+import com.travelpay.payment.application.payment.client.wallet.Wallet;
 import com.travelpay.payment.application.payment.client.wallet.WalletClient;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
@@ -48,7 +48,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -65,14 +64,13 @@ class PaymentServiceTest {
     private static final UUID OTHER_USER_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
     private static final UUID PAYMENT_ID = UUID.fromString("88888888-8888-8888-8888-888888888888");
     private static final UUID MERCHANT_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
-    private static final UUID WALLET_CURRENCY_ID = UUID.fromString("44444444-4444-4444-4444-444444444444");
-    private static final UUID LEDGER_ACCOUNT_ID = UUID.fromString("77777777-7777-7777-7777-777777777777");
+    private static final UUID WALLET_ID = UUID.fromString("44444444-4444-4444-4444-444444444444");
     private static final UUID LEDGER_TRANSACTION_ID = UUID.fromString("66666666-6666-6666-6666-666666666666");
     private static final UUID REFUND_ID = UUID.fromString("cccccccc-cccc-cccc-cccc-cccccccccccc");
     private static final UUID REFUND_TRANSACTION_ID = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
     private static final UUID OTHER_PAYMENT_ID = UUID.fromString("99999999-9999-9999-9999-999999999999");
     private static final UUID OLDER_PAYMENT_ID = UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd");
-    private static final LocalDateTime CREATED_AT = LocalDateTime.of(2026, 10, 29, 9, 12, 34, 567_000_000);
+    private static final Instant CREATED_AT = Instant.parse("2026-10-29T00:12:34.567Z");
     private static final String KEY = "payment-key-1";
     private static final String REFUND_KEY = "refund-key-1";
     private static final String REFUND_REASON = "단순 변심";
@@ -138,7 +136,7 @@ class PaymentServiceTest {
     }
 
     @Test
-    void sendsWalletLedgerAccountAndPaymentReferenceToLedger() {
+    void sendsStoredWalletAndPaymentReferenceToLedger() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
         when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
@@ -148,7 +146,8 @@ class PaymentServiceTest {
         ArgumentCaptor<LedgerTransactionCommand> captor = ArgumentCaptor.forClass(LedgerTransactionCommand.class);
         verify(ledgerClient).createTransaction(captor.capture());
         LedgerTransactionCommand sent = captor.getValue();
-        assertEquals(LEDGER_ACCOUNT_ID, sent.debitAccountId());
+        // 재시도해도 같은 요청이 되도록 지갑 조회 결과가 아닌 결제에 저장된 지갑 ID를 보냅니다.
+        assertEquals(WALLET_ID, sent.debitAccountId());
         assertEquals(CurrencyCode.KRW, sent.currency());
         assertEquals(10_000L, sent.amount());
         assertEquals("PAYMENT", sent.referenceType());
@@ -228,14 +227,28 @@ class PaymentServiceTest {
     }
 
     @Test
-    void throwsWhenCurrencyWalletNotFound() {
+    void throwsWhenWalletNotFound() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
-        when(walletClient.findCurrencyWallet(USER_ID, CurrencyCode.KRW)).thenReturn(Optional.empty());
+        when(walletClient.findWallet(USER_ID)).thenReturn(Optional.empty());
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> paymentService.paymentRequest(command(10_000L)));
 
         assertEquals(PaymentErrorCode.WALLET_NOT_FOUND, exception.getErrorCode());
+        verify(paymentRepository, never()).save(any(Payment.class));
+        verifyNoInteractions(ledgerClient, paymentHistoryRepository);
+    }
+
+    @Test
+    void throwsWhenWalletIsNotActive() {
+        givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
+        when(walletClient.findWallet(USER_ID))
+                .thenReturn(Optional.of(new Wallet(WALLET_ID, "SUSPENDED")));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.paymentRequest(command(10_000L)));
+
+        assertEquals(PaymentErrorCode.WALLET_NOT_ACTIVE, exception.getErrorCode());
         verify(paymentRepository, never()).save(any(Payment.class));
         verifyNoInteractions(ledgerClient, paymentHistoryRepository);
     }
@@ -281,19 +294,87 @@ class PaymentServiceTest {
     }
 
     @Test
-    void returnsExistingPaymentWhenSameKeyIsRequestedConcurrently() {
+    void settlesExistingPendingPaymentWhenSameKeyIsRequestedConcurrently() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
+        Payment pending = paymentWithId(existingPayment(10_000L));
         when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY))
-                .thenReturn(Optional.empty(), Optional.of(existingPayment(10_000L)));
+                .thenReturn(Optional.empty(), Optional.of(pending));
         when(paymentRepository.save(any(Payment.class)))
-                .thenThrow(new DataIntegrityViolationException("uk_payments_user_id_idempotency_key"));
+                .thenThrow(new DataIntegrityViolationException("uk_payments_user_id_idempotency_key"))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+
+        PaymentResult result = paymentService.paymentRequest(command(10_000L));
+
+        assertEquals(PaymentStatus.APPROVED, result.status());
+        assertEquals(10_000L, result.amount());
+        verify(ledgerClient, times(1)).createTransaction(any());
+    }
+
+    @Test
+    void approvesPendingPaymentWhenSameKeyIsRequestedAgain() {
+        Payment pending = paymentWithId(existingPayment(10_000L));
+        when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.of(pending));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+
+        PaymentResult result = paymentService.paymentRequest(command(10_000L));
+
+        assertEquals(PaymentStatus.APPROVED, result.status());
+        assertEquals(LEDGER_TRANSACTION_ID, pending.getLedgerId());
+        ArgumentCaptor<LedgerTransactionCommand> captor = ArgumentCaptor.forClass(LedgerTransactionCommand.class);
+        verify(ledgerClient, times(1)).createTransaction(captor.capture());
+        assertEquals(PAYMENT_ID, captor.getValue().referenceId());
+        verify(paymentRepository, times(1)).save(pending);
+        List<PaymentHistory> histories = savedHistories(1);
+        assertEquals(PaymentStatus.PENDING, histories.get(0).getPreviousStatus());
+        assertEquals(PaymentStatus.APPROVED, histories.get(0).getCurrentStatus());
+        verifyNoInteractions(merchantRepository, walletClient);
+    }
+
+    @Test
+    void throwsDeclinedWhenPendingPaymentIsDeclinedOnSameKeyRequest() {
+        Payment pending = paymentWithId(existingPayment(10_000L));
+        when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.of(pending));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.declined("잔액이 부족합니다."));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.paymentRequest(command(10_000L)));
+
+        assertEquals(PaymentErrorCode.DECLINED, exception.getErrorCode());
+        assertEquals(PaymentStatus.DECLINED, pending.getStatus());
+        verify(paymentRepository, times(1)).save(pending);
+        savedHistories(1);
+    }
+
+    @Test
+    void keepsPendingWhenLedgerResultIsStillUnknownOnSameKeyRequest() {
+        Payment pending = paymentWithId(existingPayment(10_000L));
+        when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.of(pending));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
 
         PaymentResult result = paymentService.paymentRequest(command(10_000L));
 
         assertEquals(PaymentStatus.PENDING, result.status());
-        assertEquals(10_000L, result.amount());
-        verifyNoInteractions(ledgerClient);
+        verify(ledgerClient, times(1)).createTransaction(any());
+        verify(paymentRepository, never()).save(any(Payment.class));
+        verifyNoInteractions(paymentHistoryRepository);
+    }
+
+    @Test
+    void returnsSettledPaymentWhenAnotherRequestSettledItFirst() {
+        Payment pending = paymentWithId(existingPayment(10_000L));
+        Payment settledByOther = approvedPayment();
+        when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.of(pending));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+        when(paymentRepository.save(any(Payment.class)))
+                .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(settledByOther));
+
+        PaymentResult result = paymentService.paymentRequest(command(10_000L));
+
+        assertEquals(PaymentStatus.APPROVED, result.status());
+        assertEquals(PAYMENT_ID, result.paymentId());
     }
 
     @Test
@@ -335,7 +416,7 @@ class PaymentServiceTest {
     }
 
     private Payment existingPayment(long amount) {
-        return Payment.create(USER_ID, WALLET_CURRENCY_ID, KEY, MERCHANT_ID, "테스트 가맹점", "테스트 주문",
+        return Payment.create(USER_ID, WALLET_ID, KEY, MERCHANT_ID, "테스트 가맹점", "테스트 주문",
                 CurrencyCode.KRW, amount);
     }
 
@@ -349,8 +430,8 @@ class PaymentServiceTest {
     }
 
     private void givenWallet() {
-        when(walletClient.findCurrencyWallet(USER_ID, CurrencyCode.KRW))
-                .thenReturn(Optional.of(new CurrencyWallet(WALLET_CURRENCY_ID, LEDGER_ACCOUNT_ID, CurrencyCode.KRW)));
+        when(walletClient.findWallet(USER_ID))
+                .thenReturn(Optional.of(new Wallet(WALLET_ID, "ACTIVE")));
     }
 
     private List<PaymentHistory> savedHistories(int expectedCount) {
@@ -529,17 +610,81 @@ class PaymentServiceTest {
     }
 
     @Test
-    void returnsPendingAsIsForSameKeyOfRequestedRefund() {
+    void keepsRefundPendingWhenLedgerResultIsStillUnknownOnSameKeyRequest() {
         Refund existing = existingRefund();
         savedRefunds.add(existing);
         when(refundRepository.findByUserIdAndIdempotencyKey(USER_ID, REFUND_KEY)).thenReturn(Optional.of(existing));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundPendingPayment()));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.unknown());
 
         PaymentResult result = paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID));
 
         assertEquals(PaymentStatus.REFUND_PENDING, result.status());
         assertEquals(RefundStatus.REQUESTED, result.refunds().get(0).status());
-        verifyNoInteractions(ledgerClient, paymentHistoryRepository);
+        verify(ledgerClient, times(1)).refundTransaction(any());
+        verify(paymentRepository, never()).save(any(Payment.class));
+        verify(refundRepository, never()).save(any());
+        verifyNoInteractions(paymentHistoryRepository);
+    }
+
+    @Test
+    void completesRequestedRefundWhenSameKeyIsRequestedAgain() {
+        Refund existing = existingRefund();
+        savedRefunds.add(existing);
+        when(refundRepository.findByUserIdAndIdempotencyKey(USER_ID, REFUND_KEY)).thenReturn(Optional.of(existing));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundPendingPayment()));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+
+        PaymentResult result = paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID));
+
+        assertEquals(PaymentStatus.REFUNDED, result.status());
+        assertEquals(RefundStatus.COMPLETED, result.refunds().get(0).status());
+        assertEquals(REFUND_TRANSACTION_ID, existing.getLedgerId());
+        ArgumentCaptor<LedgerRefundCommand> captor = ArgumentCaptor.forClass(LedgerRefundCommand.class);
+        verify(ledgerClient, times(1)).refundTransaction(captor.capture());
+        assertEquals(REFUND_ID, captor.getValue().referenceId());
+        List<PaymentHistory> histories = savedHistories(1);
+        assertEquals(PaymentStatus.REFUND_PENDING, histories.get(0).getPreviousStatus());
+        assertEquals(PaymentStatus.REFUNDED, histories.get(0).getCurrentStatus());
+    }
+
+    @Test
+    void throwsDeclinedWhenRequestedRefundIsDeclinedOnSameKeyRequest() {
+        Refund existing = existingRefund();
+        Payment payment = refundPendingPayment();
+        when(refundRepository.findByUserIdAndIdempotencyKey(USER_ID, REFUND_KEY)).thenReturn(Optional.of(existing));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.declined("원거래를 찾을 수 없습니다."));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID)));
+
+        assertEquals(PaymentErrorCode.REFUND_DECLINED, exception.getErrorCode());
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        assertEquals(RefundStatus.DECLINED, existing.getStatus());
+        savedHistories(1);
+    }
+
+    @Test
+    void returnsSettledRefundWhenAnotherRequestSettledItFirst() {
+        Refund existing = existingRefund();
+        Refund completedByOther = existingRefund();
+        completedByOther.complete(REFUND_TRANSACTION_ID);
+        Payment refundedByOther = refundPendingPayment();
+        refundedByOther.refundedHistory();
+        when(refundRepository.findByUserIdAndIdempotencyKey(USER_ID, REFUND_KEY))
+                .thenReturn(Optional.of(existing), Optional.of(completedByOther));
+        when(paymentRepository.findById(PAYMENT_ID))
+                .thenReturn(Optional.of(refundPendingPayment()), Optional.of(refundedByOther));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(paymentRepository.save(any(Payment.class)))
+                .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
+        when(refundRepository.findAllByPaymentId(PAYMENT_ID)).thenReturn(List.of(completedByOther));
+
+        PaymentResult result = paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID));
+
+        assertEquals(PaymentStatus.REFUNDED, result.status());
+        assertEquals(RefundStatus.COMPLETED, result.refunds().get(0).status());
     }
 
     @Test
@@ -636,7 +781,7 @@ class PaymentServiceTest {
     }
 
     @Test
-    void returnsExistingRefundWhenSameKeyIsRequestedConcurrently() {
+    void settlesExistingRequestedRefundWhenSameKeyIsRequestedConcurrently() {
         Refund existing = existingRefund();
         when(paymentRepository.findById(PAYMENT_ID))
                 .thenReturn(Optional.of(approvedPayment()), Optional.of(approvedPayment()),
@@ -644,14 +789,17 @@ class PaymentServiceTest {
         when(refundRepository.findByUserIdAndIdempotencyKey(USER_ID, REFUND_KEY))
                 .thenReturn(Optional.empty(), Optional.of(existing));
         when(refundRepository.save(any(Refund.class)))
-                .thenThrow(new DataIntegrityViolationException("uk_refunds_user_id_idempotency_key"));
+                .thenThrow(new DataIntegrityViolationException("uk_refunds_user_id_idempotency_key"))
+                .thenAnswer(invocation -> invocation.getArgument(0));
         when(refundRepository.findAllByPaymentId(PAYMENT_ID)).thenReturn(List.of(existing));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID));
 
-        assertEquals(PaymentStatus.REFUND_PENDING, result.status());
+        assertEquals(PaymentStatus.REFUNDED, result.status());
         assertEquals(REFUND_ID, result.refunds().get(0).refundId());
-        verifyNoInteractions(ledgerClient);
+        assertEquals(RefundStatus.COMPLETED, result.refunds().get(0).status());
+        verify(ledgerClient, times(1)).refundTransaction(any());
     }
 
     @Test
@@ -727,7 +875,7 @@ class PaymentServiceTest {
     @Test
     void returnsPaymentSummariesWithPageInfo() {
         Payment newer = savedPayment(PAYMENT_ID, CREATED_AT);
-        Payment older = savedPayment(OLDER_PAYMENT_ID, CREATED_AT.minusMinutes(1));
+        Payment older = savedPayment(OLDER_PAYMENT_ID, CREATED_AT.minusSeconds(60));
         when(paymentRepository.findPageByUserId(any(), any(), any()))
                 .thenAnswer(invocation -> new PageImpl<>(List.of(newer, older), invocation.getArgument(2), 35));
 
@@ -740,7 +888,7 @@ class PaymentServiceTest {
         assertEquals(10_000L, first.amount());
         assertEquals(CurrencyCode.KRW, first.currency());
         assertEquals("테스트 가맹점", first.merchantName());
-        assertNotNull(first.createdAt());
+        assertEquals(CREATED_AT, first.createdAt());
         assertEquals(35, result.getTotalElements());
         assertEquals(18, result.getTotalPages());
     }
@@ -788,10 +936,98 @@ class PaymentServiceTest {
     }
 
     // id·createdAt은 저장 시 채워지므로 테스트에서는 직접 넣습니다.
-    private Payment savedPayment(UUID id, LocalDateTime createdAt) {
+    private Payment savedPayment(UUID id, Instant createdAt) {
         Payment payment = existingPayment(10_000L);
         ReflectionTestUtils.setField(payment, "id", id);
         ReflectionTestUtils.setField(payment, "createdAt", createdAt);
         return payment;
+    }
+
+    // ---------- 복구 배치 ----------
+
+    private static final Instant STALE_BEFORE = Instant.parse("2026-10-30T01:00:00Z");
+
+    @Test
+    void settlesStalePendingPayments() {
+        Payment first = savedPayment(PAYMENT_ID, CREATED_AT);
+        Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
+        when(paymentRepository.findStalePending(STALE_BEFORE, 100)).thenReturn(List.of(first, second));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+
+        paymentService.settleStalePayments(STALE_BEFORE, 100);
+
+        assertEquals(PaymentStatus.APPROVED, first.getStatus());
+        assertEquals(PaymentStatus.APPROVED, second.getStatus());
+        verify(ledgerClient, times(2)).createTransaction(any());
+    }
+
+    @Test
+    void continuesPaymentRecoveryWhenOnePaymentFails() {
+        Payment first = savedPayment(PAYMENT_ID, CREATED_AT);
+        Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
+        when(paymentRepository.findStalePending(STALE_BEFORE, 100)).thenReturn(List.of(first, second));
+        when(ledgerClient.createTransaction(any()))
+                .thenThrow(new IllegalStateException("원장 연결 실패"))
+                .thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+
+        paymentService.settleStalePayments(STALE_BEFORE, 100);
+
+        assertEquals(PaymentStatus.PENDING, first.getStatus());
+        assertEquals(PaymentStatus.APPROVED, second.getStatus());
+    }
+
+    @Test
+    void stopsPaymentRecoveryWhenLedgerKeepsReturningUnknown() {
+        List<Payment> pendings = List.of(
+                savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT),
+                savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT));
+        when(paymentRepository.findStalePending(STALE_BEFORE, 100)).thenReturn(pendings);
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+
+        paymentService.settleStalePayments(STALE_BEFORE, 100);
+
+        verify(ledgerClient, times(3)).createTransaction(any());
+        verify(paymentRepository, never()).save(any(Payment.class));
+    }
+
+    @Test
+    void settlesStaleRequestedRefunds() {
+        Refund refund = existingRefund();
+        Payment payment = refundPendingPayment();
+        when(refundRepository.findStaleRequested(STALE_BEFORE, 100)).thenReturn(List.of(refund));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+
+        paymentService.settleStaleRefunds(STALE_BEFORE, 100);
+
+        assertEquals(RefundStatus.COMPLETED, refund.getStatus());
+        assertEquals(PaymentStatus.REFUNDED, payment.getStatus());
+    }
+
+    @Test
+    void returnsPaymentToApprovedWithoutThrowingWhenStaleRefundIsDeclined() {
+        Refund refund = existingRefund();
+        Payment payment = refundPendingPayment();
+        when(refundRepository.findStaleRequested(STALE_BEFORE, 100)).thenReturn(List.of(refund));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.declined("원거래를 찾을 수 없습니다."));
+
+        paymentService.settleStaleRefunds(STALE_BEFORE, 100);
+
+        assertEquals(RefundStatus.DECLINED, refund.getStatus());
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+    }
+
+    @Test
+    void stopsRefundRecoveryWhenLedgerKeepsReturningUnknown() {
+        List<Refund> requested = List.of(existingRefund(), existingRefund(), existingRefund(), existingRefund());
+        when(refundRepository.findStaleRequested(STALE_BEFORE, 100)).thenReturn(requested);
+        when(paymentRepository.findById(PAYMENT_ID)).thenAnswer(invocation -> Optional.of(refundPendingPayment()));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.unknown());
+
+        paymentService.settleStaleRefunds(STALE_BEFORE, 100);
+
+        verify(ledgerClient, times(3)).refundTransaction(any());
+        verify(refundRepository, never()).save(any());
     }
 }
