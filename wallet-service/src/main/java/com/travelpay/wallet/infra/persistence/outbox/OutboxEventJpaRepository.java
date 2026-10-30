@@ -14,7 +14,7 @@ public interface OutboxEventJpaRepository extends JpaRepository<OutboxEvent, UUI
             SELECT *
               FROM outbox_events
              WHERE status = 'PENDING'
-             ORDER BY created_at ASC, id ASC
+             ORDER BY retry_count ASC, created_at ASC, id ASC
              LIMIT :limit
                FOR UPDATE SKIP LOCKED
             """, nativeQuery = true)
