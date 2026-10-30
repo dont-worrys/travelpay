@@ -11,6 +11,14 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  cloud:
+    openfeign:
+      client:
+        config:
+          # 한도 조회 응답을 오래 붙잡지 않도록 짧게. 실패하면 한도만 응답합니다.
+          wallet-service:
+            connect-timeout: 2000
+            read-timeout: 3000
 
 travelpay:
   auth:

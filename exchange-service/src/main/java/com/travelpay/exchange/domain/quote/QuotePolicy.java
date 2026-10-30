@@ -41,4 +41,17 @@ public record QuotePolicy(Duration ttl, FeeRate feeRate, Map<Currency, AmountRan
             throw new BusinessException(MoneyErrorCode.INVALID_AMOUNT);
         }
     }
+
+    /**
+     * 잔액으로 한 번에 보낼 수 있는 최대 금액입니다. 수수료까지 잔액으로 낼 수 있는 가장 큰 금액을 1회 최대로 자릅니다.
+     * 그 값이 1회 최소보다 작으면 보낼 수 없으므로 0입니다.
+     */
+    public Money availableAmount(Money balance) {
+        AmountRange range = limits.get(balance.currency());
+        Money affordable = feeRate.maxAmountWithin(balance);
+        if (affordable.isLessThan(range.min())) {
+            return new Money(balance.currency(), 0);
+        }
+        return affordable.isGreaterThan(range.max()) ? range.max() : affordable;
+    }
 }

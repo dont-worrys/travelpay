@@ -36,6 +36,20 @@ class QuotePolicyTest {
         assertEquals(MoneyErrorCode.INVALID_AMOUNT, exception.getErrorCode());
     }
 
+    /** 잔액·결과는 최소 단위입니다. 1회 최대로 자르고, 1회 최소보다 작으면 0입니다. */
+    @ParameterizedTest
+    @CsvSource({
+            "KRW, 500000, 495049",
+            "KRW, 3000000, 2000000",
+            "KRW, 1010, 1000",
+            "KRW, 1009, 0",
+            "CNY, 10151, 10050",
+            "JPY, 0, 0"
+    })
+    void availableAmountFitsBalanceAndRange(Currency currency, long balance, long available) {
+        assertEquals(new Money(currency, available), policy.availableAmount(new Money(currency, balance)));
+    }
+
     @Test
     void requiresRangeForEveryCurrency() {
         FeeRate fee = new FeeRate(new BigDecimal("0.01"));

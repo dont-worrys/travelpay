@@ -18,13 +18,10 @@ public class ExchangeLimitController {
 
     private final ExchangeLimitQueryService limitQueryService;
 
-    /**
-     * 보내는 통화별 1회 환전 한도를 조회합니다.
-     * 지금은 모든 사용자에게 같은 값이지만, 잔액 기반 한도로 넓힐 때 계약이 바뀌지 않도록 로그인한 사용자만 조회합니다.
-     */
+    /** 보내는 통화별 1회 환전 한도와, 로그인한 사용자의 지갑 잔액으로 환전할 수 있는 금액을 조회합니다. */
     @GetMapping
     public ApiResponse<List<ExchangeLimitResponse>> getLimits(@CurrentUser AuthenticatedUser user) {
-        return ApiResponse.success(limitQueryService.findAll().stream()
+        return ApiResponse.success(limitQueryService.findAll(user.userId()).stream()
                 .map(ExchangeLimitResponse::from)
                 .toList());
     }
