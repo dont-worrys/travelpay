@@ -60,7 +60,8 @@ class TransferServiceTest {
     void setUp() {
         transferRepository = mock(TransferRepository.class);
         walletReader = mock(TransferWalletReader.class);
-        transferService = new TransferService(transferRepository, walletReader);
+        // 지갑 송금 처리 구현이 없는 현재 운영 구성입니다. 구현이 있을 때의 흐름은 TransferWalletFlowTest에서 검증합니다.
+        transferService = new TransferService(transferRepository, walletReader, Optional.empty());
     }
 
     @Test
@@ -76,6 +77,7 @@ class TransferServiceTest {
         assertEquals(10_000L, response.amount());
         assertEquals("저녁값", response.memo());
         verify(transferRepository).saveAndFlush(any(Transfer.class));
+        verify(transferRepository, never()).finishProcessing(any(), any(), any());
     }
 
     @Test
@@ -353,10 +355,11 @@ class TransferServiceTest {
         assertSame(TransferErrorCode.NOT_FOUND, exception.getErrorCode());
     }
 
-    /** 1차에는 취소할 수 없는 상태가 없으므로, UPDATE 대상이 아니었는데 취소 상태도 아닌 경우로 2차의 처리 중·완료 상태를 대신합니다. */
-    @Test
-    void rejectsTransferThatWasNotCancelledAndIsNotAlreadyCancelled() {
+    @ParameterizedTest
+    @ValueSource(strings = {"PROCESSING", "COMPLETED", "FAILED"})
+    void rejectsCancellingTransferThatIsNoLongerRequested(TransferStatus status) {
         Transfer existing = persisted(transfer(10_000L, "KRW", null));
+        ReflectionTestUtils.setField(existing, "status", status);
         when(transferRepository.cancelRequested(eq(existing.getId()), eq(SENDER_ID), any(Instant.class)))
                 .thenReturn(0);
         when(transferRepository.findById(existing.getId())).thenReturn(Optional.of(existing));
