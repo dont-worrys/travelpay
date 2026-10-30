@@ -10,6 +10,7 @@ public enum PaymentErrorCode implements ErrorCode {
     MERCHANT_NOT_FOUND("PAYMENT_MERCHANT_NOT_FOUND", "가맹점을 찾을 수 없습니다.", 404),
     MERCHANT_NOT_ACTIVE("PAYMENT_MERCHANT_NOT_ACTIVE", "현재 결제가 불가능한 가맹점입니다.", 422),
     WALLET_NOT_FOUND("PAYMENT_WALLET_NOT_FOUND", "해당 통화의 지갑을 찾을 수 없습니다.", 404),
+    WALLET_NOT_ACTIVE("PAYMENT_WALLET_NOT_ACTIVE", "현재 결제가 불가능한 지갑입니다.", 422),
     CURRENCY_MISMATCH("PAYMENT_CURRENCY_MISMATCH", "가맹점에서 사용할 수 없는 통화입니다.", 400),
     INVALID_AMOUNT("PAYMENT_INVALID_AMOUNT", "결제 금액은 0보다 커야 합니다.", 400),
     INVALID_STATUS_TRANSITION("PAYMENT_INVALID_STATUS_TRANSITION", "현재 상태에서 처리할 수 없는 결제입니다.", 409),

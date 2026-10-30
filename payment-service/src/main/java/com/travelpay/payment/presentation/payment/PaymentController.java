@@ -14,6 +14,8 @@ import com.travelpay.payment.presentation.payment.dto.PaymentResponse;
 import com.travelpay.payment.presentation.payment.dto.RefundRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -30,7 +32,7 @@ public class PaymentController {
 
     @PostMapping
     public ResponseEntity<ApiResponse<PaymentResponse>> paymentRequest(@CurrentUser AuthenticatedUser user,
-                                                                      @RequestHeader("Idempotency-Key") String idempotencyKey,
+                                                                      @RequestHeader("Idempotency-Key") @NotBlank @Size(max = 255) String idempotencyKey,
                                                                       @RequestBody @Valid PaymentRequest request) {
         PaymentCommand command = request.toCommand(user.userId(), idempotencyKey);
         PaymentResponse response = PaymentResponse.from(paymentService.paymentRequest(command));
@@ -57,7 +59,7 @@ public class PaymentController {
     @PostMapping("/{paymentId}/refunds")
     public ResponseEntity<ApiResponse<PaymentResponse>> refundRequest(@CurrentUser AuthenticatedUser user,
                                                                       @PathVariable UUID paymentId,
-                                                                      @RequestHeader("Idempotency-Key") String idempotencyKey,
+                                                                      @RequestHeader("Idempotency-Key") @NotBlank @Size(max = 255) String idempotencyKey,
                                                                       @RequestBody @Valid RefundRequest request) {
         RefundCommand command = request.toCommand(user.userId(), paymentId, idempotencyKey);
         PaymentResponse response = PaymentResponse.from(paymentService.refundRequest(command));
