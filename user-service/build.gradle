@@ -2,17 +2,37 @@ plugins {
     id 'org.springframework.boot'
 }
 
+configurations {
+    mockitoAgent {
+        canBeConsumed = false
+        transitive = false
+    }
+}
+
 dependencies {
     implementation project(':common')
 
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-session-data-redis'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
 
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
     runtimeOnly 'org.postgresql:postgresql'
 
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-security-test'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    mockitoAgent 'org.mockito:mockito-core'
+}
+
+tasks.named('test', Test) {
+    // Java 21에서 Mockito를 테스트 JVM 시작 시 에이전트로 연결합니다.
+    jvmArgs "-javaagent:${configurations.mockitoAgent.singleFile.absolutePath}"
 }

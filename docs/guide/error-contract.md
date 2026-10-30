@@ -2,13 +2,15 @@
 
 JSON 본문이 있는 업무 API는 `success`·`data`·`error` 구조를 사용합니다. 성공하면 `data`에 결과를 담고 `error`는 null, 실패하면 `data`는 null이고 `error`에 오류 정보를 담습니다. 기존 HTTP 상태 코드는 유지합니다.
 
-성공 응답은 컨트롤러에서 `ApiResponse.success(responseDto)`로 반환합니다. 다음은 회원가입 성공 응답의 예시이며, 실제 회원가입 API는 아직 구현하지 않았습니다.
+성공 응답은 컨트롤러에서 `ApiResponse.success(responseDto)`로 반환합니다. 다음은 User 회원가입(`POST /api/v1/users`) 성공 응답의 예시입니다.
 
 ```json
 {
   "success": true,
   "data": {
-    "userId": "550e8400-e29b-41d4-a716-446655440000"
+    "userId": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "ACTIVE",
+    "loginRequired": true
   },
   "error": null
 }
@@ -69,7 +71,7 @@ public enum UserErrorCode implements ErrorCode {
 }
 ```
 
-업무 실패는 `throw new BusinessException(UserErrorCode.EMAIL_ALREADY_EXISTS);`처럼 전달합니다. 위 enum은 사용 예시이며 실제 회원 기능은 구현하지 않았습니다. 새 응답 규격에서는 `error.code` 문자열을 계약으로 사용합니다.
+업무 실패는 `throw new BusinessException(UserErrorCode.EMAIL_ALREADY_EXISTS);`처럼 전달합니다. 위 enum은 사용 예시이며, 실제 코드는 user-service의 `UserErrorCode`입니다. 새 응답 규격에서는 `error.code` 문자열을 계약으로 사용합니다.
 
 ## 처리 위치
 
@@ -77,7 +79,8 @@ public enum UserErrorCode implements ErrorCode {
 |---|---|
 | 업무 서비스 5개·Mock Bank의 MVC 요청 | common의 error/GlobalExceptionHandler를 조건부 자동 등록 |
 | Gateway의 WebFlux 요청 | gateway의 error/GatewayErrorHandler에서 공통 ApiResponse 실패 응답 작성 |
-| 로그인·인가·CSRF 보안 필터 | 해당 보안 기능을 구현할 때 인증 실패 처리기에 연결 |
+| User의 로그인·인가·CSRF 보안 필터 | user-service의 `RestAuthenticationEntryPoint`(인증 실패 401·회원 확인 장애 503)와 `RestAccessDeniedHandler`(CSRF·권한·회원 상태 403)가 공통 실패 응답 작성 |
+| User의 세션 저장소(Redis) 오류 | user-service의 `RedisSessionErrorResponseFilter`가 503, 동시 세션 변경은 409 공통 실패 응답 작성 |
 
 MVC 처리기는 `ResponseEntityExceptionHandler`를 확장해 요청 검증·JSON 파싱·메소드·미디어 타입 오류의 상태를 유지합니다. 프레임워크의 `Allow` 같은 응답 헤더도 보존합니다. Gateway의 공통 오류 응답 어댑터와 대응 테스트는 오류 계약을 연결하는 범위로 포함합니다. Gateway의 회원 인증·세션 검증 호출 기능은 포함하지 않습니다.
 
@@ -135,7 +138,7 @@ common은 회원 ID·역할을 담는 `AuthenticatedUser`와 현재 요청자를
 
 ## MVC 회원 정보 전달 활성화
 
-User·Wallet·Payment·Exchange·Ledger의 로컬·배포 YAML에 다음 설정을 둡니다.
+Wallet·Payment·Exchange·Ledger의 로컬·배포 YAML에 다음 설정을 둡니다. User는 Redis 세션으로 회원을 직접 확인하므로 `false`로 두어 요청 헤더로 회원 정보를 만들지 않습니다.
 
 ```yaml
 travelpay:

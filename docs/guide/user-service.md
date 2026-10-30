@@ -1,0 +1,146 @@
+# User 서비스 실행·사용 가이드
+
+user-service는 일반 회원가입, 로그인·로그아웃, Redis 세션, CSRF, 내 정보 조회, 약관 조회를 담당합니다. 이 문서는 로컬에서 실행하고 API를 호출하는 방법을 설명합니다. Gateway 연결과 내부 세션 확인 API(I01)는 #13에서 진행하므로 아직 없습니다.
+
+## 로컬 실행
+
+필요한 것: JDK 21, Docker.
+
+1. `.env.example`을 `.env`로 복사하고 비밀번호 값을 바꿉니다. 실제 값은 저장소에 올리지 않습니다.
+2. DB와 세션 Redis를 실행합니다.
+
+   ```bash
+   docker compose up -d postgres redis-session
+   ```
+
+3. Spring Boot는 `.env`를 직접 읽지 않으므로 환경 변수로 넘겨 실행합니다.
+
+   ```bash
+   set -a; source .env; set +a
+   ./gradlew :user-service:bootRun
+   ```
+
+   - 로컬 포트는 `8081`입니다. `GET http://localhost:8081/actuator/health`로 상태를 확인합니다.
+   - Eureka 서버 없이 user-service만 확인할 때는 `./gradlew :user-service:bootRun --args='--eureka.client.enabled=false'`로 실행합니다.
+   - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다.
+
+4. 약관 데이터를 넣습니다. 시행 중인 약관이 없으면 회원가입은 `503 COMMON_SERVICE_UNAVAILABLE`입니다. 약관 등록 API는 아직 없으므로 로컬에서는 SQL로 넣습니다. 테이블은 앱을 처음 실행할 때 만들어집니다.
+
+   ```bash
+   docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+   insert into user_service.terms_documents (terms_code, terms_version, title, content, is_required, effective_at)
+   values ('SERVICE', 'v1', '서비스 이용약관', '로컬 확인용 약관입니다.', true, now());
+   SQL
+   ```
+
+## API 목록
+
+| API | 설명 | 로그인 | CSRF 헤더 | 성공 |
+|---|---|---|---|---|
+| `GET /api/v1/auth/csrf` | CSRF 토큰 조회, 세션 쿠키 발급 | 불필요 | 불필요 | 200 |
+| `GET /api/v1/terms` | 현재 시행 약관 조회 | 불필요 | 불필요 | 200 |
+| `POST /api/v1/users` | 일반 회원가입 | 불필요 | 필요 | 201 |
+| `POST /api/v1/auth/login` | 일반 로그인 | 불필요 | 필요 | 200 |
+| `GET /api/v1/users/me` | 내 정보 조회 | 필요 | 불필요 | 200 |
+| `POST /api/v1/auth/logout` | 로그아웃 | 필요 | 필요 | 204 |
+
+응답 본문은 `success`·`data`·`error` 공통 형식입니다([error-contract.md](error-contract.md)). 로그아웃 성공은 본문 없는 204입니다.
+
+## 호출 순서
+
+모든 요청은 같은 `SESSION` 쿠키를 함께 보내야 합니다. user-service에는 CORS 설정이 없으므로, 다른 출처의 프런트엔드가 user-service를 직접 호출하는 구성은 아직 지원하지 않습니다.
+
+```txt
+1. GET  /api/v1/auth/csrf   → SESSION 쿠키와 { headerName, token } 받기
+2. GET  /api/v1/terms       → 약관 표시
+3. POST /api/v1/users       → Csrf-Token 헤더 포함, 201 후 로그인 화면으로 이동
+4. POST /api/v1/auth/login  → Csrf-Token 헤더 포함, 성공하면 세션 ID가 바뀌고 이전 CSRF 토큰은 버려짐
+5. GET  /api/v1/auth/csrf   → 로그인 후 새 CSRF 토큰 받기
+6. GET  /api/v1/users/me    → 로그인한 회원 정보
+7. POST /api/v1/auth/logout → 새 Csrf-Token 헤더 포함, 세션 삭제와 쿠키 만료
+```
+
+로그인 후에 CSRF 토큰을 다시 받지 않으면 이후 변경 요청은 `403 COMMON_CSRF_INVALID`입니다.
+
+curl로 확인할 때는 쿠키 파일을 사용합니다. 아래 비밀번호는 예시이며 실제 비밀번호를 문서나 기록에 남기지 않습니다.
+
+```bash
+BASE=http://localhost:8081
+TOKEN=$(curl -s -c jar -b jar $BASE/api/v1/auth/csrf | sed 's/.*"token":"\([^"]*\)".*/\1/')
+
+curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"loginEmail":"member@example.com","password":"TravelpayDemo-2026!","realName":"홍길동","phone":"010-1234-5678","consents":[{"termsCode":"SERVICE","termsVersion":"v1"}]}' \
+  $BASE/api/v1/users
+
+curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"loginEmail":"member@example.com","password":"TravelpayDemo-2026!"}' \
+  $BASE/api/v1/auth/login
+
+TOKEN=$(curl -s -c jar -b jar $BASE/api/v1/auth/csrf | sed 's/.*"token":"\([^"]*\)".*/\1/')
+curl -s -b jar $BASE/api/v1/users/me
+curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -X POST -o /dev/null -w '%{http_code}\n' $BASE/api/v1/auth/logout
+```
+
+## 세션·보안 정책
+
+| 항목 | 값 |
+|---|---|
+| 세션 쿠키 | `SESSION`, HttpOnly, SameSite=Lax, 로컬 Secure 끔·배포 Secure 켬 |
+| 유휴 만료 | 마지막 사용 후 60분 (`spring.session.timeout`) |
+| 절대 만료 | 로그인 후 24시간, 사용 중이어도 다시 로그인 (`travelpay.user.session.absolute-timeout`) |
+| 세션 저장소 | 세션 Redis (`redis-session`, 메모리가 차도 키를 지우지 않는 `noeviction`) |
+| 응답 캐시 | Spring Security가 `Cache-Control: no-cache, no-store, max-age=0, must-revalidate`를 붙여 인증·개인정보 응답이 저장되지 않게 함 |
+| 회원 상태 확인 | 로그인이 필요한 요청마다 DB에서 현재 상태·권한 확인. 정지·종료 회원은 로그인이 필요한 API 중 로그아웃만 가능 |
+
+### 로그인 시도 제한
+
+비밀번호 추측을 막기 위해 로그인 실패를 두 단위로 셉니다. 설정은 `travelpay.user.login-attempt`입니다.
+
+| 단위 | 한도 | 결과 |
+|---|---|---|
+| 같은 이메일 + 같은 IP | 첫 실패부터 10분 안에 5번 실패 | 그 이메일·IP 조합을 20분 동안 `429 COMMON_TOO_MANY_REQUESTS` |
+| 같은 이메일 (IP 무관) | 첫 실패부터 10분 안에 20번 실패 | 그 이메일을 모든 IP에서 20분 동안 429 |
+
+- 실패로 세는 것: 비밀번호 불일치, 없는 이메일. 두 경우 모두 같은 `401 USER_INVALID_CREDENTIALS`라서 이메일 존재 여부를 알 수 없습니다.
+- 세지 않는 것: 입력 형식 오류(400), 올바른 비밀번호를 입력한 정지·종료 회원(403), 서버·DB·Redis 장애(503).
+- 로그인에 성공하면 그 이메일+IP 실패 횟수는 0이 됩니다. 이메일 전체 횟수는 유지해 여러 IP에 나눈 공격을 계속 셉니다.
+- 막힌 동안에는 비밀번호를 확인하지 않고 바로 429를 반환합니다.
+- 요청을 동시에 여러 개 보내면, 단위마다 실패 횟수와 아직 끝나지 않은 시도의 합이 한도에 닿은 뒤의 요청은 바로 429입니다. 끝나지 않은 시도는 실패로 확정될 때만 실패 횟수에 더해집니다.
+- 다른 IP의 공격으로 실제 회원이 바로 잠기지 않도록 엄격한 차단은 이메일+IP 단위로 하고, 이메일 단위는 더 높은 한도를 둡니다.
+- 횟수는 세션 Redis에 저장하며, 키에는 이메일·IP 원문 대신 SHA-256 해시를 사용합니다. Redis를 사용할 수 없으면 제한 없이 진행하지 않고 503을 반환합니다.
+
+남은 위험:
+
+- 공격자가 여러 IP로 같은 이메일을 20번 실패시키면 실제 회원도 20분 동안 로그인할 수 없습니다. 여러 IP에 나눈 추측을 막기 위해 받아들인 부분입니다.
+- IP를 쉽게 바꿀 수 있는 공격자(예: IPv6 대역 사용)는 이메일+IP 제한을 피할 수 있고, 이때는 이메일 단위 제한만 적용됩니다.
+
+## 오류 응답
+
+| 상태 | 코드 | 상황 |
+|---|---|---|
+| 400 | `COMMON_INVALID_REQUEST` | 입력 형식 오류. 필드별 안내는 `error.details` |
+| 400 | `USER_TERMS_CONSENT_INVALID` | 필수 약관 누락, 없는 약관·버전 |
+| 401 | `COMMON_UNAUTHORIZED` | 세션 없음·만료(유휴 60분·절대 24시간), 회원 정보 없음 |
+| 401 | `USER_INVALID_CREDENTIALS` | 이메일 없음 또는 비밀번호 불일치 |
+| 403 | `COMMON_CSRF_INVALID` | CSRF 토큰 없음·불일치 |
+| 403 | `COMMON_FORBIDDEN` | 권한 부족(관리자 전용 경로 등) |
+| 403 | `USER_ACCOUNT_SUSPENDED`, `USER_ACCOUNT_CLOSED` | 정지·종료 회원. 올바른 비밀번호로 로그인하거나 기존 세션으로 요청할 때 |
+| 409 | `USER_EMAIL_ALREADY_EXISTS`, `USER_PHONE_ALREADY_EXISTS` | 이미 가입한 이메일·휴대폰 번호 |
+| 409 | `COMMON_CONFLICT` | 같은 세션의 다른 요청이 로그인·로그아웃으로 세션을 바꾼 경우 |
+| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인 시도 제한 |
+| 503 | `COMMON_SERVICE_UNAVAILABLE` | DB·Redis 장애, 시행 중인 약관 없음 |
+
+503은 장애를 뜻하므로 기존 세션 쿠키를 지우지 않습니다. 잠시 후 같은 쿠키로 다시 시도할 수 있습니다.
+
+## 테스트
+
+```bash
+./gradlew :user-service:test
+```
+
+테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다.
+
+## Gateway 연결 전 남은 조건 (#13)
+
+- 로그인 시도 제한은 현재 `request.getRemoteAddr()`를 클라이언트 IP로 사용합니다. Gateway를 거치면 모든 요청이 Gateway 주소로 보여 이메일+IP 제한이 사실상 이메일 단위가 됩니다. Gateway가 실제 클라이언트 IP를 전달하고, user-service는 Gateway에서 온 값만 신뢰하도록 맞춰야 합니다.
+- Gateway는 외부 요청의 `User-Id`·`User-Role` 헤더를 지우고, 내부 세션 확인 결과로 다시 채워야 합니다. user-service는 이 헤더를 사용하지 않고 세션을 직접 확인합니다(`travelpay.auth.header-context.enabled: false`).

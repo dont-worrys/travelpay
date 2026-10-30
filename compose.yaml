@@ -31,6 +31,46 @@ services:
       retries: 10
       start_period: 10s
 
+  redis-session:
+    image: ${REDIS_IMAGE:-redis:8.2.11-bookworm}
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_SESSION_PASSWORD:?required}
+    environment:
+      REDISCLI_AUTH: ${REDIS_SESSION_PASSWORD:?required}
+    ports:
+      - "127.0.0.1:${REDIS_SESSION_PORT:-16379}:6379"
+    volumes:
+      - ./infra/redis/session/redis.conf:/usr/local/etc/redis/redis.conf:ro,Z
+    healthcheck:
+      test: ["CMD", "redis-cli", "-e", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis-cache:
+    image: ${REDIS_IMAGE:-redis:8.2.11-bookworm}
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_CACHE_PASSWORD:?required}
+    environment:
+      REDISCLI_AUTH: ${REDIS_CACHE_PASSWORD:?required}
+    ports:
+      - "127.0.0.1:${REDIS_CACHE_PORT:-16380}:6379"
+    volumes:
+      - ./infra/redis/cache/redis.conf:/usr/local/etc/redis/redis.conf:ro,Z
+    healthcheck:
+      test: ["CMD", "redis-cli", "-e", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   # ---------- Kafka (KRaft 단일 노드) ----------
   kafka:
     image: ${KAFKA_IMAGE:-apache/kafka:4.2.2}
