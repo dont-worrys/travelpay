@@ -35,7 +35,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Docker가 없으면 건너뛴다.
  */
 @Testcontainers(disabledWithoutDocker = true)
-@SpringBootTest(properties = "eureka.client.enabled=false")
+@SpringBootTest(properties = {
+        "eureka.client.enabled=false",
+        "travelpay.wallet.outbox.publisher.enabled=false",
+        "spring.kafka.admin.auto-create=false"
+})
 class ChargeStatusTransitionerIntegrationTest {
 
     private static final String SCHEMA = "wallet_service";
