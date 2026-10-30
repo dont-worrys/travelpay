@@ -15,6 +15,11 @@ spring:
 server:
   port: 8090
 
+# Mock-Fault: DELAY 헤더로 처리·커밋 후 응답을 늦추는 시간
+mock-bank:
+  fault:
+    delay: 10s
+
 management:
   endpoints:
     web:
