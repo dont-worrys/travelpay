@@ -5,15 +5,43 @@ spring:
     url: ${WALLET_DB_URL}
     username: ${WALLET_DB_USERNAME}
     password: ${WALLET_DB_PASSWORD}
+    hikari:
+      # 트랜잭션 타임아웃은 커넥션을 얻은 뒤부터 적용되므로 획득 대기도 따로 제한
+      connection-timeout: 2000
+      validation-timeout: 1000
+  flyway:
+    default-schema: wallet_service
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
+  cloud:
+    openfeign:
+      client:
+        config:
+          ledger-service:
+            # 원장 최대 응답(약 5초)보다 길게
+            connect-timeout: 1000
+            read-timeout: 6000
+          user-service:
+            # 실명 조회는 단건 조회라 짧게. 초과하면 503 (재시도는 호출자가 같은 키로)
+            connect-timeout: 1000
+            read-timeout: 2000
 
 travelpay:
   auth:
     header-context:
       enabled: true
+  wallet:
+    # 계좌번호 AES-256-GCM 키 (Base64, 32바이트). 없으면 기동 실패
+    account-number-key: ${WALLET_ACCOUNT_NUMBER_KEY}
+  client:
+    ledger:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
+      url: ${LEDGER_SERVICE_URL:}
+    user:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 user-service를 찾는다
+      url: ${USER_SERVICE_URL:}
 
 server:
   port: 8082
