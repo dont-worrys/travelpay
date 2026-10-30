@@ -39,15 +39,16 @@ public interface TransferRepository extends JpaRepository<Transfer, UUID> {
 
     /**
      * 처리 중(PROCESSING) 송금만 처리 결과 상태로 바꾸고 변경된 행 수(0 또는 1)를 반환합니다.
-     * 같은 송금의 재요청이 동시에 결과를 반영해도 한 번만 바뀌며, 지갑 호출 후 짧게 실행되도록 자체 트랜잭션으로 커밋합니다.
+     * 실패 사유는 FAILED일 때만 넣고 그 외에는 null입니다(ck_transfer_failure_reason).
+     * 같은 송금의 재요청이 동시에 결과를 반영해도 한 번만 바뀌며, 원장 호출 후 짧게 실행되도록 자체 트랜잭션으로 커밋합니다.
      */
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
             update Transfer t
-            set t.status = :status, t.updatedAt = :updatedAt
+            set t.status = :status, t.failureReason = :failureReason, t.updatedAt = :updatedAt
             where t.id = :transferId
               and t.status = com.travelpay.payment.transfer.domain.TransferStatus.PROCESSING
             """)
-    int finishProcessing(UUID transferId, TransferStatus status, Instant updatedAt);
+    int finishProcessing(UUID transferId, TransferStatus status, TransferFailureReason failureReason, Instant updatedAt);
 }

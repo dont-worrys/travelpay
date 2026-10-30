@@ -54,6 +54,11 @@ public class Transfer {
     @Column(name = "status", length = 20, nullable = false)
     private TransferStatus status;
 
+    /** 원장이 확정 거절한 사유이며 FAILED일 때만 있습니다. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "failure_reason", length = 30)
+    private TransferFailureReason failureReason;
+
     @Column(name = "memo", length = 100)
     private String memo;
 
@@ -97,7 +102,7 @@ public class Transfer {
         this.status = status;
     }
 
-    /** 검증을 마친 송금 요청을 접수 상태로 생성합니다. */
+    /** 검증을 마친 송금 요청을 접수 상태로 생성합니다. 원장 거래 등록 구현이 없을 때 사용합니다. */
     public static Transfer request(
             UUID senderId,
             UUID receiverId,
@@ -123,7 +128,7 @@ public class Transfer {
         );
     }
 
-    /** 검증을 마친 송금 요청을 지갑 처리 진행 중 상태로 생성합니다. 지갑 송금 처리를 호출하기 전에 저장합니다. */
+    /** 검증을 마친 송금 요청을 처리 중 상태로 생성합니다. 원장 거래 등록을 호출하기 전에 저장합니다. */
     public static Transfer process(
             UUID senderId,
             UUID receiverId,
@@ -197,6 +202,10 @@ public class Transfer {
 
     public TransferStatus getStatus() {
         return status;
+    }
+
+    public TransferFailureReason getFailureReason() {
+        return failureReason;
     }
 
     public String getMemo() {

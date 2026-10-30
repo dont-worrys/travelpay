@@ -11,15 +11,16 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.common.util.PageableUtils;
+import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
+import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
+import com.travelpay.payment.transfer.client.TransferLedgerClient;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
 import com.travelpay.payment.transfer.client.WalletResponse;
-import com.travelpay.payment.transfer.client.WalletTransferClient;
-import com.travelpay.payment.transfer.client.WalletTransferRequest;
-import com.travelpay.payment.transfer.client.WalletTransferResult;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferCurrency;
 import com.travelpay.payment.transfer.domain.TransferDirection;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
+import com.travelpay.payment.transfer.domain.TransferFailureReason;
 import com.travelpay.payment.transfer.domain.TransferRepository;
 import com.travelpay.payment.transfer.domain.TransferStatus;
 import com.travelpay.payment.transfer.dto.RecipientResponse;
@@ -36,10 +37,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 송금 접수·취소와 조회를 처리합니다.
- * 지갑 송금 처리 구현({@link WalletTransferClient})이 없으면 잔액을 변경하지 않고 REQUESTED 상태로 접수만 기록합니다.
- * 구현이 있으면 PROCESSING으로 저장한 뒤 지갑 송금 처리를 요청하고 결과에 따라 COMPLETED·FAILED로 바꾸며,
- * 결과를 모르면 PROCESSING으로 남겨 같은 Idempotency-Key 재요청 때 같은 송금 ID로 다시 요청합니다.
+ * 송금 요청·취소와 조회를 처리합니다.
+ * 원장 거래 등록 구현({@link TransferLedgerClient})이 없으면 잔액을 변경하지 않고 REQUESTED 상태로 접수만 기록합니다.
+ * 구현이 있으면 PROCESSING으로 저장한 뒤 원장에 거래 등록(송금인 차감·수취인 증가)을 요청하고 결과에 따라 COMPLETED·FAILED로 바꾸며,
+ * 결과를 모르면 PROCESSING으로 남겨 같은 Idempotency-Key 재요청 때 같은 reference(송금 ID)로 다시 요청합니다.
+ * 잔액 검증·변경과 같은 reference의 중복 처리 방지는 원장이 보장합니다.
  */
 @Service
 public class TransferService {
@@ -57,22 +59,22 @@ public class TransferService {
 
     private final TransferRepository transferRepository;
     private final TransferWalletReader walletReader;
-    private final Optional<WalletTransferClient> walletTransferClient;
+    private final Optional<TransferLedgerClient> ledgerClient;
 
     public TransferService(
             TransferRepository transferRepository,
             TransferWalletReader walletReader,
-            Optional<WalletTransferClient> walletTransferClient
+            Optional<TransferLedgerClient> ledgerClient
     ) {
         this.transferRepository = transferRepository;
         this.walletReader = walletReader;
-        this.walletTransferClient = walletTransferClient;
+        this.ledgerClient = ledgerClient;
     }
 
     /**
-     * 송금을 접수합니다. 같은 송금인·키·요청 내용의 재요청은 처음 접수 결과를 반환하며,
-     * 처리 중(PROCESSING)으로 남은 송금이면 지갑 송금 처리를 다시 요청합니다.
-     * 지갑 조회·처리(원격 호출) 동안 DB 트랜잭션을 잡지 않도록 메소드 전체를 트랜잭션으로 묶지 않습니다.
+     * 송금을 요청합니다. 같은 송금인·키·요청 내용의 재요청은 처음 처리 결과를 반환하며,
+     * 처리 중(PROCESSING)으로 남은 송금이면 원장 거래 등록을 다시 요청합니다.
+     * 지갑 조회·원장 호출(원격 호출) 동안 DB 트랜잭션을 잡지 않도록 메소드 전체를 트랜잭션으로 묶지 않습니다.
      */
     public TransferResponse request(UUID senderId, String idempotencyKey, TransferCreateRequest request) {
         if (idempotencyKey == null || !IDEMPOTENCY_KEY_PATTERN.matcher(idempotencyKey).matches()) {
@@ -101,8 +103,8 @@ public class TransferService {
         UUID targetWalletId = walletReader.findActiveWalletId(request.receiverId())
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.RECEIVER_UNAVAILABLE));
 
-        // 지갑 송금 처리를 호출하기 전에 PROCESSING으로 커밋해, 결과를 모르는 송금도 기록에 남깁니다.
-        Transfer transfer = walletTransferClient.isPresent()
+        // 원장을 호출하기 전에 PROCESSING으로 커밋해, 결과를 모르는 송금도 기록에 남깁니다.
+        Transfer transfer = ledgerClient.isPresent()
                 ? Transfer.process(senderId, request.receiverId(), sourceWalletId, targetWalletId,
                         request.amount(), request.currency(), memo, idempotencyKey, requestHash)
                 : Transfer.request(senderId, request.receiverId(), sourceWalletId, targetWalletId,
@@ -129,7 +131,7 @@ public class TransferService {
     }
 
     /**
-     * 접수(REQUESTED) 상태의 송금을 취소합니다. 1차 MVP는 자금 이동이 없어 복구할 금액이 없습니다.
+     * 접수(REQUESTED) 상태의 송금을 취소합니다. REQUESTED는 원장 처리 없이 접수만 된 송금이라 자금 이동이 없어 복구할 금액이 없습니다.
      * 송금인만 취소할 수 있고 수취인·제3자에게는 없는 송금과 같은 404를 반환하며, 이미 취소된 송금은 현재 상태를 그대로 반환합니다.
      * 동시 요청은 조건부 UPDATE로 한 번만 상태가 바뀝니다.
      */
@@ -188,46 +190,62 @@ public class TransferService {
         return respond(transfer, senderId);
     }
 
-    /** 처리 중이면 지갑 송금 처리를 요청하고, 잔액 부족으로 실패한 송금은 재요청에도 처음과 같은 422를 반환합니다. */
+    /** 처리 중이면 원장 거래 등록을 요청하고, 원장이 거절한 송금은 재요청에도 저장된 실패 사유로 처음과 같은 422를 반환합니다. */
     private TransferResponse respond(Transfer transfer, UUID senderId) {
         Transfer current = processFunds(transfer);
         if (current.getStatus() == TransferStatus.FAILED) {
-            throw new BusinessException(TransferErrorCode.INSUFFICIENT_BALANCE);
+            throw new BusinessException(current.getFailureReason().errorCode());
         }
         return TransferResponse.of(current, senderId);
     }
 
     /**
-     * PROCESSING 송금의 지갑 송금 처리를 요청하고 결과 상태를 반영합니다. 그 외 상태는 다시 요청하지 않습니다.
-     * 요청은 저장된 송금 값으로 만들어 재전송도 처음과 같은 송금 ID·내용을 보내며, 중복 처리 방지는 구현체가 보장합니다.
-     * 결과를 모르면(UNKNOWN·예외) 실패로 단정하지 않고 PROCESSING으로 둡니다.
+     * PROCESSING 송금의 원장 거래 등록을 요청하고 결과 상태를 반영합니다. 그 외 상태는 다시 요청하지 않습니다.
+     * 요청은 저장된 송금 값으로 만들어 재전송도 처음과 같은 reference·내용을 보내며, 원장이 같은 reference를 한 번만 처리합니다.
+     * 결과를 모르면(예외·해석할 수 없는 응답) 실패로 단정하지 않고 PROCESSING으로 둡니다.
      */
     private Transfer processFunds(Transfer transfer) {
-        if (transfer.getStatus() != TransferStatus.PROCESSING || walletTransferClient.isEmpty()) {
+        if (transfer.getStatus() != TransferStatus.PROCESSING || ledgerClient.isEmpty()) {
             return transfer;
         }
-        WalletTransferResult result;
+        LedgerTransactionResponse result;
         try {
-            result = walletTransferClient.get().transfer(WalletTransferRequest.of(transfer));
+            result = ledgerClient.get().register(LedgerTransactionRequest.of(transfer));
         } catch (RuntimeException exception) {
-            log.warn("지갑 송금 처리 결과를 확인할 수 없어 처리 중으로 둡니다. transferId={}", transfer.getId(), exception);
+            log.warn("원장 거래 등록 결과를 확인할 수 없어 처리 중으로 둡니다. transferId={}", transfer.getId(), exception);
             return transfer;
         }
-        if (result == null || result == WalletTransferResult.UNKNOWN) {
+        TransferFailureReason failureReason = failureReasonOf(result);
+        if (result == null || result.status() == null
+                || (result.status() == LedgerTransactionResponse.Status.REJECTED && failureReason == null)) {
+            log.error("원장 거래 등록 결과를 해석할 수 없어 처리 중으로 둡니다. transferId={}, result={}",
+                    transfer.getId(), result);
             return transfer;
         }
-        TransferStatus finished = result == WalletTransferResult.SUCCEEDED
-                ? TransferStatus.COMPLETED : TransferStatus.FAILED;
+        TransferStatus finished = failureReason == null ? TransferStatus.COMPLETED : TransferStatus.FAILED;
         try {
             // 동시 재요청이 먼저 반영했으면 0행이 바뀌며, 어느 쪽이든 다시 읽은 상태를 따릅니다.
-            transferRepository.finishProcessing(transfer.getId(), finished, Instant.now().truncatedTo(ChronoUnit.MICROS));
+            transferRepository.finishProcessing(transfer.getId(), finished, failureReason,
+                    Instant.now().truncatedTo(ChronoUnit.MICROS));
             return transferRepository.findById(transfer.getId()).orElseThrow();
         } catch (RuntimeException exception) {
-            // 지갑 처리 결과는 확정됐지만 반영하지 못했으므로 처리 중으로 응답하고, 같은 키 재요청의 재전송으로 반영합니다.
-            log.error("지갑 송금 처리 결과를 반영하지 못해 처리 중으로 둡니다. transferId={}, result={}",
+            // 원장 처리 결과는 확정됐지만 반영하지 못했으므로 처리 중으로 응답하고, 같은 키 재요청의 재전송으로 반영합니다.
+            log.error("원장 거래 등록 결과를 반영하지 못해 처리 중으로 둡니다. transferId={}, result={}",
                     transfer.getId(), result, exception);
             return transfer;
         }
+    }
+
+    /** 원장 거절 사유를 송금 실패 사유로 바꿉니다. 거절이 아니거나 사유가 없으면 null입니다. */
+    private static TransferFailureReason failureReasonOf(LedgerTransactionResponse result) {
+        if (result == null || result.status() != LedgerTransactionResponse.Status.REJECTED
+                || result.rejectReason() == null) {
+            return null;
+        }
+        return switch (result.rejectReason()) {
+            case INSUFFICIENT_BALANCE -> TransferFailureReason.INSUFFICIENT_BALANCE;
+            case WALLET_SUSPENDED, ACCOUNT_NOT_FOUND -> TransferFailureReason.ACCOUNT_UNAVAILABLE;
+        };
     }
 
     private static String normalizeMemo(String memo) {
