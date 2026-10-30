@@ -2,7 +2,7 @@ package com.travelpay.payment.presentation.payment.dto;
 
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
 
-import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.util.UUID;
 
 public record PaymentListResponse(
@@ -11,7 +11,7 @@ public record PaymentListResponse(
         Long amount,
         String currency,
         String merchantName,
-        OffsetDateTime createdAt
+        Instant createdAt
 ) {
     public static PaymentListResponse from(PaymentListResult result) {
         return new PaymentListResponse(

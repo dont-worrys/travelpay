@@ -6,7 +6,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import org.hibernate.annotations.CreationTimestamp;
 
-import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -35,7 +35,7 @@ public class PaymentHistory {
 
     @CreationTimestamp
     @Column(nullable = false, updatable = false)
-    private LocalDateTime createdAt;
+    private Instant createdAt;
 
     public static PaymentHistory of(UUID paymentId, PaymentStatus previousStatus,
                                     PaymentStatus currentStatus, String reason, PaymentActor createdBy) {

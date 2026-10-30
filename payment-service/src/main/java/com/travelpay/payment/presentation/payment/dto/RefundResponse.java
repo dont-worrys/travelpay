@@ -2,7 +2,7 @@ package com.travelpay.payment.presentation.payment.dto;
 
 import com.travelpay.payment.application.payment.dto.RefundResult;
 
-import java.time.OffsetDateTime;
+import java.time.Instant;
 import java.util.UUID;
 
 public record RefundResponse(
@@ -12,8 +12,8 @@ public record RefundResponse(
         String currency,
         String reason,
         String declineReason,
-        OffsetDateTime createdAt,
-        OffsetDateTime updatedAt
+        Instant createdAt,
+        Instant updatedAt
 ) {
     public static RefundResponse from(RefundResult result) {
         return new RefundResponse(
