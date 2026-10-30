@@ -1,0 +1,10 @@
+{
+  "properties": [
+    {
+      "name": "travelpay.auth.header-context.enabled",
+      "type": "java.lang.Boolean",
+      "description": "MVC 요청의 회원 헤더를 현재 요청에 저장하는 기능을 활성화합니다. 세션이나 호출 서비스의 인증은 수행하지 않습니다.",
+      "defaultValue": false
+    }
+  ]
+}
