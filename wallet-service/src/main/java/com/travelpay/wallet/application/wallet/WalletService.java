@@ -80,7 +80,7 @@ public class WalletService {
                 .toList());
     }
 
-    /** 환전 재환전용. 지갑에 행이 있는 통화만, 원장 잔액을 그대로 돌려준다 (캐시 없음) */
+    /** 환전용. 지갑에 행이 있는 통화만, 원장 잔액을 그대로 돌려준다 (캐시 없음) */
     public InternalWalletBalancesResult getInternalBalances(UUID userId) {
         Objects.requireNonNull(userId, "userId");
         WalletCurrencyRows rows = steps.findWalletCurrencies(userId);
