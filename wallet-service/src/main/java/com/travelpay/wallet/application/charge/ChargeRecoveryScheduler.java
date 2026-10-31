@@ -4,8 +4,9 @@ import com.travelpay.wallet.domain.charge.ChargeRecoveryTarget;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.convert.DurationStyle;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.format.annotation.DurationFormat;
+import org.springframework.format.datetime.standard.DurationFormatterUtils;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 
@@ -46,11 +47,14 @@ public class ChargeRecoveryScheduler {
         this.batchSize = batchSize;
     }
 
-    /** @Scheduled(fixedDelayString)과 같은 형식("10s"·ISO-8601)으로 해석해 1초 이상인지 확인 */
+    /**
+     * ScheduledAnnotationBeanPostProcessor와 같은 파서로 해석해 1초 이상인지 확인.
+     * "10s"·"1m30s"·ISO-8601을 받고, 단위 없는 숫자는 @Scheduled 기본 timeUnit처럼 밀리초로 본다
+     */
     private static void requireFixedDelay(String fixedDelay) {
         Duration delay;
         try {
-            delay = DurationStyle.detectAndParse(fixedDelay);
+            delay = DurationFormatterUtils.detectAndParse(fixedDelay, DurationFormat.Unit.MILLIS);
         } catch (IllegalArgumentException e) {
             throw new IllegalStateException(FIXED_DELAY_KEY + " 형식이 잘못되었습니다: " + fixedDelay, e);
         }
