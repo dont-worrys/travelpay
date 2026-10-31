@@ -64,12 +64,15 @@ public class UserRealNameClientAdapter implements UserRealNameClient {
             return new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE, e);
         }
         String code = errorCode(e);
-        if (e.status() == 403 && INACTIVE_CODES.contains(code)) {
-            return new BusinessException(WalletErrorCode.CHARGE_USER_NOT_ACTIVE, e);
-        }
-        if (e.status() == 404 && USER_NOT_FOUND.equals(code)) {
-            log.warn("충전 실명 조회 대상 회원 없음 userId={}", userId);
-            return new BusinessException(WalletErrorCode.CHARGE_USER_NOT_ACTIVE, e);
+        // 코드를 읽지 못하면 그 외 4xx로 본다 (Set.of는 contains(null)에서 NPE)
+        if (code != null) {
+            if (e.status() == 403 && INACTIVE_CODES.contains(code)) {
+                return new BusinessException(WalletErrorCode.CHARGE_USER_NOT_ACTIVE, e);
+            }
+            if (e.status() == 404 && USER_NOT_FOUND.equals(code)) {
+                log.warn("충전 실명 조회 대상 회원 없음 userId={}", userId);
+                return new BusinessException(WalletErrorCode.CHARGE_USER_NOT_ACTIVE, e);
+            }
         }
         log.error("회원 실명 응답 처리 불가 userId={} status={} code={}", userId, e.status(), code);
         return new UserResponseException(e);
