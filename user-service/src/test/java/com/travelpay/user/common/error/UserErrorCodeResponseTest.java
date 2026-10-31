@@ -69,7 +69,11 @@ class UserErrorCodeResponseTest {
                 Arguments.of(UserErrorCode.ACCOUNT_SUSPENDED, 403,
                         "USER_ACCOUNT_SUSPENDED", "이용이 정지된 계정입니다."),
                 Arguments.of(UserErrorCode.ACCOUNT_CLOSED, 403,
-                        "USER_ACCOUNT_CLOSED", "이용이 종료된 계정입니다.")
+                        "USER_ACCOUNT_CLOSED", "이용이 종료된 계정입니다."),
+                Arguments.of(UserErrorCode.RECIPIENT_NOT_FOUND, 404,
+                        "USER_RECIPIENT_NOT_FOUND", "수취인을 찾을 수 없습니다."),
+                Arguments.of(UserErrorCode.NOT_FOUND, 404,
+                        "USER_NOT_FOUND", "회원을 찾을 수 없습니다.")
         );
     }
 
