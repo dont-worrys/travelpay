@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -80,4 +81,32 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
     /** increaseAttempt 직후 같은 트랜잭션에서 읽는다 (행 잠금을 쥔 상태라 다른 트랜잭션이 바꾸지 못함) */
     @Query("select c.attemptCount from ChargeRequest c where c.id = :id")
     int findAttemptCount(@Param("id") UUID id);
+
+    /**
+     * 복구 대상: 처리 중 상태이고 대기 시간(30초 × 2^min(max(attempt_count-1, 0), 5))이 지난 건. 시간은 DB now() 기준.
+     * 첫 번째 updated_at 조건은 대기 시간의 하한으로, (status, updated_at) 인덱스 범위 스캔을 쓰게 하려는 중복 조건이다.
+     */
+    @Query(nativeQuery = true, value = """
+            select id, status, updated_at as "updatedAt"
+              from charge_requests
+             where status in ('REQUESTED', 'BANK_PROCESSING', 'CREDIT_PROCESSING', 'REFUND_PROCESSING')
+               and updated_at < now() - interval '30 seconds'
+               and updated_at < now() - interval '30 seconds' * power(2, least(greatest(attempt_count - 1, 0), 5))
+             order by updated_at
+             limit :limit
+            """)
+    List<ChargeRecoveryRow> findRecoveryTargets(@Param("limit") int limit);
+
+    /** 복구 선점: 조회 이후 아무도 바꾸지 않았을 때만 updated_at을 DB now()로 갱신한다 */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query(nativeQuery = true, value = """
+            update charge_requests
+               set updated_at = now()
+             where id = :id
+               and status = :status
+               and updated_at = :updatedAt
+            """)
+    int claimForRecovery(@Param("id") UUID id,
+                         @Param("status") String status,
+                         @Param("updatedAt") Instant updatedAt);
 }
