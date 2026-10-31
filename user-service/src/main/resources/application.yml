@@ -5,18 +5,58 @@ spring:
     url: ${USER_DB_URL}
     username: ${USER_DB_USERNAME}
     password: ${USER_DB_PASSWORD}
+  flyway:
+    # 테이블과 초기 약관은 db/migration의 Flyway 파일이 만듭니다.
+    default-schema: user_service
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      # Hibernate는 테이블을 만들거나 바꾸지 않고, 엔티티와 맞는지 검사만 합니다.
+      ddl-auto: validate
+  data:
+    redis:
+      host: ${REDIS_SESSION_HOST:localhost}
+      port: ${REDIS_SESSION_PORT:16379}
+      password: ${REDIS_SESSION_PASSWORD}
+      # 각 Redis 연결·명령의 대기 상한입니다. 전체 HTTP 요청 시간 제한과는 다릅니다.
+      connect-timeout: 2s
+      timeout: 2s
+      repositories:
+        enabled: false
+  session:
+    # 마지막 세션 접근 후 60분간 사용하지 않으면 만료됩니다.
+    timeout: 60m
+    data:
+      redis:
+        namespace: travelpay:user:session
 
 travelpay:
   auth:
     header-context:
-      enabled: true
+      # User에서는 회원 헤더로 요청자 정보를 만들지 않습니다.
+      enabled: false
+  user:
+    session:
+      # 로그인 시각부터 24시간이 지나면 사용 중이어도 다시 로그인해야 합니다.
+      absolute-timeout: 24h
+    login-attempt:
+      # 같은 이메일+IP로 window 안에 pair-limit번 실패하면 block 동안 로그인을 막습니다.
+      pair-limit: 5
+      # 같은 이메일로 IP와 관계없이 window 안에 account-limit번 실패하면 block 동안 로그인을 막습니다.
+      account-limit: 20
+      window: 10m
+      block: 20m
 
 server:
   port: 8081
+  servlet:
+    session:
+      cookie:
+        name: SESSION
+        path: /
+        http-only: true
+        same-site: lax
+        secure: false
 
 eureka:
   instance:

@@ -5,13 +5,20 @@ spring:
     url: ${MOCK_BANK_DB_URL}
     username: ${MOCK_BANK_DB_USERNAME}
     password: ${MOCK_BANK_DB_PASSWORD}
+  flyway:
+    default-schema: mock_bank
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
 
 server:
   port: 8090
+
+# Mock-Fault: DELAY 헤더로 처리·커밋 후 응답을 늦추는 시간
+mock-bank:
+  fault:
+    delay: 10s
 
 management:
   endpoints:

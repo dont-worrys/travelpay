@@ -8,7 +8,20 @@ spring:
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
+  flyway:
+    default-schema: payment_service
+  cloud:
+    openfeign:
+      client:
+        config:
+          wallet-service:
+            connect-timeout: 2000
+            read-timeout: 3000
+          # 송금 쪽 Wallet 클라이언트와 중복이라 공통화 리팩토링 때 정리할 예정입니다.
+          paymentWalletApi:
+            connect-timeout: 2000
+            read-timeout: 3000
 
 travelpay:
   auth:

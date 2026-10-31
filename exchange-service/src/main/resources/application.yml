@@ -5,15 +5,47 @@ spring:
     url: ${EXCHANGE_DB_URL}
     username: ${EXCHANGE_DB_USERNAME}
     password: ${EXCHANGE_DB_PASSWORD}
+  flyway:
+    default-schema: exchange_service
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
+  cloud:
+    openfeign:
+      client:
+        config:
+          # 한도 조회 응답을 오래 붙잡지 않도록 짧게. 실패하면 한도만 응답합니다.
+          wallet-service:
+            connect-timeout: 2000
+            read-timeout: 3000
 
 travelpay:
   auth:
     header-context:
       enabled: true
+
+exchange:
+  rate:
+    # 환율 수집 모드: koreaexim(한국수출입은행 공식 환율)
+    mode: koreaexim
+    koreaexim:
+      api-key: ${KOREAEXIM_API_KEY:}
+  quote:
+    # 견적 유효 시간과 수수료율(0.01 = 1%)
+    ttl: 5m
+    fee-rate: 0.01
+    # 보내는 통화별 1회 금액 범위 (통화 단위, 팀 확정 전 임시값)
+    limits:
+      KRW:
+        min: 1000
+        max: 2000000
+      JPY:
+        min: 100
+        max: 200000
+      CNY:
+        min: 10.00
+        max: 10000.00
 
 server:
   port: 8084
