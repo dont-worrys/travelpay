@@ -1,6 +1,7 @@
 package com.travelpay.wallet.domain.charge;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -34,4 +35,16 @@ public interface ChargeRequestRepository {
      * 바뀐 뒤의 attempt_count를 돌려주고, 상태가 달라 바꾸지 않았으면 empty. 트랜잭션 안에서만 사용
      */
     OptionalInt increaseAttempt(UUID chargeId, ChargeStatus status, String lastError, Instant now);
+
+    /**
+     * 처리 중 상태이고 재시도 대기 시간이 지난 충전을 updated_at 오름차순으로 limit건까지 읽는다.
+     * 대기 시간: 30초 × 2^min(max(attempt_count - 1, 0), 5). 시간은 DB now() 기준
+     */
+    List<ChargeRecoveryTarget> findRecoveryTargets(int limit);
+
+    /**
+     * 복구 선점: 상태와 updated_at이 조회한 값 그대로일 때만 updated_at을 DB now()로 갱신한다.
+     * updatedAt은 findRecoveryTargets가 돌려준 값을 그대로 넘긴다. 반환값은 바뀐 행 수(0 또는 1). 트랜잭션 안에서만 사용
+     */
+    int claimForRecovery(UUID chargeId, ChargeStatus status, Instant updatedAt);
 }
