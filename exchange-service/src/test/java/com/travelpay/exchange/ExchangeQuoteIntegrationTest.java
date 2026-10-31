@@ -96,7 +96,9 @@ class ExchangeQuoteIntegrationTest {
     @BeforeEach
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
+        // 주문이 환율을 FK로 참조하므로 참조하는 테이블까지 함께 비운다 (CASCADE 대신 대상을 명시)
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+                + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(NOW);
     }
 
@@ -104,7 +106,7 @@ class ExchangeQuoteIntegrationTest {
     void appliesFlywayMigrationsAndStartsWithSchemaValidation() {
         assertEquals("validate", environment.getProperty("spring.jpa.hibernate.ddl-auto"));
         // version이 없는 행은 Flyway가 스키마를 만들었다는 기록입니다.
-        assertEquals(List.of("1", "2"), jdbcTemplate.queryForList(
+        assertEquals(List.of("1", "2", "3"), jdbcTemplate.queryForList(
                 "SELECT version FROM " + SCHEMA + ".flyway_schema_history"
                         + " WHERE success AND version IS NOT NULL ORDER BY installed_rank",
                 String.class));
