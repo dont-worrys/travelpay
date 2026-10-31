@@ -35,6 +35,11 @@ spring:
             # 실명 조회는 단건 조회라 짧게. 초과하면 503 (재시도는 호출자가 같은 키로)
             connect-timeout: 1000
             read-timeout: 2000
+  task:
+    scheduling:
+      pool:
+        # 기본 1스레드면 복구 배치(외부 호출)가 길어질 때 Outbox 발행이 막힌다
+        size: 2
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -73,6 +78,12 @@ travelpay:
         consumer:
           # 끄면 충전 SAGA 컨슈머가 시작하지 않는다 (테스트용)
           enabled: true
+      recovery:
+        # 처리 중 상태로 멈춘 충전을 다시 실행. 끄면 복구 스케줄러가 등록되지 않는다 (테스트용)
+        enabled: true
+        # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
+        fixed-delay: 10s
+        batch-size: 10
   client:
     bank:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 mock-bank를 찾는다
