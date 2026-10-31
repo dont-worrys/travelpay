@@ -44,13 +44,13 @@ public class ExchangeOrderService {
     private final Clock clock;
 
     /**
-     * 환전을 신청합니다. 같은 멱등 키 재요청은 견적·지갑 확인보다 먼저 찾아, 같은 신청이면 기존 주문을 돌려줍니다.
+     * 환전을 신청하고 주문을 돌려줍니다. 같은 멱등 키 재요청은 견적·지갑 확인보다 먼저 찾아, 같은 신청이면 기존 주문을 돌려줍니다.
      * 견적이 나중에 사라지거나 만료돼도 이미 만든 주문은 재요청에 그대로 응답하기 위해서입니다.
      *
      * @throws BusinessException 멱등 키 형식 오류(400), 견적 없음(404), 견적 만료·이미 사용·멱등 키 재사용(409),
      *                           지갑 없음(404), 지갑 사용 불가(409), 지갑 확인 실패(503)
      */
-    public PlacedOrder place(PlaceOrderCommand command) {
+    public ExchangeOrder place(PlaceOrderCommand command) {
         IdempotencyKey key = new IdempotencyKey(command.idempotencyKey());
         Optional<ExchangeOrder> existing = orderRepository.findByUserIdAndIdempotencyKey(command.userId(), key);
         if (existing.isPresent()) {
@@ -70,7 +70,7 @@ public class ExchangeOrderService {
                 historyRepository.save(inserted.placedHistory());
                 return inserted;
             });
-            return new PlacedOrder(saved, true);
+            return saved;
         } catch (DuplicateExchangeOrderException e) {
             return resolveDuplicate(command, key);
         }
@@ -106,18 +106,18 @@ public class ExchangeOrderService {
     }
 
     /** 같은 멱등 키로 이미 만든 주문입니다. 처음과 같은 견적·지갑이면 그 주문을, 다르면 409입니다. */
-    private static PlacedOrder replay(ExchangeOrder existing, PlaceOrderCommand command) {
+    private static ExchangeOrder replay(ExchangeOrder existing, PlaceOrderCommand command) {
         if (!existing.isSameRequest(command.quoteId(), command.walletId())) {
             throw new BusinessException(ExchangeOrderErrorCode.IDEMPOTENCY_KEY_REUSED);
         }
-        return new PlacedOrder(existing, false);
+        return existing;
     }
 
     /**
      * INSERT가 주문 UNIQUE에 걸린 경우입니다. 같은 멱등 키의 동시 요청이 먼저 저장했으면 재요청과 같이 응답하고,
      * 그 키의 주문이 없으면 다른 신청이 이 견적을 먼저 사용한 것입니다.
      */
-    private PlacedOrder resolveDuplicate(PlaceOrderCommand command, IdempotencyKey key) {
+    private ExchangeOrder resolveDuplicate(PlaceOrderCommand command, IdempotencyKey key) {
         return orderRepository.findByUserIdAndIdempotencyKey(command.userId(), key)
                 .map(winner -> replay(winner, command))
                 .orElseThrow(() -> new BusinessException(ExchangeOrderErrorCode.QUOTE_ALREADY_USED));

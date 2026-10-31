@@ -37,10 +37,8 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionOperations;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -84,10 +82,9 @@ class ExchangeOrderServiceTest {
 
     @Test
     void placesProcessingOrderWithCreationHistory() {
-        PlacedOrder placed = service.place(command(quote.getId(), WALLET_ID));
+        ExchangeOrder order = service.place(command(quote.getId(), WALLET_ID));
 
-        assertTrue(placed.created());
-        ExchangeOrder order = placed.order();
+        verify(orderRepository).save(order);
         assertEquals(ExchangeOrderStatus.PROCESSING, order.getStatus());
         assertEquals(NOW, order.getRequestedAt());
         assertEquals(quote.getId(), order.getQuoteId());
@@ -106,10 +103,7 @@ class ExchangeOrderServiceTest {
         when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
                 .thenReturn(Optional.of(existing));
 
-        PlacedOrder placed = service.place(command(quote.getId(), WALLET_ID));
-
-        assertFalse(placed.created());
-        assertSame(existing, placed.order());
+        assertSame(existing, service.place(command(quote.getId(), WALLET_ID)));
         verifyNoInteractions(quoteRepository, walletBalanceReader);
         verify(orderRepository, never()).save(any());
     }
@@ -198,10 +192,7 @@ class ExchangeOrderServiceTest {
         when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
                 .thenReturn(Optional.empty(), Optional.of(winner));
 
-        PlacedOrder placed = service.place(command(quote.getId(), WALLET_ID));
-
-        assertFalse(placed.created());
-        assertSame(winner, placed.order());
+        assertSame(winner, service.place(command(quote.getId(), WALLET_ID)));
         verify(historyRepository, never()).save(any());
     }
 
