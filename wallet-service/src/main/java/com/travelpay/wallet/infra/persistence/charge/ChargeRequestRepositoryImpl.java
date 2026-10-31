@@ -1,6 +1,7 @@
 package com.travelpay.wallet.infra.persistence.charge;
 
 import com.travelpay.wallet.domain.charge.ChargeFailureCode;
+import com.travelpay.wallet.domain.charge.ChargeRecoveryTarget;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
 import com.travelpay.wallet.domain.charge.ChargeRequestRepository;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
@@ -11,6 +12,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -66,6 +68,19 @@ public class ChargeRequestRepositoryImpl implements ChargeRequestRepository {
             return OptionalInt.empty();
         }
         return OptionalInt.of(jpaRepository.findAttemptCount(chargeId));
+    }
+
+    @Override
+    public List<ChargeRecoveryTarget> findRecoveryTargets(int limit) {
+        return jpaRepository.findRecoveryTargets(limit).stream()
+                .map(row -> new ChargeRecoveryTarget(row.getId(), ChargeStatus.valueOf(row.getStatus()),
+                        row.getUpdatedAt()))
+                .toList();
+    }
+
+    @Override
+    public int claimForRecovery(UUID chargeId, ChargeStatus status, Instant updatedAt) {
+        return jpaRepository.claimForRecovery(chargeId, status.name(), updatedAt);
     }
 
     private static boolean isIdempotencyViolation(Throwable exception) {
