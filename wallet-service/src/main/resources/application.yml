@@ -23,6 +23,14 @@ spring:
             # 원장 최대 응답(약 5초)보다 길게
             connect-timeout: 1000
             read-timeout: 6000
+          # 원장 거래 등록 클라이언트 (contextId로 설정 키가 나뉨). 계정 클라이언트와 같은 값
+          ledger-transaction:
+            connect-timeout: 1000
+            read-timeout: 6000
+          mock-bank:
+            # 은행 응답이 이보다 늦으면 결과 모름으로 두고 같은 requestId로 다시 보낸다
+            connect-timeout: 1000
+            read-timeout: 5000
           user-service:
             # 실명 조회는 단건 조회라 짧게. 초과하면 503 (재시도는 호출자가 같은 키로)
             connect-timeout: 1000
@@ -41,6 +49,11 @@ spring:
         linger.ms: 5
         # Kafka가 꺼져 있으면 send() 자체가 기본 60초 멈춤 → 짧게 제한
         max.block.ms: 3000
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 컨슈머 그룹이 처음 붙을 때 그 전에 쌓인 충전 이벤트도 처리
+      auto-offset-reset: earliest
 
 travelpay:
   auth:
@@ -55,7 +68,15 @@ travelpay:
         # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
         fixed-delay: 1s
         batch-size: 50
+    charge:
+      saga:
+        consumer:
+          # 끄면 충전 SAGA 컨슈머가 시작하지 않는다 (테스트용)
+          enabled: true
   client:
+    bank:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 mock-bank를 찾는다
+      url: ${MOCK_BANK_URL:}
     ledger:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
       url: ${LEDGER_SERVICE_URL:}
