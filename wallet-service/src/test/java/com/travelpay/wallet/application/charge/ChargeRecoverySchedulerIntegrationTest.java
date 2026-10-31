@@ -108,7 +108,7 @@ class ChargeRecoverySchedulerIntegrationTest {
         userId = UUID.randomUUID();
         walletId = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO wallets (id, user_id, status) VALUES (?, ?, 'ACTIVE')", walletId, userId);
-        scheduler = new ChargeRecoveryScheduler(recoverySteps, executor, 10);
+        scheduler = new ChargeRecoveryScheduler(recoverySteps, executor, 10, "10s");
     }
 
     @Test
