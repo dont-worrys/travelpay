@@ -4,6 +4,7 @@ import com.travelpay.wallet.application.charge.dto.BankResult;
 import com.travelpay.wallet.application.charge.dto.LedgerPostResult;
 import com.travelpay.wallet.domain.Currency;
 import com.travelpay.wallet.domain.charge.AccountNumberCipher;
+import com.travelpay.wallet.domain.charge.AccountNumberCipherException;
 import com.travelpay.wallet.domain.charge.BankAccount;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
 import com.travelpay.wallet.infra.kafka.ChargeSagaConsumer;
@@ -202,6 +203,26 @@ class ChargeSagaIntegrationTest {
         assertEquals("feign.FeignException$Conflict", row.get("last_error"));
         verify(ledgerClient, times(1)).postCharge(any(), any(), any(), anyLong());
         verify(bankClient, never()).refund(anyString(), any(), anyLong());
+    }
+
+    @Test
+    void BANK_PROCESSING_건에서_계좌번호를_복호화하지_못하면_은행_호출_없이_MANUAL_REVIEW로_전이한다() {
+        jdbcTemplate.update("UPDATE charge_requests SET status = 'BANK_PROCESSING', account_number_enc = ? "
+                + "WHERE id = ?", "v1:@@invalid", chargeId);
+
+        executor.execute(chargeId);
+
+        Map<String, Object> row = chargeRow();
+        assertEquals("MANUAL_REVIEW", row.get("status"));
+        assertEquals("ACCOUNT_DECRYPT_FAILED", row.get("failure_code"));
+        assertEquals(AccountNumberCipherException.class.getName(), row.get("last_error"));
+        assertEquals(0, row.get("attempt_count"));
+        verify(bankClient, never()).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(ledgerClient, never()).postCharge(any(), any(), any(), anyLong());
+
+        executor.execute(chargeId);
+        assertEquals("MANUAL_REVIEW", chargeRow().get("status"));
+        verify(bankClient, never()).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
     }
 
     @Test
