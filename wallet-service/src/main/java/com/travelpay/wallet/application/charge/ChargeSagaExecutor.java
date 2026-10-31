@@ -32,6 +32,7 @@ import static com.travelpay.wallet.domain.charge.ChargeStatus.REQUESTED;
  * 은행·원장 호출은 트랜잭션 밖에서 하고 상태 변경만 ChargeSagaSteps의 짧은 트랜잭션으로 한다.
  * - 결과 모름(타임아웃·5xx·연결 실패): 상태 유지, attempt_count +1 (한도에 이르면 MANUAL_REVIEW) 후 멈춤
  * - 409·400·응답 형식 이상: 재시도로 풀리지 않으므로 바로 MANUAL_REVIEW(RESPONSE_INVALID)
+ * - 계좌번호 복호화 실패: 재시도로 풀리지 않고, 이전 시도에서 이미 출금됐을 수 있으므로 MANUAL_REVIEW(ACCOUNT_DECRYPT_FAILED)
  * - 전이가 0행(다른 실행기가 먼저 진행): 다음 외부 호출 없이 멈춤
  * 로그에는 chargeId·bankRequestId·eventId·예외 클래스명만 남긴다 (계좌번호·예금주 금지).
  */
@@ -102,9 +103,11 @@ public class ChargeSagaExecutor {
         try {
             accountNumber = cipher.decrypt(charge.getBankAccount().getAccountNumberEnc());
         } catch (AccountNumberCipherException e) {
-            log.error("충전 계좌번호 복호화 실패 chargeId={} bankRequestId={} eventId={} exception={}",
-                    charge.getId(), charge.getBankRequestId(), eventId, e.getClass().getName());
-            return Optional.empty();
+            String errorClass = e.getClass().getName();
+            log.error("충전 계좌번호 복호화 실패로 수동 확인 전환 chargeId={} bankRequestId={} eventId={} exception={}",
+                    charge.getId(), charge.getBankRequestId(), eventId, errorClass);
+            return advance(charge, BANK_PROCESSING, MANUAL_REVIEW,
+                    ChargeStepResult.failed(ChargeFailureCode.ACCOUNT_DECRYPT_FAILED, errorClass), eventId);
         }
         BankResult result = bankClient.withdraw(charge.getBankRequestId(), charge.getBankAccount().getBankCode(),
                 accountNumber, charge.getHolderNameSnapshot(), charge.getAmount());

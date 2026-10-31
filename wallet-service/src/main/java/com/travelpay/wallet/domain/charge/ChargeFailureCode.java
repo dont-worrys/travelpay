@@ -11,7 +11,9 @@ public enum ChargeFailureCode {
     LEDGER_REJECTED("충전을 완료하지 못해 출금된 금액을 환불합니다. 처리 상태는 충전 내역에서 확인해 주세요."),
     RETRY_EXHAUSTED("충전 처리 결과를 확인하고 있습니다. 같은 금액을 다시 충전하지 말고 잠시 후 상태를 확인해 주세요."),
     /** 은행·원장 응답이 409·400·형식 이상이라 재시도로 풀리지 않음. 원인은 last_error에 남긴다 */
-    RESPONSE_INVALID("충전 처리 결과를 확인하고 있습니다. 같은 금액을 다시 충전하지 말고 잠시 후 상태를 확인해 주세요.");
+    RESPONSE_INVALID("충전 처리 결과를 확인하고 있습니다. 같은 금액을 다시 충전하지 말고 잠시 후 상태를 확인해 주세요."),
+    /** 저장된 계좌번호 암호문을 복호화하지 못해 재시도로 풀리지 않음. last_error에는 예외 클래스명만 남긴다 */
+    ACCOUNT_DECRYPT_FAILED("충전 처리 결과를 확인하고 있습니다. 같은 금액을 다시 충전하지 말고 잠시 후 상태를 확인해 주세요.");
 
     private final String displayMessage;
 
