@@ -12,6 +12,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 @Repository
@@ -49,6 +50,22 @@ public class ChargeRequestRepositoryImpl implements ChargeRequestRepository {
     public int transitionStatus(UUID chargeId, ChargeStatus from, ChargeStatus to,
                                 ChargeFailureCode failureCode, String lastError, Instant now) {
         return jpaRepository.transitionStatus(chargeId, from, to, failureCode, lastError, now);
+    }
+
+    @Override
+    public int advanceStatus(UUID chargeId, ChargeStatus from, ChargeStatus to,
+                             ChargeFailureCode failureCode, String lastError,
+                             UUID bankTxId, UUID ledgerRef, UUID refundBankTxId, Instant now) {
+        return jpaRepository.advanceStatus(chargeId, from, to, failureCode, lastError,
+                bankTxId, ledgerRef, refundBankTxId, now);
+    }
+
+    @Override
+    public OptionalInt increaseAttempt(UUID chargeId, ChargeStatus status, String lastError, Instant now) {
+        if (jpaRepository.increaseAttempt(chargeId, status, lastError, now) == 0) {
+            return OptionalInt.empty();
+        }
+        return OptionalInt.of(jpaRepository.findAttemptCount(chargeId));
     }
 
     private static boolean isIdempotencyViolation(Throwable exception) {

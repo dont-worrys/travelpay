@@ -37,4 +37,47 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
                          @Param("failureCode") ChargeFailureCode failureCode,
                          @Param("lastError") String lastError,
                          @Param("now") Instant now);
+
+    /** transitionStatus + 단계 결과 ID 저장 + attempt_count 초기화 */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ChargeRequest c
+               set c.status = :to,
+                   c.failureCode = coalesce(:failureCode, c.failureCode),
+                   c.lastError = coalesce(:lastError, c.lastError),
+                   c.bankTxId = coalesce(:bankTxId, c.bankTxId),
+                   c.ledgerRef = coalesce(:ledgerRef, c.ledgerRef),
+                   c.refundBankTxId = coalesce(:refundBankTxId, c.refundBankTxId),
+                   c.attemptCount = 0,
+                   c.updatedAt = :now
+             where c.id = :id
+               and c.status = :from
+            """)
+    int advanceStatus(@Param("id") UUID id,
+                      @Param("from") ChargeStatus from,
+                      @Param("to") ChargeStatus to,
+                      @Param("failureCode") ChargeFailureCode failureCode,
+                      @Param("lastError") String lastError,
+                      @Param("bankTxId") UUID bankTxId,
+                      @Param("ledgerRef") UUID ledgerRef,
+                      @Param("refundBankTxId") UUID refundBankTxId,
+                      @Param("now") Instant now);
+
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ChargeRequest c
+               set c.attemptCount = c.attemptCount + 1,
+                   c.lastError = :lastError,
+                   c.updatedAt = :now
+             where c.id = :id
+               and c.status = :status
+            """)
+    int increaseAttempt(@Param("id") UUID id,
+                        @Param("status") ChargeStatus status,
+                        @Param("lastError") String lastError,
+                        @Param("now") Instant now);
+
+    /** increaseAttempt 직후 같은 트랜잭션에서 읽는다 (행 잠금을 쥔 상태라 다른 트랜잭션이 바꾸지 못함) */
+    @Query("select c.attemptCount from ChargeRequest c where c.id = :id")
+    int findAttemptCount(@Param("id") UUID id);
 }
