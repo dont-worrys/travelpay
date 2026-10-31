@@ -4,10 +4,12 @@ import com.travelpay.wallet.domain.charge.ChargeRecoveryTarget;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.convert.DurationStyle;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 
@@ -23,15 +25,38 @@ import java.util.UUID;
         havingValue = "true", matchIfMissing = true)
 public class ChargeRecoveryScheduler {
 
+    private static final String BATCH_SIZE_KEY = "travelpay.wallet.charge.recovery.batch-size";
+    private static final String FIXED_DELAY_KEY = "travelpay.wallet.charge.recovery.fixed-delay";
+    private static final Duration MIN_FIXED_DELAY = Duration.ofSeconds(1);
+
     private final ChargeRecoverySteps recoverySteps;
     private final ChargeSagaExecutor executor;
     private final int batchSize;
 
+    /** 설정이 잘못되면 IllegalStateException으로 기동을 멈춘다 (@Scheduled 등록 전) */
     public ChargeRecoveryScheduler(ChargeRecoverySteps recoverySteps, ChargeSagaExecutor executor,
-                                   @Value("${travelpay.wallet.charge.recovery.batch-size:10}") int batchSize) {
+                                   @Value("${" + BATCH_SIZE_KEY + ":10}") int batchSize,
+                                   @Value("${" + FIXED_DELAY_KEY + ":10s}") String fixedDelay) {
+        if (batchSize < 1) {
+            throw new IllegalStateException(BATCH_SIZE_KEY + "는 1 이상이어야 합니다: " + batchSize);
+        }
+        requireFixedDelay(fixedDelay);
         this.recoverySteps = recoverySteps;
         this.executor = executor;
         this.batchSize = batchSize;
+    }
+
+    /** @Scheduled(fixedDelayString)과 같은 형식("10s"·ISO-8601)으로 해석해 1초 이상인지 확인 */
+    private static void requireFixedDelay(String fixedDelay) {
+        Duration delay;
+        try {
+            delay = DurationStyle.detectAndParse(fixedDelay);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(FIXED_DELAY_KEY + " 형식이 잘못되었습니다: " + fixedDelay, e);
+        }
+        if (delay.compareTo(MIN_FIXED_DELAY) < 0) {
+            throw new IllegalStateException(FIXED_DELAY_KEY + "는 1초 이상이어야 합니다: " + fixedDelay);
+        }
     }
 
     @Scheduled(fixedDelayString = "${travelpay.wallet.charge.recovery.fixed-delay:10s}")
