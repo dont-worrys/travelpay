@@ -10,7 +10,11 @@ public enum ExchangeOrderErrorCode implements ErrorCode {
     QUOTE_ALREADY_USED("EXCHANGE_QUOTE_ALREADY_USED", "이미 환전 신청에 사용된 견적입니다.", 409),
     IDEMPOTENCY_KEY_REUSED("EXCHANGE_IDEMPOTENCY_KEY_REUSED",
             "같은 Idempotency-Key로 다른 환전을 신청할 수 없습니다.", 409),
-    ORDER_NOT_FOUND("EXCHANGE_ORDER_NOT_FOUND", "환전 주문을 찾을 수 없습니다.", 404);
+    ORDER_NOT_FOUND("EXCHANGE_ORDER_NOT_FOUND", "환전 주문을 찾을 수 없습니다.", 404),
+    WALLET_NOT_FOUND("EXCHANGE_WALLET_NOT_FOUND", "지갑을 찾을 수 없습니다.", 404),
+    WALLET_NOT_AVAILABLE("EXCHANGE_WALLET_NOT_AVAILABLE", "지금은 이 지갑으로 환전할 수 없습니다.", 409),
+    WALLET_SERVICE_UNAVAILABLE("EXCHANGE_WALLET_SERVICE_UNAVAILABLE",
+            "지금은 지갑을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503);
 
     private final String code;
     private final String message;

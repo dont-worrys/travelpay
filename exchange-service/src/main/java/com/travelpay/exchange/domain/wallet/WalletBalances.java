@@ -35,6 +35,15 @@ public record WalletBalances(UUID walletId, boolean active, Map<Currency, Accoun
 
     /** 지갑과 그 통화 계정이 모두 ACTIVE여야 환전으로 돈을 뺄 수 있습니다. */
     public boolean canSpend(Currency currency) {
+        return isUsable(currency);
+    }
+
+    /** 지갑과 그 통화 계정이 모두 ACTIVE여야 환전으로 돈을 받을 수 있습니다. 원장도 같은 기준으로 거절합니다. */
+    public boolean canReceive(Currency currency) {
+        return isUsable(currency);
+    }
+
+    private boolean isUsable(Currency currency) {
         return active && account(currency).map(Account::active).orElse(false);
     }
 
