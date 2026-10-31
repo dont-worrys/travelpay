@@ -24,13 +24,15 @@ user-service는 일반 회원가입, 로그인·로그아웃, Redis 세션, CSRF
    - Eureka 서버 없이 user-service만 확인할 때는 `./gradlew :user-service:bootRun --args='--eureka.client.enabled=false'`로 실행합니다.
    - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다.
 
-4. 약관 데이터를 넣습니다. 시행 중인 약관이 없으면 회원가입은 `503 COMMON_SERVICE_UNAVAILABLE`입니다. 약관 등록 API는 아직 없으므로 로컬에서는 SQL로 넣습니다. 테이블은 앱을 처음 실행할 때 만들어집니다.
+4. 테이블과 초기 약관은 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)). 초기 약관은 `SERVICE_TERMS`·`PRIVACY_TERMS`(버전 `2026-10-01`, 둘 다 필수)입니다.
+
+   Flyway 도입 전에 실행해서 `user_service` 스키마에 표가 이미 있으면 앱이 `Found non-empty schema(s) "user_service" but no schema history table`로 시작을 멈춥니다. 이때는 로컬 `user_service` 스키마를 한 번 새로 만듭니다. 이 스키마의 로컬 데이터는 모두 지워집니다. 세 명령은 한 트랜잭션(`-1`)으로 실행되므로, 중간에 실패하면 아무것도 바뀌지 않습니다.
 
    ```bash
-   docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
-   insert into user_service.terms_documents (terms_code, terms_version, title, content, is_required, effective_at)
-   values ('SERVICE', 'v1', '서비스 이용약관', '로컬 확인용 약관입니다.', true, now());
-   SQL
+   docker compose exec -T postgres sh -c 'psql -1 -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+     -c "DROP SCHEMA user_service CASCADE" \
+     -c "CREATE SCHEMA user_service AUTHORIZATION \"$USER_DB_USERNAME\"" \
+     -c "REVOKE ALL ON SCHEMA user_service FROM PUBLIC"'
    ```
 
 ## API 목록
@@ -69,7 +71,7 @@ BASE=http://localhost:8081
 TOKEN=$(curl -s -c jar -b jar $BASE/api/v1/auth/csrf | sed 's/.*"token":"\([^"]*\)".*/\1/')
 
 curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"loginEmail":"member@example.com","password":"TravelpayDemo-2026!","realName":"홍길동","phone":"010-1234-5678","consents":[{"termsCode":"SERVICE","termsVersion":"v1"}]}' \
+  -d '{"loginEmail":"member@example.com","password":"TravelpayDemo-2026!","realName":"홍길동","phone":"010-1234-5678","consents":[{"termsCode":"SERVICE_TERMS","termsVersion":"2026-10-01"},{"termsCode":"PRIVACY_TERMS","termsVersion":"2026-10-01"}]}' \
   $BASE/api/v1/users
 
 curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -H 'Content-Type: application/json' \
@@ -174,6 +176,21 @@ curl -s $BASE/internal/v1/users/$USER_ID/funding-identity
 | 503 | `COMMON_SERVICE_UNAVAILABLE` | DB·Redis 장애, 시행 중인 약관 없음 |
 
 503은 장애를 뜻하므로 기존 세션 쿠키를 지우지 않습니다. 잠시 후 같은 쿠키로 다시 시도할 수 있습니다.
+
+## DB 스키마 (Flyway)
+
+테이블과 초기 데이터는 `user-service/src/main/resources/db/migration`의 `V번호__설명.sql` 파일로 관리합니다. 앱이 시작할 때 Flyway가 아직 적용하지 않은 파일만 번호 순서대로 실행하고 실행 기록을 `user_service.flyway_schema_history`에 남깁니다. Hibernate는 표를 만들거나 바꾸지 않고 엔티티와 맞는지 검사만 합니다(`ddl-auto: validate`).
+
+| 파일 | 내용 |
+|---|---|
+| `V1__create_user_tables.sql` | 회원·로그인 수단·약관·약관 동의 표 |
+| `V2__seed_initial_terms.sql` | 초기 약관 `SERVICE_TERMS`·`PRIVACY_TERMS` |
+
+- 이미 적용한 파일은 고치지 않습니다. 고치면 앱이 시작할 때 검증에서 멈춥니다. 구조나 데이터를 바꿀 때는 다음 번호의 새 파일을 추가합니다.
+- 엔티티를 바꾸면 같은 작업에서 마이그레이션 파일도 추가합니다. `FlywayMigrationTest`가 마이그레이션 결과를 엔티티 기준 스키마와 비교해 다르면 실패합니다.
+- 제약조건 이름은 고유키·외래키는 엔티티에 적은 이름(`uk_`·`fk_`)을, 기본키·CHECK는 PostgreSQL 기본 이름(`<표>_pkey`, `<표>_<열>_check`)을 씁니다. Hibernate가 기본키·CHECK에는 이름을 붙이지 못해 DB 테스트용 스키마에 기본 이름이 붙고, `FlywayMigrationTest`가 이름까지 비교하기 때문입니다.
+- 배포 DB(RDS 등)는 로컬의 `infra/postgres/init/01-service-schemas.sql`과 같은 준비를 관리자가 먼저 합니다. 서비스 계정, `user_service` 스키마와 소유권, 접속 권한, 계정의 `search_path`입니다. 서비스 계정은 DB 접속 권한만 있어서 Flyway가 스키마를 만들 수 없습니다.
+- 앱의 DB 연결은 계정의 `search_path`나 `USER_DB_URL`의 `currentSchema=user_service`로 `user_service`를 가리켜야 합니다. `spring.flyway.default-schema`는 Flyway에만 적용됩니다.
 
 ## 테스트
 
