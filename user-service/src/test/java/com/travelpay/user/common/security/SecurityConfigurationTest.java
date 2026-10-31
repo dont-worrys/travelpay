@@ -61,6 +61,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -264,6 +265,32 @@ class SecurityConfigurationTest {
         assertError(result, 401, "COMMON_UNAUTHORIZED", "로그인이 필요합니다.");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"real-name", "funding-identity"})
+    void otherServicesCanCallTheInternalNameLookupsWithoutAMemberSession(String lookup) throws Exception {
+        var result = mvc.perform(get("/internal/v1/users/{userId}/" + lookup, USER_ID))
+                .andExpect(status().isOk()).andReturn();
+
+        assertNull(result.getRequest().getSession(false));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/internal/v1/users/550e8400-e29b-41d4-a716-446655440000",
+            "/internal/v1/users/550e8400-e29b-41d4-a716-446655440000/unlisted"})
+    void internalPathPrefixDoesNotMakeUnlistedRoutesPublic(String path) throws Exception {
+        var result = mvc.perform(get(path)).andReturn();
+
+        assertError(result, 401, "COMMON_UNAUTHORIZED", "로그인이 필요합니다.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"real-name", "funding-identity"})
+    void internalNameLookupsAreOpenOnlyForGet(String lookup) throws Exception {
+        var result = mvc.perform(options("/internal/v1/users/{userId}/" + lookup, USER_ID)).andReturn();
+
+        assertError(result, 401, "COMMON_UNAUTHORIZED", "로그인이 필요합니다.");
+    }
+
     @Test
     void serverErrorDispatchCanReachErrorHandlingWithoutMakingThePathPublic() throws Exception {
         var direct = mvc.perform(get("/test/error-dispatch")).andReturn();
@@ -350,7 +377,8 @@ class SecurityConfigurationTest {
     @RestController
     static class ProbeController {
 
-        @GetMapping({"/api/v1/terms", "/api/v1/users/me", "/api/v1/admin/users", "/test/error-dispatch"})
+        @GetMapping({"/api/v1/terms", "/api/v1/users/me", "/api/v1/admin/users", "/test/error-dispatch",
+                "/internal/v1/users/{userId}/real-name", "/internal/v1/users/{userId}/funding-identity"})
         ApiResponse<Map<String, String>> readProbe() {
             return ApiResponse.success(Map.of("probe", "read"));
         }
