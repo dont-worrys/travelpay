@@ -1,12 +1,16 @@
 package com.travelpay.user;
 
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import com.travelpay.user.application.service.LoginAttemptLimiter;
 import com.travelpay.user.common.config.LoginAttemptProperties;
 import com.travelpay.user.infrastructure.redis.RedisLoginAttemptLimiter;
+import jakarta.persistence.EntityManagerFactory;
+import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -78,5 +82,15 @@ class UserServiceApplicationTest {
         assertInstanceOf(RedisLoginAttemptLimiter.class, context.getBean(LoginAttemptLimiter.class));
         assertEquals(new LoginAttemptProperties(5, 20, Duration.ofMinutes(10), Duration.ofMinutes(20)),
                 context.getBean(LoginAttemptProperties.class));
+    }
+
+    @Test
+    void startsOnTheSchemaFlywayMigratedWhileHibernateOnlyValidatesIt() {
+        var applied = Arrays.stream(context.getBean(Flyway.class).info().applied())
+                .map(migration -> migration.getVersion().getVersion())
+                .toList();
+
+        assertEquals(List.of("1", "2"), applied);
+        assertEquals("validate", context.getBean(EntityManagerFactory.class).getProperties().get("hibernate.hbm2ddl.auto"));
     }
 }

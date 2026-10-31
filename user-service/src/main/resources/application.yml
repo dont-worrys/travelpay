@@ -5,10 +5,14 @@ spring:
     url: ${USER_DB_URL}
     username: ${USER_DB_USERNAME}
     password: ${USER_DB_PASSWORD}
+  flyway:
+    # 테이블과 초기 약관은 db/migration의 Flyway 파일이 만듭니다.
+    default-schema: user_service
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: update
+      # Hibernate는 테이블을 만들거나 바꾸지 않고, 엔티티와 맞는지 검사만 합니다.
+      ddl-auto: validate
   data:
     redis:
       host: ${REDIS_SESSION_HOST:localhost}

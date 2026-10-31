@@ -78,6 +78,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
                 "spring.cloud.discovery.enabled=false",
                 "spring.cloud.service-registry.auto-registration.enabled=false",
                 "spring.security.user.password=unused-test-framework-password",
+                // 다른 DB 테스트처럼 PostgresJpaTestConfiguration이 Hibernate로 만든 스키마를 씁니다.
+                "spring.flyway.enabled=false",
                 "logging.level.root=WARN"
         })
 class SessionConcurrencyHttpTest {
