@@ -92,6 +92,15 @@ class UserRealNameClientAdapterTest {
         assertThrows(UserResponseException.class, () -> adapter.findRealName(userId));
     }
 
+    @Test
+    void 본문_없는_403은_500과_ERROR(CapturedOutput output) {
+        when(feignClient.getFundingIdentity(any(), any(), any())).thenThrow(feignError(403, ""));
+
+        assertThrows(UserResponseException.class, () -> adapter.findRealName(userId));
+        assertTrue(output.getOut().contains("ERROR"));
+        assertTrue(output.getOut().contains("status=403"));
+    }
+
     @ParameterizedTest
     @CsvSource({"400, INVALID_INPUT", "403, FORBIDDEN", "409, CONFLICT"})
     void 그_밖의_4xx는_500과_ERROR(int status, String code, CapturedOutput output) {
