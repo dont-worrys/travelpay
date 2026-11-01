@@ -21,8 +21,9 @@ interface ExchangeOrderJpaRepository extends JpaRepository<ExchangeOrder, UUID> 
     Optional<ExchangeOrder> findByIdAndUserId(UUID id, UUID userId);
 
     /**
-     * 확인 횟수를 버전처럼 비교해 원장 호출을 선점한다. 같은 행을 동시에 UPDATE하면 뒤 트랜잭션은 앞이 커밋할 때까지 기다린 뒤
-     * (READ COMMITTED) 최신 행으로 WHERE를 다시 평가하므로 하나만 1행이 된다.
+     * 확인 횟수를 버전처럼 비교하고, 마지막 확인이 claimableBefore 이전일 때만 원장 호출을 선점한다.
+     * 같은 행을 동시에 UPDATE하면 뒤 트랜잭션은 앞이 커밋할 때까지 기다린 뒤 (READ COMMITTED) 최신 행으로 WHERE를 다시 평가하므로
+     * 하나만 1행이 된다. 앞 흐름이 선점한 뒤에 읽은 흐름은 횟수가 같아도 확인 시각 조건에 걸려 0행이다(기다리지 않음).
      * 벌크 UPDATE라 updated_at Auditing이 동작하지 않아 시각을 직접 넣는다.
      */
     @Transactional
@@ -35,9 +36,10 @@ interface ExchangeOrderJpaRepository extends JpaRepository<ExchangeOrder, UUID> 
              where o.id = :id
                and o.status = com.travelpay.exchange.domain.order.ExchangeOrderStatus.PROCESSING
                and o.ledgerCheckCount = :seenCheckCount
+               and (o.lastLedgerCheckedAt is null or o.lastLedgerCheckedAt <= :claimableBefore)
             """)
     int claimLedgerCheck(@Param("id") UUID id, @Param("seenCheckCount") int seenCheckCount,
-                         @Param("now") Instant now);
+                         @Param("now") Instant now, @Param("claimableBefore") Instant claimableBefore);
 
     /** PROCESSING인 주문만 바꾼다. 이미 확정된 주문은 0행 */
     @Transactional

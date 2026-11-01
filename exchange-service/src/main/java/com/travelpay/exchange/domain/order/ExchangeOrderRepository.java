@@ -1,5 +1,6 @@
 package com.travelpay.exchange.domain.order;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -27,12 +28,16 @@ public interface ExchangeOrderRepository {
     Optional<ExchangeOrder> findByIdAndUserId(UUID orderId, UUID userId);
 
     /**
-     * 원장 호출을 선점합니다. PROCESSING이고 확인 횟수가 조회했던 값과 같을 때만 횟수를 1 올리고 확인 시각을 남깁니다.
-     * true면 이번 원장 호출을 이 흐름이 맡은 것이고, false면 다른 흐름(다른 서버의 스케줄러, 재요청)이 먼저 맡았거나 이미 확정된 것입니다.
+     * 원장 호출을 선점합니다. PROCESSING이고, 확인 횟수가 조회했던 값과 같고, 마지막 확인 후 lease가 지났을 때만
+     * 횟수를 1 올리고 확인 시각을 남깁니다.
+     * true면 이번 원장 호출을 이 흐름이 맡은 것이고, false면 다른 흐름(재요청, 다른 서버의 스케줄러)이 먼저 맡았거나,
+     * 다른 흐름의 원장 호출이 아직 진행 중일 수 있거나(lease 안), 이미 확정된 것입니다.
+     * 횟수 비교는 같은 값을 읽은 흐름끼리의 경쟁을, lease는 앞 흐름이 선점한 뒤에 읽은 흐름의 중복 호출을 막습니다.
      *
      * @param seenCheckCount 주문을 읽었을 때의 확인 횟수
+     * @param lease          선점 유효 기간. 원장 호출이 끝나는 최대 시간보다 길어야 호출이 겹치지 않습니다.
      */
-    boolean claimLedgerCheck(UUID orderId, int seenCheckCount, Instant now);
+    boolean claimLedgerCheck(UUID orderId, int seenCheckCount, Instant now, Duration lease);
 
     /**
      * PROCESSING인 주문만 settlement 값으로 바꿉니다. true면 이 호출이 바꾼 것이고, false면 이미 다른 흐름이 확정한 것입니다.

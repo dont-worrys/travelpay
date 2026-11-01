@@ -74,6 +74,7 @@ class ExchangeOrderPersistenceIntegrationTest {
     private static final UUID USER_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID OTHER_USER_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
     private static final UUID WALLET_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
+    private static final Duration LEASE = Duration.ofSeconds(10);
 
     @Container
     static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:18.6-bookworm")
@@ -250,7 +251,7 @@ class ExchangeOrderPersistenceIntegrationTest {
         UUID orderId = savedOrder("key-1");
         Instant now = Instant.parse("2026-11-01T03:00:00Z");
 
-        int claimed = countTrue(4, () -> orderRepository.claimLedgerCheck(orderId, 0, now));
+        int claimed = countTrue(4, () -> orderRepository.claimLedgerCheck(orderId, 0, now, LEASE));
 
         assertEquals(1, claimed);
         ExchangeOrder order = orderRepository.findById(orderId).orElseThrow();
@@ -263,10 +264,25 @@ class ExchangeOrderPersistenceIntegrationTest {
         UUID orderId = savedOrder("key-1");
         Instant now = Instant.parse("2026-11-01T03:00:00Z");
 
-        assertFalse(orderRepository.claimLedgerCheck(orderId, 1, now));
-        assertTrue(orderRepository.claimLedgerCheck(orderId, 0, now));
+        assertFalse(orderRepository.claimLedgerCheck(orderId, 1, now, LEASE));
+        assertTrue(orderRepository.claimLedgerCheck(orderId, 0, now, LEASE));
         orderRepository.settleIfProcessing(orderId, Settlement.completed(UUID.randomUUID(), now), now);
-        assertFalse(orderRepository.claimLedgerCheck(orderId, 1, now));
+        assertFalse(orderRepository.claimLedgerCheck(orderId, 1, now.plus(LEASE), LEASE));
+    }
+
+    @Test
+    void claimIsBlockedUntilLeaseEndsEvenWithLatestCount() {
+        UUID orderId = savedOrder("key-1");
+        Instant first = Instant.parse("2026-11-01T03:00:00Z");
+        assertTrue(orderRepository.claimLedgerCheck(orderId, 0, first, LEASE));
+
+        // 앞 흐름이 선점한 뒤 주문을 읽은 흐름: 횟수는 최신 값(1)이지만 유효 기간 안이라 선점하지 못한다
+        assertFalse(orderRepository.claimLedgerCheck(orderId, 1, first.plus(LEASE).minusMillis(1), LEASE));
+        assertEquals(1, orderRepository.findById(orderId).orElseThrow().getLedgerCheckCount());
+
+        // 유효 기간이 끝나는 순간부터는 선점할 수 있다
+        assertTrue(orderRepository.claimLedgerCheck(orderId, 1, first.plus(LEASE), LEASE));
+        assertEquals(2, orderRepository.findById(orderId).orElseThrow().getLedgerCheckCount());
     }
 
     @Test

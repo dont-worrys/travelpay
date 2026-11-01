@@ -1,5 +1,6 @@
 package com.travelpay.exchange.infrastructure.persistence.order;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -62,8 +63,8 @@ class ExchangeOrderRepositoryAdapter implements ExchangeOrderRepository {
     }
 
     @Override
-    public boolean claimLedgerCheck(UUID orderId, int seenCheckCount, Instant now) {
-        return jpaRepository.claimLedgerCheck(orderId, seenCheckCount, now) == 1;
+    public boolean claimLedgerCheck(UUID orderId, int seenCheckCount, Instant now, Duration lease) {
+        return jpaRepository.claimLedgerCheck(orderId, seenCheckCount, now, now.minus(lease)) == 1;
     }
 
     @Override
