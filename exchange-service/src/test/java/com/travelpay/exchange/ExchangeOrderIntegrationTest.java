@@ -293,10 +293,32 @@ class ExchangeOrderIntegrationTest {
     }
 
     @Test
+    void retryWithinClaimLeaseDoesNotCallLedger() throws Exception {
+        String quoteId = issuedQuoteId(OWNER);
+        place(OWNER, "key-1", quoteId).andExpect(status().isAccepted());
+        ledger.postsSucceed();
+
+        // 첫 요청의 원장 호출이 아직 끝나지 않았을 수 있는 10초 안에는 원장을 부르지 않고 현재 상태로 응답한다
+        clock.set(NOW.plusSeconds(10).minusMillis(1));
+        place(OWNER, "key-1", quoteId)
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("PROCESSING"));
+        assertEquals(1, ledger.calls());
+
+        clock.set(NOW.plusSeconds(10));
+        place(OWNER, "key-1", quoteId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"));
+        assertEquals(2, ledger.calls());
+    }
+
+    @Test
     void concurrentRetriesCallLedgerOnceAndSettleOnce() throws Exception {
         String quoteId = issuedQuoteId(OWNER);
         place(OWNER, "key-1", quoteId).andExpect(status().isAccepted());
         UUID orderId = onlyOrderId();
+        // 첫 요청이 결과를 모른 채 끝나고 선점 유효 기간이 지난 뒤, 재요청 4개가 몰린 경우
+        clock.set(NOW.plusSeconds(10));
         ledger.respond(posting -> {
             sleep(200);
             return new LedgerPostResult.Posted(FakeLedger.transactionIdOf(posting.orderId()));
