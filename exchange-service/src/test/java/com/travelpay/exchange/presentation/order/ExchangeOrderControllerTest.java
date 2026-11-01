@@ -81,10 +81,11 @@ class ExchangeOrderControllerTest {
     }
 
     @Test
-    void settledOrderIsOk() throws Exception {
+    void completedOrderIsOk() throws Exception {
         ExchangeOrder order = order();
-        ReflectionTestUtils.setField(order, "status", ExchangeOrderStatus.FAILED);
-        ReflectionTestUtils.setField(order, "failureReason", ExchangeFailureReason.INSUFFICIENT_BALANCE);
+        ReflectionTestUtils.setField(order, "status", ExchangeOrderStatus.COMPLETED);
+        ReflectionTestUtils.setField(order, "ledgerTransactionId", UUID.randomUUID());
+        ReflectionTestUtils.setField(order, "settledAt", Instant.parse("2026-10-29T03:01:02Z"));
         when(orderService.place(any())).thenReturn(order);
 
         mockMvc.perform(post("/api/v1/exchanges").header("Idempotency-Key", "key-1")
@@ -93,8 +94,59 @@ class ExchangeOrderControllerTest {
                                 {"quoteId":"%s","walletId":"%s"}
                                 """.formatted(order.getQuoteId(), WALLET_ID)))
                 .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.settledAt").value("2026-10-29T03:01:02Z"))
+                .andExpect(jsonPath("$.data.ledgerTransactionId").doesNotExist());
+    }
+
+    @Test
+    void manualReviewOrderIsAccepted() throws Exception {
+        ExchangeOrder order = order();
+        ReflectionTestUtils.setField(order, "status", ExchangeOrderStatus.MANUAL_REVIEW);
+        when(orderService.place(any())).thenReturn(order);
+
+        mockMvc.perform(post("/api/v1/exchanges").header("Idempotency-Key", "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"quoteId":"%s","walletId":"%s"}
+                                """.formatted(order.getQuoteId(), WALLET_ID)))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("MANUAL_REVIEW"))
+                .andExpect(jsonPath("$.data.settledAt").doesNotExist());
+    }
+
+    @Test
+    void failedOrderIsUnprocessableWithReasonCode() throws Exception {
+        ExchangeOrder order = failedOrder();
+        when(orderService.place(any())).thenReturn(order);
+
+        mockMvc.perform(post("/api/v1/exchanges").header("Idempotency-Key", "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"quoteId":"%s","walletId":"%s"}
+                                """.formatted(order.getQuoteId(), WALLET_ID)))
+                .andExpect(status().isUnprocessableEntity())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("EXCHANGE_LEDGER_REJECTED_INSUFFICIENT_BALANCE"))
+                .andExpect(jsonPath("$.data").doesNotExist());
+    }
+
+    @Test
+    void failedOrderIsStillReadableThroughGet() throws Exception {
+        when(orderService.find(USER_ID, ORDER_ID)).thenReturn(failedOrder());
+
+        mockMvc.perform(get("/api/v1/exchanges/{orderId}", ORDER_ID))
+                .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("FAILED"))
                 .andExpect(jsonPath("$.data.failureReason").value("INSUFFICIENT_BALANCE"));
+    }
+
+    private static ExchangeOrder failedOrder() {
+        ExchangeOrder order = order();
+        ReflectionTestUtils.setField(order, "status", ExchangeOrderStatus.FAILED);
+        ReflectionTestUtils.setField(order, "failureReason", ExchangeFailureReason.INSUFFICIENT_BALANCE);
+        ReflectionTestUtils.setField(order, "settledAt", Instant.parse("2026-10-29T03:01:02Z"));
+        return order;
     }
 
     @Test
