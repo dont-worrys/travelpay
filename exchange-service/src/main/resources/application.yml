@@ -19,6 +19,10 @@ spring:
           wallet-service:
             connect-timeout: 2000
             read-timeout: 3000
+          # 원장 최대 응답(약 5초)까지 기다린다. 넘으면 결과 모름으로 두고 복구 스케줄러가 같은 요청을 다시 보낸다.
+          ledger-service:
+            connect-timeout: 2000
+            read-timeout: 5000
 
 travelpay:
   auth:
@@ -46,6 +50,12 @@ exchange:
       CNY:
         min: 10.00
         max: 10000.00
+  order:
+    # 결과를 모르는 주문을 원장에 다시 보내는 주기와 한 번에 처리할 주문 수
+    recovery:
+      enabled: true
+      fixed-delay: 30s
+      batch-size: 50
 
 server:
   port: 8084

@@ -13,7 +13,7 @@ import com.travelpay.exchange.domain.order.ExchangeOrder;
  * 원장 거래 ID·확인 횟수 같은 내부 처리 값은 내려주지 않습니다.
  *
  * @param type          EXCHANGE(원화 → 외화) 또는 RE_EXCHANGE(외화 → 원화)
- * @param status        PROCESSING(처리 중), COMPLETED(완료), FAILED(실패)
+ * @param status        PROCESSING(처리 중), COMPLETED(완료), FAILED(실패), MANUAL_REVIEW(확인 중)
  * @param failureReason FAILED일 때만 값이 있습니다.
  * @param settledAt     완료·실패가 확정된 시각. 처리 중이면 null입니다.
  */
