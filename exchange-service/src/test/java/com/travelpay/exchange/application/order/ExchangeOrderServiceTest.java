@@ -60,8 +60,9 @@ class ExchangeOrderServiceTest {
             mock(ExchangeOrderStatusHistoryRepository.class);
     private final ExchangeQuoteRepository quoteRepository = mock(ExchangeQuoteRepository.class);
     private final WalletBalanceReader walletBalanceReader = mock(WalletBalanceReader.class);
+    private final ExchangeOrderLedgerProcessor ledgerProcessor = mock(ExchangeOrderLedgerProcessor.class);
     private final ExchangeOrderService service = new ExchangeOrderService(orderRepository, historyRepository,
-            quoteRepository, walletBalanceReader, TransactionOperations.withoutTransaction(),
+            quoteRepository, walletBalanceReader, ledgerProcessor, TransactionOperations.withoutTransaction(),
             Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
 
     private ExchangeQuote quote;
@@ -69,6 +70,8 @@ class ExchangeOrderServiceTest {
     @BeforeEach
     void setUp() {
         quote = savedQuote();
+        // 원장 처리 결과를 바꾸지 않는 기본값. 원장 처리 자체는 ExchangeOrderLedgerProcessorTest에서 본다.
+        when(ledgerProcessor.process(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
                 .thenReturn(Optional.empty());
         when(quoteRepository.findByIdAndUserId(quote.getId(), USER_ID)).thenReturn(Optional.of(quote));
@@ -106,6 +109,26 @@ class ExchangeOrderServiceTest {
         assertSame(existing, service.place(command(quote.getId(), WALLET_ID)));
         verifyNoInteractions(quoteRepository, walletBalanceReader);
         verify(orderRepository, never()).save(any());
+        // PROCESSING인 기존 주문은 원장에 다시 보낸다 (확정된 주문은 처리기가 그대로 돌려준다)
+        verify(ledgerProcessor).process(existing);
+    }
+
+    @Test
+    void returnsOrderAfterLedgerProcessing() {
+        ExchangeOrder completed = OrderFixtures.placed(quote, WALLET_ID, KEY);
+        when(ledgerProcessor.process(any())).thenReturn(completed);
+
+        assertSame(completed, service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void acceptedOrderIsReturnedEvenIfLedgerProcessingFails() {
+        when(ledgerProcessor.process(any())).thenThrow(new IllegalStateException("db down"));
+
+        ExchangeOrder order = service.place(command(quote.getId(), WALLET_ID));
+
+        assertEquals(ExchangeOrderStatus.PROCESSING, order.getStatus());
+        verify(orderRepository).save(order);
     }
 
     @Test

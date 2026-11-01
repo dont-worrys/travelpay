@@ -10,6 +10,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 import com.jayway.jsonpath.JsonPath;
+import com.travelpay.exchange.domain.ledger.LedgerClient;
+import com.travelpay.exchange.domain.ledger.LedgerPostResult;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.rate.CollectedRate;
@@ -251,6 +253,13 @@ class ExchangeOrderIntegrationTest {
             return userId -> Optional.of(new WalletBalances(WALLET_ID, true, Map.of(
                     Currency.KRW, new WalletBalances.Account(new Money(Currency.KRW, 500_000), true),
                     Currency.JPY, new WalletBalances.Account(new Money(Currency.JPY, 0), true))));
+        }
+
+        /** 원장 서비스 대신 항상 결과 모름을 돌려줍니다. 신청은 PROCESSING으로 남습니다. */
+        @Bean
+        @Primary
+        LedgerClient testLedgerClient() {
+            return posting -> new LedgerPostResult.Unknown("test");
         }
     }
 }
