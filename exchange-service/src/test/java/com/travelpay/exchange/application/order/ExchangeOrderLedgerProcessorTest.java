@@ -144,15 +144,29 @@ class ExchangeOrderLedgerProcessorTest {
     }
 
     @Test
-    void orderUnconfirmedForADayGoesToManualReviewWithoutCallingLedger() {
+    void orderUnconfirmedForADayGoesToManualReviewAfterClaimWithoutCallingLedger() {
         ReflectionTestUtils.setField(order, "requestedAt", NOW.minus(Duration.ofHours(24)));
 
         processor.process(order);
 
+        verify(orderRepository).claimLedgerCheck(ORDER_ID, 0, NOW, ExchangeOrderLedgerProcessor.CLAIM_LEASE);
         verify(orderRepository).settleIfProcessing(ORDER_ID,
                 Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), NOW);
         verifyNoInteractions(ledgerClient);
-        verify(orderRepository, never()).claimLedgerCheck(any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void orderUnconfirmedForADayIsLeftAloneWhileAnotherFlowHoldsClaim() {
+        // 다른 흐름이 원장을 호출 중(선점 유효 기간 안)이면, 24시간이 지났어도 상태를 바꾸지 않는다.
+        // 그 호출이 성공하면 COMPLETED로 반영될 수 있어야 원장과 주문이 어긋나지 않는다.
+        ReflectionTestUtils.setField(order, "requestedAt", NOW.minus(Duration.ofHours(24)));
+        when(orderRepository.claimLedgerCheck(ORDER_ID, 0, NOW, ExchangeOrderLedgerProcessor.CLAIM_LEASE))
+                .thenReturn(false);
+
+        assertSame(reloaded, processor.process(order));
+
+        verify(orderRepository, never()).settleIfProcessing(any(), any(), any());
+        verifyNoInteractions(ledgerClient, historyRepository);
     }
 
     @Test
