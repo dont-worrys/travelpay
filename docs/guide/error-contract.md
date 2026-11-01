@@ -46,8 +46,10 @@ Gateway 자체 오류도 `ApiResponse.failure(errorResponse)`로 반환합니다
 | ApiResponse | success·data·error로 구성한 공통 응답 |
 | ErrorResponse | code·message·details로 구성한 오류 정보 |
 | AuthHeaders | User-Id·User-Role·Request-Id 헤더 이름 |
+| FeignErrors | Feign 호출 실패의 오류 코드 읽기·거절 확인·공통 오류 변환 |
+| InternalHeaderRelayInterceptor | 사용자 요청 중의 Feign 호출에 User-Id·User-Role·Request-Id 전달 |
 
-`common`은 실행 애플리케이션이 아닌 단일 Java 라이브러리입니다. 오류 계약은 Spring 타입 없이 HTTP 상태를 `int`로 표현하고, MVC 오류 처리·자동 설정에 필요한 Spring API는 `compileOnly`로 선언합니다. 각 실행 앱이 필요한 starter를 직접 선택합니다.
+`common`은 실행 애플리케이션이 아닌 단일 Java 라이브러리입니다. 오류 계약은 Spring 타입 없이 HTTP 상태를 `int`로 표현하고, MVC 오류 처리·자동 설정·Feign 호출에 필요한 Spring·Feign·Jackson API는 `compileOnly`로 선언합니다. 각 실행 앱이 필요한 starter를 직접 선택합니다.
 
 ## 서비스별 업무 오류
 
@@ -103,7 +105,7 @@ spring:
       - com.travelpay.common.config.CommonWebAutoConfiguration
 ```
 
-이 설정은 공통 오류 처리기 등록을 제외하며 MVC 라이브러리 자체를 제거하지는 않습니다. 회원 정보 전달은 별도의 `CommonAuthWebAutoConfiguration`이 담당합니다. Feign 호출 지원은 아직 추가하지 않았습니다.
+이 설정은 공통 오류 처리기 등록을 제외하며 MVC 라이브러리 자체를 제거하지는 않습니다. 회원 정보 전달은 별도의 `CommonAuthWebAutoConfiguration`이 담당합니다. Feign 호출 지원은 [Feign 호출](#feign-호출)을 참고합니다.
 
 요청 본문의 필드 검증 오류는 다음과 같이 필드명과 안내 메시지만 반환합니다.
 
@@ -155,4 +157,64 @@ common을 의존성에 추가하는 것만으로 헤더 저장 처리가 켜지�
 
 Gateway·Eureka·Mock Bank에는 이 활성화 옵션을 추가하지 않습니다. 이는 로그인 기능을 켜는 설정이 아니라, 업무 서비스에서 공통 회원 정보 전달 코드를 사용하기 위한 설정입니다.
 
-근거: [Spring MVC 예외 처리 확장](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/servlet/mvc/method/annotation/ResponseEntityExceptionHandler.html), [Spring Boot의 Jackson 3 지원](https://docs.spring.io/spring-boot/reference/features/json.html)
+## Feign 호출
+
+서비스끼리 Feign으로 호출할 때의 공통 규칙입니다. 응답 DTO·타임아웃·오류 코드 매핑은 호출하는 서비스가 정하고, 실패를 읽는 방법과 내부 헤더 전달은 common을 사용합니다.
+
+| 항목 | 규칙 |
+|---|---|
+| 반환 타입 | 공통 `ApiResponse<응답 DTO>`. DTO에는 호출하는 쪽에 필요한 필드만 둡니다 |
+| 실패 처리 | 어댑터에서 `FeignException`을 잡아 아는 오류 코드만 자기 서비스 오류로 바꾸고, 나머지는 `FeignErrors.toCommonException`으로 바꿉니다 |
+| 재시도 | 자동 재시도하지 않습니다(OpenFeign 기본값). 돈이 움직이는 호출은 호출하는 쪽이 같은 멱등 키로 다시 보냅니다 |
+| 타임아웃 | 클라이언트별로 각 서비스의 YAML에 둡니다 |
+
+### 실패 처리
+
+`FeignErrors`로 실패를 읽습니다.
+
+| 메서드 | 하는 일 |
+|---|---|
+| `errorCode(e)` | 실패 응답의 `error.code`. 본문이 없거나 공통 형식이 아니면 빈 값 |
+| `hasErrorCode(e, code)` | 그 오류 코드인지 확인 |
+| `isRejected(e)` | 상대가 요청을 받아 거절했는지(4xx). 거절된 요청은 적용되지 않았습니다 |
+| `toCommonException(e)` | 따로 처리하지 않은 실패를 공통 오류로 바꿉니다 |
+
+거절이 아닌 실패는 상대가 처리했을 수 있습니다. 503과 연결 실패도 마찬가지입니다. 우리 서비스는 결과를 모를 때도(DB 장애 등) 503을 돌려주고, 본문 없는 요청은 JDK가 한 번 더 보내서 상대가 이미 받은 요청도 연결 실패로 보일 수 있습니다. 그래서 돈이 움직이는 호출은 거절이 아닌 실패에서 되돌리지(보상하지) 않고, 같은 멱등 키로 다시 보내거나 결과를 조회합니다. 거절도 그 한 번의 요청에 대한 판단이라, 같은 키로 먼저 보낸 요청의 결과를 몰랐다면 거절만으로 적용된 적이 없다고 볼 수 없습니다.
+
+`toCommonException`의 변환 규칙입니다. 다른 서비스의 오류 코드는 응답에 그대로 내보내지 않습니다.
+
+| 실패 | 공통 오류 |
+|---|---|
+| 시간 초과(연결·응답 대기), 상대의 504 | 504 `COMMON_GATEWAY_TIMEOUT` |
+| 응답을 받지 못함(연결 거부·주소 없음·연결 끊김), 상대의 503 | 503 `COMMON_SERVICE_UNAVAILABLE` |
+| 그 밖(처리하지 않은 4xx, 500·502, 응답 해석 실패, 요청 변환 실패) | 502 `COMMON_BAD_GATEWAY` |
+
+```java
+try {
+    return userClient.getFundingIdentity(userId, userId, AuthRole.USER.name()).data();
+} catch (FeignException e) {
+    if (FeignErrors.hasErrorCode(e, "USER_NOT_FOUND")) {
+        throw new BusinessException(WalletErrorCode.CHARGE_USER_NOT_ACTIVE, e);
+    }
+    throw FeignErrors.toCommonException(e);
+}
+```
+
+### 내부 헤더 전달
+
+`CommonFeignAutoConfiguration`은 Feign을 쓰는 MVC 서비스에 `InternalHeaderRelayInterceptor`를 등록합니다. 이 인터셉터는 그 서비스의 모든 Feign 클라이언트에 적용되며, 사용자 요청을 처리하는 중에 하는 호출에 다음 헤더를 붙입니다.
+
+| 헤더 | 값 |
+|---|---|
+| `User-Id`·`User-Role` | `CurrentUserProvider`가 검증한 현재 요청자. 들어온 헤더를 다시 읽지 않습니다 |
+| `Request-Id` | 들어온 요청의 `Request-Id` |
+
+- 클라이언트 메서드가 직접 지정한 헤더는 덮어쓰지 않습니다. `User-Id`·`User-Role`은 한 쌍이라 하나라도 지정하면 둘 다 그대로 둡니다.
+- Kafka 소비자·스케줄러처럼 들어온 요청이 없는 호출에는 붙지 않습니다. 이런 호출에서 요청자가 필요하면 `@RequestHeader(AuthHeaders.USER_ID)`·`@RequestHeader(AuthHeaders.USER_ROLE)`로 직접 보냅니다.
+- `User-Id`·`User-Role`은 요청을 시작한 사용자입니다. 받는 쪽은 대상 회원을 경로·파라미터로 받고, 이 값으로 소유권을 판단하지 않습니다. 예를 들어 송금 중 받는 사람의 지갑을 조회해도 보내는 사람의 정보가 붙습니다.
+- 요청자가 반드시 필요한 내부 API는 헤더가 없으면 거절합니다. 그래야 호출 위치가 바뀌어 헤더가 빠졌을 때 바로 드러납니다.
+- `Request-Id`는 아직 만드는 곳이 없어서, 들어온 요청에 값이 있을 때만 전달됩니다.
+
+서비스가 `InternalHeaderRelayInterceptor` 빈을 직접 등록하면 기본 빈을 추가하지 않습니다. 자동 등록을 제외하려면 `spring.autoconfigure.exclude`에 `com.travelpay.common.config.CommonFeignAutoConfiguration`을 지정합니다.
+
+근거: [Spring MVC 예외 처리 확장](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/servlet/mvc/method/annotation/ResponseEntityExceptionHandler.html), [Spring Boot의 Jackson 3 지원](https://docs.spring.io/spring-boot/reference/features/json.html), [Spring Cloud OpenFeign 기본 설정](https://docs.spring.io/spring-cloud-openfeign/reference/spring-cloud-openfeign.html)
