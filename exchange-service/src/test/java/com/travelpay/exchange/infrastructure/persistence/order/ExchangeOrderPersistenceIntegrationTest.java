@@ -1,6 +1,8 @@
 package com.travelpay.exchange.infrastructure.persistence.order;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -16,12 +18,15 @@ import java.util.concurrent.TimeUnit;
 
 import com.travelpay.exchange.domain.order.ChangedByType;
 import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
+import com.travelpay.exchange.domain.order.ExchangeFailureReason;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistoryRepository;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
+import com.travelpay.exchange.domain.order.ManualReviewReason;
 import com.travelpay.exchange.domain.order.OrderFixtures;
+import com.travelpay.exchange.domain.order.Settlement;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
 import com.travelpay.exchange.domain.rate.CollectedRate;
@@ -47,7 +52,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -194,6 +201,94 @@ class ExchangeOrderPersistenceIntegrationTest {
     }
 
     @Test
+    void concurrentSettleChangesOrderOnlyOnce() throws Exception {
+        UUID orderId = savedOrder("key-1");
+        UUID ledgerTransactionId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+
+        int changed = countTrue(4, () -> orderRepository.settleIfProcessing(orderId,
+                Settlement.completed(ledgerTransactionId, now), now));
+
+        assertEquals(1, changed);
+        Map<String, Object> row = orderRow(orderId);
+        assertEquals("COMPLETED", row.get("status"));
+        assertEquals(ledgerTransactionId, row.get("ledger_transaction_id"));
+        assertEquals(now, ((Timestamp) row.get("settled_at")).toInstant());
+        assertEquals(now, ((Timestamp) row.get("updated_at")).toInstant());
+    }
+
+    @Test
+    void settledOrderIsNotChangedAgain() {
+        UUID orderId = savedOrder("key-1");
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        orderRepository.settleIfProcessing(orderId, Settlement.completed(UUID.randomUUID(), now), now);
+
+        boolean changed = orderRepository.settleIfProcessing(orderId,
+                Settlement.failed(ExchangeFailureReason.INSUFFICIENT_BALANCE, now), now);
+
+        assertFalse(changed);
+        assertEquals("COMPLETED", orderRow(orderId).get("status"));
+        assertEquals(ExchangeOrderStatus.COMPLETED, orderRepository.findById(orderId).orElseThrow().getStatus());
+    }
+
+    @Test
+    void manualReviewHasNoSettledTime() {
+        UUID orderId = savedOrder("key-1");
+
+        assertTrue(orderRepository.settleIfProcessing(orderId,
+                Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), Instant.now()));
+
+        Map<String, Object> row = orderRow(orderId);
+        assertEquals("MANUAL_REVIEW", row.get("status"));
+        assertNull(row.get("settled_at"));
+        assertNull(row.get("ledger_transaction_id"));
+    }
+
+    @Test
+    void concurrentClaimGivesLedgerCheckToOnlyOne() throws Exception {
+        UUID orderId = savedOrder("key-1");
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+
+        int claimed = countTrue(4, () -> orderRepository.claimLedgerCheck(orderId, 0, now));
+
+        assertEquals(1, claimed);
+        ExchangeOrder order = orderRepository.findById(orderId).orElseThrow();
+        assertEquals(1, order.getLedgerCheckCount());
+        assertEquals(now, order.getLastLedgerCheckedAt());
+    }
+
+    @Test
+    void claimNeedsSeenCountAndProcessing() {
+        UUID orderId = savedOrder("key-1");
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+
+        assertFalse(orderRepository.claimLedgerCheck(orderId, 1, now));
+        assertTrue(orderRepository.claimLedgerCheck(orderId, 0, now));
+        orderRepository.settleIfProcessing(orderId, Settlement.completed(UUID.randomUUID(), now), now);
+        assertFalse(orderRepository.claimLedgerCheck(orderId, 1, now));
+    }
+
+    @Test
+    void recoveryTargetsWaitLongerAsChecksIncrease() {
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        UUID neverCheckedDue = processingOrder("a", 0, null, now.minusSeconds(31));
+        processingOrder("b", 0, null, now.minusSeconds(10));
+        UUID checkedOnceDue = processingOrder("c", 1, now.minusSeconds(61), now.minusSeconds(120));
+        processingOrder("d", 1, now.minusSeconds(50), now.minusSeconds(120));
+        UUID manyChecksCapped = processingOrder("e", 7, now.minus(Duration.ofMinutes(16)).minusSeconds(1),
+                now.minus(Duration.ofHours(2)));
+        processingOrder("f", 7, now.minus(Duration.ofMinutes(15)), now.minus(Duration.ofHours(2)));
+        UUID manualReview = processingOrder("g", 0, null, now.minus(Duration.ofHours(30)));
+        orderRepository.settleIfProcessing(manualReview,
+                Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), now);
+
+        List<UUID> targets = orderRepository.findRecoveryTargets(now, 10).stream().map(ExchangeOrder::getId).toList();
+
+        assertEquals(List.of(neverCheckedDue, checkedOnceDue, manyChecksCapped), targets);
+        assertEquals(1, orderRepository.findRecoveryTargets(now, 1).size());
+    }
+
+    @Test
     void jpaDoesNotUpdateOrderEvenIfEntityChanges() {
         ExchangeOrder saved = orderRepository.save(OrderFixtures.placed(savedQuote(USER_ID), WALLET_ID, "key-1"));
         Map<String, Object> before = orderRow(saved.getId());
@@ -219,8 +314,47 @@ class ExchangeOrderPersistenceIntegrationTest {
     }
 
     private Map<String, Object> orderRow(UUID orderId) {
-        return jdbcTemplate.queryForMap("SELECT status, ledger_transaction_id, from_amount, updated_at FROM "
+        return jdbcTemplate.queryForMap("SELECT status, ledger_transaction_id, from_amount, settled_at, updated_at FROM "
                 + SCHEMA + ".exchange_orders WHERE order_id = ?", orderId);
+    }
+
+    private UUID savedOrder(String idempotencyKey) {
+        return orderRepository.save(OrderFixtures.placed(savedQuote(USER_ID), WALLET_ID, idempotencyKey)).getId();
+    }
+
+    /** 확인 횟수·마지막 확인 시각·신청 시각을 정해 둔 PROCESSING 주문입니다. */
+    private UUID processingOrder(String idempotencyKey, int checkCount, Instant lastCheckedAt, Instant requestedAt) {
+        UUID orderId = savedOrder(idempotencyKey);
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_orders SET ledger_check_count = ?,"
+                        + " last_ledger_checked_at = ?, requested_at = ? WHERE order_id = ?",
+                checkCount, lastCheckedAt == null ? null : Timestamp.from(lastCheckedAt), Timestamp.from(requestedAt),
+                orderId);
+        return orderId;
+    }
+
+    /** 여러 스레드가 동시에 call을 실행해 true를 돌려준 수입니다. */
+    private static int countTrue(int threads, Callable<Boolean> call) throws Exception {
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                results.add(executor.submit(() -> {
+                    start.await();
+                    return call.call();
+                }));
+            }
+            start.countDown();
+            int count = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(10, TimeUnit.SECONDS)) {
+                    count++;
+                }
+            }
+            return count;
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @TestConfiguration(proxyBeanMethods = false)
