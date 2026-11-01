@@ -6,8 +6,11 @@ import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.auth.web.CurrentUser;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.common.response.PageResponse;
 import com.travelpay.exchange.application.order.ExchangeOrderService;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
+import com.travelpay.exchange.domain.order.ExchangeOrderType;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -18,6 +21,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -48,6 +52,22 @@ public class ExchangeOrderController {
             case FAILED -> throw new BusinessException(order.getFailureReason().errorCode());
         };
         return ResponseEntity.status(status).body(ApiResponse.success(ExchangeOrderResponse.from(order)));
+    }
+
+    /**
+     * 본인 주문 목록을 신청 최신순으로 조회합니다. 정렬은 고정이라 sort 파라미터는 받지 않습니다.
+     * status·type은 대문자 값(예: COMPLETED, RE_EXCHANGE)이고, 없으면 전체입니다.
+     * 모르는 값이거나 page가 음수, size가 1보다 작으면 COMMON_INVALID_REQUEST(400)이고, size는 최대 100으로 줄여 조회합니다.
+     */
+    @GetMapping
+    public ApiResponse<PageResponse<ExchangeOrderSummaryResponse>> list(
+            @CurrentUser AuthenticatedUser user,
+            @RequestParam(required = false) ExchangeOrderStatus status,
+            @RequestParam(required = false) ExchangeOrderType type,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return ApiResponse.success(PageResponse.from(
+                orderService.list(user.userId(), status, type, page, size), ExchangeOrderSummaryResponse::from));
     }
 
     /** 본인 주문을 조회합니다. 다른 사람의 주문은 없는 주문과 같게 404입니다. */

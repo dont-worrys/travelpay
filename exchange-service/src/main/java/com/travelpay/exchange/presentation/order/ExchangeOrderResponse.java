@@ -42,7 +42,7 @@ public record ExchangeOrderResponse(
         ExchangeFailureReason failureReason = order.getFailureReason();
         return new ExchangeOrderResponse(
                 order.getId(),
-                order.isReExchange() ? "RE_EXCHANGE" : "EXCHANGE",
+                order.type().name(),
                 order.getStatus().name(),
                 failureReason != null ? failureReason.name() : null,
                 order.getQuoteId(),
