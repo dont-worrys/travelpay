@@ -1,5 +1,7 @@
 package com.travelpay.exchange.infrastructure.persistence.order;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -7,6 +9,7 @@ import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
+import com.travelpay.exchange.domain.order.Settlement;
 import com.travelpay.exchange.infrastructure.persistence.ConstraintViolations;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -51,5 +54,26 @@ class ExchangeOrderRepositoryAdapter implements ExchangeOrderRepository {
     @Override
     public Optional<ExchangeOrder> findByIdAndUserId(UUID orderId, UUID userId) {
         return jpaRepository.findByIdAndUserId(orderId, userId);
+    }
+
+    @Override
+    public Optional<ExchangeOrder> findById(UUID orderId) {
+        return jpaRepository.findById(orderId);
+    }
+
+    @Override
+    public boolean claimLedgerCheck(UUID orderId, int seenCheckCount, Instant now) {
+        return jpaRepository.claimLedgerCheck(orderId, seenCheckCount, now) == 1;
+    }
+
+    @Override
+    public boolean settleIfProcessing(UUID orderId, Settlement settlement, Instant now) {
+        return jpaRepository.settleIfProcessing(orderId, settlement.status(), settlement.ledgerTransactionId(),
+                settlement.failureReason(), settlement.settledAt(), now) == 1;
+    }
+
+    @Override
+    public List<ExchangeOrder> findRecoveryTargets(Instant now, int limit) {
+        return jpaRepository.findRecoveryTargets(now, limit);
     }
 }
