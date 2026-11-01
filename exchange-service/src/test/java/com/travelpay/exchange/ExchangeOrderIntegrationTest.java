@@ -2,6 +2,7 @@ package com.travelpay.exchange;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -362,6 +363,26 @@ class ExchangeOrderIntegrationTest {
         assertEquals(1, ledger.calls());
         assertEquals("LEDGER_UNCONFIRMED_TOO_LONG", jdbcTemplate.queryForObject("SELECT reason FROM " + SCHEMA
                 + ".exchange_order_status_histories WHERE to_status = 'MANUAL_REVIEW'", String.class));
+    }
+
+    @Test
+    void orderUnconfirmedForADayStaysProcessingWhileAnotherFlowHoldsClaim() throws Exception {
+        String quoteId = issuedQuoteId(OWNER);
+        place(OWNER, "key-1", quoteId).andExpect(status().isAccepted());
+
+        // 24시간 직전에 다른 흐름(복구 스케줄러)이 선점해 원장을 호출하는 중인 상황
+        Instant dayLater = NOW.plus(Duration.ofHours(24));
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_orders SET last_ledger_checked_at = ?",
+                Timestamp.from(dayLater.minusSeconds(5)));
+
+        clock.set(dayLater);
+        place(OWNER, "key-1", quoteId)
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("PROCESSING"));
+
+        assertEquals(1, ledger.calls());
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA
+                + ".exchange_order_status_histories WHERE to_status = 'MANUAL_REVIEW'", Integer.class));
     }
 
     private Map<String, Object> orderRow(UUID orderId) {
