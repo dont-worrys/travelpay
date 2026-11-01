@@ -54,7 +54,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
-        "exchange.rate.koreaexim.api-key=integration-test"
+        "exchange.rate.koreaexim.api-key=integration-test",
+        "exchange.order.recovery.fixed-delay=1h"
 })
 class ExchangeOrderIntegrationTest {
 

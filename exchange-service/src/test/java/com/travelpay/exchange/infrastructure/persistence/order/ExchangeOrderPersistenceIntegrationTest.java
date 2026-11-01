@@ -65,7 +65,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
-        "exchange.rate.koreaexim.api-key=integration-test"
+        "exchange.rate.koreaexim.api-key=integration-test",
+        "exchange.order.recovery.enabled=false"
 })
 class ExchangeOrderPersistenceIntegrationTest {
 

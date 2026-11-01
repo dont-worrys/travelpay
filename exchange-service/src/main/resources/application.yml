@@ -50,6 +50,12 @@ exchange:
       CNY:
         min: 10.00
         max: 10000.00
+  order:
+    # 결과를 모르는 주문을 원장에 다시 보내는 주기와 한 번에 처리할 주문 수
+    recovery:
+      enabled: true
+      fixed-delay: 30s
+      batch-size: 50
 
 server:
   port: 8084
