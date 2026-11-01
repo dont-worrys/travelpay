@@ -62,7 +62,7 @@ class ExchangeOrderLedgerProcessorTest {
         order = processingOrder();
         reloaded = processingOrder();
         when(orderRepository.findById(ORDER_ID)).thenReturn(Optional.of(reloaded));
-        when(orderRepository.claimLedgerCheck(ORDER_ID, 0, NOW)).thenReturn(true);
+        when(orderRepository.claimLedgerCheck(ORDER_ID, 0, NOW, ExchangeOrderLedgerProcessor.CLAIM_LEASE)).thenReturn(true);
         when(orderRepository.settleIfProcessing(eq(ORDER_ID), any(), eq(NOW))).thenReturn(true);
     }
 
@@ -109,14 +109,14 @@ class ExchangeOrderLedgerProcessorTest {
         ExchangeOrder result = processor.process(order);
 
         assertSame(reloaded, result);
-        verify(orderRepository).claimLedgerCheck(ORDER_ID, 0, NOW);
+        verify(orderRepository).claimLedgerCheck(ORDER_ID, 0, NOW, ExchangeOrderLedgerProcessor.CLAIM_LEASE);
         verify(orderRepository, never()).settleIfProcessing(any(), any(), any());
         verifyNoInteractions(historyRepository);
     }
 
     @Test
     void doesNotCallLedgerWhenAnotherFlowClaimedFirst() {
-        when(orderRepository.claimLedgerCheck(ORDER_ID, 0, NOW)).thenReturn(false);
+        when(orderRepository.claimLedgerCheck(ORDER_ID, 0, NOW, ExchangeOrderLedgerProcessor.CLAIM_LEASE)).thenReturn(false);
 
         assertSame(reloaded, processor.process(order));
 
@@ -140,7 +140,7 @@ class ExchangeOrderLedgerProcessorTest {
         assertSame(order, processor.process(order));
 
         verifyNoInteractions(ledgerClient);
-        verify(orderRepository, never()).claimLedgerCheck(any(), anyInt(), any());
+        verify(orderRepository, never()).claimLedgerCheck(any(), anyInt(), any(), any());
     }
 
     @Test
@@ -152,7 +152,7 @@ class ExchangeOrderLedgerProcessorTest {
         verify(orderRepository).settleIfProcessing(ORDER_ID,
                 Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), NOW);
         verifyNoInteractions(ledgerClient);
-        verify(orderRepository, never()).claimLedgerCheck(any(), anyInt(), any());
+        verify(orderRepository, never()).claimLedgerCheck(any(), anyInt(), any(), any());
     }
 
     @Test

@@ -22,8 +22,9 @@ import org.springframework.transaction.support.TransactionOperations;
 /**
  * PROCESSING 주문을 원장에 보내고 결과를 반영합니다. 신청, 같은 멱등 키 재요청, 복구 스케줄러가 모두 이 클래스를 거칩니다.
  *
- * 순서: 선점(확인 횟수 비교) → 원장 POST(트랜잭션 밖) → 결과 반영과 이력(짧은 트랜잭션).
- * 선점에 성공한 흐름만 원장을 부르므로, 여러 흐름이 같은 주문을 동시에 처리하려 해도 원장 호출은 한 번입니다.
+ * 순서: 선점(확인 횟수 비교 + 유효 기간) → 원장 POST(트랜잭션 밖) → 결과 반영과 이력(짧은 트랜잭션).
+ * 선점에 성공한 흐름만 원장을 부르고, 선점은 CLAIM_LEASE 동안 유효합니다. 그래서 한 흐름이 원장 응답을 기다리는 동안
+ * 다른 흐름(재요청, 다른 서버의 스케줄러)은 원장을 부르지 않고 현재 상태를 돌려줍니다.
  * 원장은 같은 reference를 한 번만 기록하므로, 결과를 모를 때는 같은 요청을 다시 보내기만 하면 됩니다.
  */
 @Slf4j
@@ -33,6 +34,12 @@ public class ExchangeOrderLedgerProcessor {
 
     /** 신청 후 이 시간이 지나도 결과를 확인하지 못하면 사람 확인으로 보낸다 */
     static final Duration UNCONFIRMED_LIMIT = Duration.ofHours(24);
+
+    /**
+     * 선점 유효 기간. 원장 호출이 끝나는 최대 시간(연결 2초 + 읽기 5초 = 7초)보다 길어야 호출이 겹치지 않는다.
+     * 복구 대기 시간(최소 30초)보다는 짧아 복구 스케줄러에는 영향이 없다.
+     */
+    static final Duration CLAIM_LEASE = Duration.ofSeconds(10);
 
     private final ExchangeOrderRepository orderRepository;
     private final ExchangeOrderStatusHistoryRepository historyRepository;
@@ -56,7 +63,7 @@ public class ExchangeOrderLedgerProcessor {
             settle(orderId, Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), now);
             return reload(orderId);
         }
-        if (!orderRepository.claimLedgerCheck(orderId, order.getLedgerCheckCount(), now)) {
+        if (!orderRepository.claimLedgerCheck(orderId, order.getLedgerCheckCount(), now, CLAIM_LEASE)) {
             return reload(orderId);
         }
         LedgerPostResult result = ledgerClient.post(order.toLedgerPosting());
