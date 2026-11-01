@@ -3,14 +3,19 @@ package com.travelpay.exchange.application.order;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.util.PageableUtils;
 import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderErrorCode;
 import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistoryRepository;
+import com.travelpay.exchange.domain.order.ExchangeOrderType;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
@@ -20,6 +25,10 @@ import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionOperations;
@@ -37,7 +46,14 @@ import org.springframework.transaction.support.TransactionOperations;
 @RequiredArgsConstructor
 public class ExchangeOrderService {
 
+    /** 목록 한 페이지의 최대 주문 수 */
+    static final int MAX_PAGE_SIZE = 100;
+    /** 신청(생성) 최신순, 같으면 주문 ID 역순. 결제·송금 목록과 같은 방식 */
+    private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
+    private static final Set<String> LIST_SORT_FIELDS = Set.of("createdAt", "id");
+
     private final ExchangeOrderRepository orderRepository;
+    private final ExchangeOrderQueryRepository queryRepository;
     private final ExchangeOrderStatusHistoryRepository historyRepository;
     private final ExchangeQuoteRepository quoteRepository;
     private final WalletBalanceReader walletBalanceReader;
@@ -85,6 +101,26 @@ public class ExchangeOrderService {
     public ExchangeOrder find(UUID userId, UUID orderId) {
         return orderRepository.findByIdAndUserId(orderId, userId)
                 .orElseThrow(() -> new BusinessException(ExchangeOrderErrorCode.ORDER_NOT_FOUND));
+    }
+
+    /**
+     * 본인 주문 목록을 신청 최신순으로 조회합니다. 정렬은 고정이며 같은 시각이면 주문 ID 역순이라 페이지 경계에서 주문이 겹치거나 빠지지 않습니다.
+     * size가 최대 크기를 넘으면 최대 크기로 조회합니다.
+     *
+     * @param status 주문 상태. null이면 모든 상태
+     * @param type   환전·재환전. null이면 둘 다
+     * @param page   0부터 시작
+     * @throws BusinessException page가 음수이거나 size가 1보다 작으면 COMMON_INVALID_REQUEST(400)
+     */
+    @Transactional(readOnly = true)
+    public Page<ExchangeOrder> list(UUID userId, ExchangeOrderStatus status, ExchangeOrderType type,
+                                    int page, int size) {
+        if (page < 0 || size < 1) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        Pageable pageable = PageableUtils.toStablePageable(
+                PageRequest.of(page, size, LIST_SORT), LIST_SORT_FIELDS, "id", MAX_PAGE_SIZE);
+        return queryRepository.findPage(new ExchangeOrderListCondition(userId, status, type), pageable);
     }
 
     /**
