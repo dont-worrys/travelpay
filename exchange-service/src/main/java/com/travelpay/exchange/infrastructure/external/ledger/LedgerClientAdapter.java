@@ -19,7 +19,7 @@ import org.springframework.stereotype.Component;
  * 원장 거래 등록 응답을 4분류로 바꿉니다. 예외를 던지지 않습니다. 원장 응답 본문은 결과·로그에 싣지 않고 error.code만 봅니다.
  * - 201·200 + 거래 ID + POSTED: Posted
  * - 422 + LEDGER_REJECTED_*: Rejected (같은 reference로 다시 보내도 같은 422)
- * - 4xx로 거절되지 않은 실패(타임아웃·연결 실패·5xx·2xx인데 본문을 해석하지 못함): Unknown
+ * - 재시도 신호(Retry-After)가 있는 응답, 4xx로 거절되지 않은 실패(타임아웃·연결 실패·5xx·2xx인데 본문을 해석하지 못함): Unknown
  *   원장이 이미 기록했을 수 있으므로 실패로 끝내지 않고 같은 요청을 다시 보내 결과를 확인한다.
  * - 400: Invalid(BAD_REQUEST), 409: Invalid(CONFLICT)
  * - 그 밖의 4xx·따라가지 않은 3xx·본문은 읽었지만 내용이 계약과 다른 성공 응답: Invalid(MALFORMED_RESPONSE)
@@ -52,10 +52,12 @@ public class LedgerClientAdapter implements LedgerClient {
     }
 
     private static LedgerPostResult classify(LedgerPosting posting, FeignException e) {
-        if (!FeignErrors.isRejected(e)) {
+        // 재시도 신호를 상태 코드보다 먼저 본다. Retry-After가 붙은 응답(3xx·429·503 등)은 Feign이
+        // RetryableException으로 주는데, 429처럼 4xx여도 "지금은 처리하지 않았으니 나중에 다시 보내라"는 뜻이다.
+        boolean retryable = e instanceof RetryableException;
+        if (retryable || !FeignErrors.isRejected(e)) {
             // 따라가지 않은 리다이렉트(3xx)는 원장 거래 등록까지 가지 못한 설정 오류라 다시 보내도 같다.
-            // Retry-After가 있는 3xx는 Feign이 RetryableException으로 주므로 다시 확인(Unknown)한다.
-            if (e.status() >= 300 && e.status() < 400 && !(e instanceof RetryableException)) {
+            if (!retryable && e.status() >= 300 && e.status() < 400) {
                 return invalid(posting, InvalidKind.MALFORMED_RESPONSE, "HTTP " + e.status());
             }
             String cause = cause(e);

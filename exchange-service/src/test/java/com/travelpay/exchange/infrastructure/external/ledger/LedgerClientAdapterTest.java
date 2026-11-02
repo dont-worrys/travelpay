@@ -144,6 +144,23 @@ class LedgerClientAdapterTest {
         assertEquals(new LedgerPostResult.Unknown("HTTP 302"), adapter.post(POSTING));
     }
 
+    /** Retry-After가 있는 429는 "지금은 처리하지 않았으니 나중에 다시 보내라"는 뜻이라 다시 확인한다 */
+    @Test
+    void retryableTooManyRequestsIsUnknown() {
+        when(feignClient.register(any())).thenThrow(
+                new RetryableException(429, "too many requests", Request.HttpMethod.POST, (Long) null, REQUEST));
+
+        assertEquals(new LedgerPostResult.Unknown("HTTP 429"), adapter.post(POSTING));
+    }
+
+    /** 재시도 신호가 없는 429는 다른 4xx처럼 사람 확인이다 */
+    @Test
+    void tooManyRequestsWithoutRetrySignalIsMalformed() {
+        when(feignClient.register(any())).thenThrow(error(429, ""));
+
+        assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
+    }
+
     /** 2xx인데 본문을 해석하지 못하면 원장은 이미 기록했을 수 있다. 같은 요청을 다시 보내 결과를 확인하도록 Unknown이다 */
     @Test
     void unreadableSuccessBodyIsUnknown() {
