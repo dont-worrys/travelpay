@@ -1,6 +1,6 @@
 # User 서비스 실행·사용 가이드
 
-user-service는 일반 회원가입, 로그인·로그아웃, Redis 세션, CSRF, 내 정보 조회, 약관 조회와 다른 서비스가 호출하는 내부 회원 이름 조회를 담당합니다. 이 문서는 로컬에서 실행하고 API를 호출하는 방법을 설명합니다. Gateway 연결과 내부 세션 확인 API(I01)는 #13에서 진행하므로 아직 없습니다.
+user-service는 일반 회원가입, 로그인·로그아웃, Redis 세션, CSRF, 내 정보 조회, 약관 조회와 내부 세션·회원 이름 조회를 담당합니다. 브라우저는 Gateway를 통해 호출하고, User는 세션의 발급·검증을 담당합니다. Gateway 실행과 프런트·배포 연결은 [Gateway 가이드](gateway.md)를 참고합니다.
 
 ## 로컬 실행
 
@@ -50,7 +50,7 @@ user-service는 일반 회원가입, 로그인·로그아웃, Redis 세션, CSRF
 
 ## 호출 순서
 
-모든 요청은 같은 `SESSION` 쿠키를 함께 보내야 합니다. user-service에는 CORS 설정이 없으므로, 다른 출처의 프런트엔드가 user-service를 직접 호출하는 구성은 아직 지원하지 않습니다.
+모든 요청은 같은 `SESSION` 쿠키를 함께 보내야 합니다. 프런트의 API 기준 주소는 로컬 Gateway `http://localhost:8080`, 배포 `https://api.travelpay.store`입니다. CORS는 Gateway에서 처리하고, 프런트는 `credentials: "include"`를 사용합니다. User 직접 호출은 서버 개발·진단용으로 유지합니다.
 
 ```txt
 1. GET  /api/v1/auth/csrf   → SESSION 쿠키와 { headerName, token } 받기
@@ -85,7 +85,36 @@ curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -X POST -o /dev/null -w '%{http_co
 
 ## 내부 API
 
-다른 업무 서비스가 서버끼리 호출하는 API입니다. 브라우저용이 아니므로 세션 쿠키와 CSRF 헤더 없이 호출하며, 응답에서 세션을 만들지 않습니다.
+서버끼리 호출하는 API입니다. I01은 Gateway가 SESSION 쿠키를 전달하는 세션 확인 API이고, I02·I03은 업무 서비스의 회원 이름 조회입니다. 외부 Gateway 라우트에는 등록하지 않습니다.
+
+### I01 · 세션 확인
+
+| 항목 | 내용 |
+|---|---|
+| 요청 | `POST /internal/v1/auth/session`, 본문 없음 |
+| 입력 | SESSION 쿠키·Original-Method·필요한 Csrf-Token |
+| Original-Method | Gateway가 실제 외부 요청 메서드로 작성, 정확히 하나의 대문자 값 |
+| 검증 | 로그인 세션·유휴/절대 만료·현재 DB 회원 상태·역할 |
+| CSRF | 원래 메서드가 POST·PUT·PATCH·DELETE일 때 검사 |
+| 성공 | 200, ApiResponse의 data에 userId·role |
+| 실패 | 세션 없음 401, 회원 상태·CSRF 403, 세션 충돌 409, 저장소 장애 503 |
+
+허용하는 원래 메서드는 GET·HEAD·OPTIONS·POST·PUT·PATCH·DELETE입니다. 잘못된 Original-Method는 400이며, Gateway는 이 오류를 만들지 않도록 실제 메서드를 검사해 I01을 호출합니다. 성공 응답은 쿠키를 새로 발급하지 않으며, 기존 세션의 접근 시각은 갱신됩니다.
+
+```json
+{
+  "success": true,
+  "data": {
+    "userId": "550e8400-e29b-41d4-a716-446655440000",
+    "role": "USER"
+  },
+  "error": null
+}
+```
+
+### I02·I03 · 회원 이름 조회
+
+세션 쿠키와 CSRF 헤더 없이 호출하며, 응답에서 세션을 만들지 않습니다.
 
 | API | 명세 | 용도 |
 |---|---|---|
@@ -200,8 +229,8 @@ curl -s $BASE/internal/v1/users/$USER_ID/funding-identity
 
 테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다.
 
-## Gateway 연결 전 남은 조건 (#13)
+## Gateway 연결과 배포 시 신뢰 경계
 
-- 로그인 시도 제한은 현재 `request.getRemoteAddr()`를 클라이언트 IP로 사용합니다. Gateway를 거치면 모든 요청이 Gateway 주소로 보여 이메일+IP 제한이 사실상 이메일 단위가 됩니다. Gateway가 실제 클라이언트 IP를 전달하고, user-service는 Gateway에서 온 값만 신뢰하도록 맞춰야 합니다.
-- Gateway는 외부 요청의 `User-Id`·`User-Role` 헤더를 지우고, 내부 세션 확인 결과로 다시 채워야 합니다. user-service는 이 헤더를 사용하지 않고 세션을 직접 확인합니다(`travelpay.auth.header-context.enabled: false`).
-- Gateway는 `/internal/**`를 외부 라우트에 넣지 않아야 하고, 배포에서는 user-service 포트를 외부에 열지 않아야 합니다. 내부 이름 조회 API는 세션 없이 열려 있어, 외부에서 닿으면 회원 ID만으로 성명을 조회할 수 있습니다.
+- Gateway는 연결 상대와 신뢰 프록시 설정으로 Client-Ip를 작성합니다. User의 Tomcat은 신뢰하는 내부 연결에서 온 Client-Ip를 `request.getRemoteAddr()`에 반영하고, 로그인 제한은 이 값을 사용합니다. 실제 배포에서는 ALB 서브넷 설정과 User 앞단의 신뢰 프록시 범위를 확인해야 합니다.
+- Gateway는 외부 User-Id·User-Role을 지운 뒤 I01의 검증 결과로 다시 설정합니다. User는 회원 헤더를 사용하지 않고 자기 세션을 확인합니다(`travelpay.auth.header-context.enabled: false`).
+- `/internal/**`는 외부 Gateway 라우트에 없습니다. 배포에서는 User 포트를 외부에 열지 않고 허용된 내부 호출자만 접근시켜야 합니다. 내부 이름 조회 API는 세션 없이 열려 있어, 외부에서 닿으면 회원 ID만으로 성명을 조회할 수 있습니다.

@@ -49,6 +49,13 @@ travelpay:
 
 server:
   port: 8081
+  # Gateway의 8KiB 수신 한도에 내부 헤더가 추가될 여유를 둡니다.
+  max-http-request-header-size: 16KB
+  # Gateway가 보낸 Client-Ip(실제 클라이언트 IP)를 클라이언트 주소로 씀. 내부 대역에서 온 요청만 해당
+  forward-headers-strategy: native
+  tomcat:
+    remoteip:
+      remote-ip-header: Client-Ip
   servlet:
     session:
       cookie:
