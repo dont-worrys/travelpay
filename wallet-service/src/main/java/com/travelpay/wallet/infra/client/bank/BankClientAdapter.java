@@ -31,11 +31,13 @@ public class BankClientAdapter implements BankClient {
     private static final String FAILED = "FAILED";
 
     private final BankFeignClient feignClient;
+    private final BankFaultInjection faultInjection;
 
     @Override
     public BankResult withdraw(String requestId, String bankCode, String accountNumber, String holderName,
-                               long amount) {
-        return call(requestId, DEBIT, () -> feignClient.withdraw(
+                               long amount, UUID chargeId, int attemptCount) {
+        String fault = faultInjection.withdrawHeader(chargeId, attemptCount);
+        return call(requestId, DEBIT, () -> feignClient.withdraw(fault,
                 new BankWithdrawalRequest(requestId, bankCode, accountNumber, holderName, amount)));
     }
 

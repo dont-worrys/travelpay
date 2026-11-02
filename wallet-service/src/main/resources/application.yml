@@ -88,6 +88,10 @@ travelpay:
     bank:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 mock-bank를 찾는다
       url: ${MOCK_BANK_URL:}
+      # 은행 응답 유실 재현 (로컬 검증 전용). 이후 rate 등 하위 키를 추가할 수 있게 묶어 둔다
+      fault-injection:
+        # 비우면 끔. LOST·DELAY면 출금 첫 시도에만 Mock-Fault 헤더를 보낸다. 그 외 값·prod 프로필에서 값 있음은 기동 실패
+        mode: ${BANK_FAULT_INJECTION_MODE:}
     ledger:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
       url: ${LEDGER_SERVICE_URL:}
