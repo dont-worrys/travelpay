@@ -13,7 +13,10 @@ import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse.RejectReason;
 import com.travelpay.payment.transfer.client.TransferLedgerClient;
+import com.travelpay.payment.transfer.client.TransferLedgerException;
+import com.travelpay.payment.transfer.client.TransferUserReader;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
+import com.travelpay.payment.transfer.client.UserRecipientResponse;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
 import com.travelpay.payment.transfer.domain.TransferFailureReason;
@@ -173,6 +176,39 @@ class TransferLedgerFlowTest {
         assertEquals(10_000L, ledger.balance(SOURCE_WALLET_ID));
     }
 
+    /** 어댑터가 결과 모름(타임아웃·연결 실패·5xx)으로 알리면 PROCESSING(202)으로 두고, 재요청 때 같은 reference로 완료합니다. */
+    @Test
+    void keepsProcessingWhenAdapterReportsResultUnknownAndCompletesOnRetry() {
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.resultUnknown("원장 거래 등록 실패 status=-1 code=-", null);
+        };
+        TransferResponse first = transferService.request(SENDER_ID, KEY, REQUEST);
+        ledger.onRegister = ledger::apply;
+
+        TransferResponse retry = transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.PROCESSING, first.status());
+        assertEquals(TransferStatus.COMPLETED, retry.status());
+        assertEquals(7_000L, ledger.balance(SOURCE_WALLET_ID));
+        assertEquals(3_000L, ledger.balance(TARGET_WALLET_ID));
+    }
+
+    /** 원장이 요청을 받아들이지 않은 경우(409·400 등)도 FAILED로 단정하지 않고 PROCESSING으로 둡니다. */
+    @Test
+    void keepsProcessingWithoutFailingWhenLedgerDoesNotAcceptRequest() {
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.requestNotAccepted(
+                    "원장 거래 등록 실패 status=409 code=LEDGER_REFERENCE_CONFLICT", null);
+        };
+
+        TransferResponse response = transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.PROCESSING, response.status());
+        assertNull(onlyTransfer().getFailureReason());
+        verify(transferRepository, never()).finishProcessing(any(), any(), any(), any());
+        assertEquals(10_000L, ledger.balance(SOURCE_WALLET_ID));
+    }
+
     /** 응답이 없거나 거절 사유가 빠지는 등 결과를 해석할 수 없으면 실패로 단정하지 않습니다. */
     @Test
     void keepsProcessingWhenLedgerResultIsUnknown() {
@@ -303,7 +339,10 @@ class TransferLedgerFlowTest {
         TransferWalletReader walletReader = mock(TransferWalletReader.class);
         when(walletReader.findActiveWalletId(SENDER_ID)).thenReturn(Optional.of(SOURCE_WALLET_ID));
         when(walletReader.findActiveWalletId(RECEIVER_ID)).thenReturn(Optional.of(TARGET_WALLET_ID));
-        return new TransferService(transferRepository, walletReader, Optional.of(fakeLedger));
+        TransferUserReader userReader = mock(TransferUserReader.class);
+        when(userReader.findRecipient(RECEIVER_ID))
+                .thenReturn(Optional.of(new UserRecipientResponse(RECEIVER_ID, "홍길동")));
+        return new TransferService(transferRepository, walletReader, userReader, Optional.of(fakeLedger));
     }
 
     private Transfer onlyTransfer() {

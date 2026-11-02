@@ -31,7 +31,7 @@ public class ChargeService {
 
     private final ChargeTransactionSteps steps;
     private final WalletTransactionSteps walletSteps;
-    private final UserRealNameClient userRealNameClient;
+    private final UserFundingIdentityClient userFundingIdentityClient;
     private final AccountNumberCipher cipher;
 
     /**
@@ -51,7 +51,7 @@ public class ChargeService {
         }
 
         UUID walletId = walletSteps.findActiveWalletId(userId);
-        String realName = userRealNameClient.findRealName(userId);
+        String realName = userFundingIdentityClient.findRealName(userId);
         BankAccount bankAccount = BankAccount.encrypt(command.bankCode(), command.accountNumber(), cipher);
         ChargeRequest chargeRequest = ChargeRequest.create(userId, walletId, command.amount(), command.currency(),
                 bankAccount, realName, idempotencyKey);

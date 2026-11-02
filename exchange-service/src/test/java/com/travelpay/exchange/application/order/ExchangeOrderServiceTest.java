@@ -3,11 +3,13 @@ package com.travelpay.exchange.application.order;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorCode;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
@@ -19,6 +21,7 @@ import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistory;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistoryRepository;
+import com.travelpay.exchange.domain.order.ExchangeOrderType;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
 import com.travelpay.exchange.domain.order.OrderFixtures;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
@@ -33,6 +36,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionOperations;
 
@@ -40,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -56,19 +64,23 @@ class ExchangeOrderServiceTest {
     private static final String KEY = "key-1";
 
     private final ExchangeOrderRepository orderRepository = mock(ExchangeOrderRepository.class);
+    private final ExchangeOrderQueryRepository queryRepository = mock(ExchangeOrderQueryRepository.class);
     private final ExchangeOrderStatusHistoryRepository historyRepository =
             mock(ExchangeOrderStatusHistoryRepository.class);
     private final ExchangeQuoteRepository quoteRepository = mock(ExchangeQuoteRepository.class);
     private final WalletBalanceReader walletBalanceReader = mock(WalletBalanceReader.class);
-    private final ExchangeOrderService service = new ExchangeOrderService(orderRepository, historyRepository,
-            quoteRepository, walletBalanceReader, TransactionOperations.withoutTransaction(),
-            Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
+    private final ExchangeOrderLedgerProcessor ledgerProcessor = mock(ExchangeOrderLedgerProcessor.class);
+    private final ExchangeOrderService service = new ExchangeOrderService(orderRepository, queryRepository,
+            historyRepository, quoteRepository, walletBalanceReader, ledgerProcessor,
+            TransactionOperations.withoutTransaction(), Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
 
     private ExchangeQuote quote;
 
     @BeforeEach
     void setUp() {
         quote = savedQuote();
+        // 원장 처리 결과를 바꾸지 않는 기본값. 원장 처리 자체는 ExchangeOrderLedgerProcessorTest에서 본다.
+        when(ledgerProcessor.process(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
                 .thenReturn(Optional.empty());
         when(quoteRepository.findByIdAndUserId(quote.getId(), USER_ID)).thenReturn(Optional.of(quote));
@@ -106,6 +118,26 @@ class ExchangeOrderServiceTest {
         assertSame(existing, service.place(command(quote.getId(), WALLET_ID)));
         verifyNoInteractions(quoteRepository, walletBalanceReader);
         verify(orderRepository, never()).save(any());
+        // PROCESSING인 기존 주문은 원장에 다시 보낸다 (확정된 주문은 처리기가 그대로 돌려준다)
+        verify(ledgerProcessor).process(existing);
+    }
+
+    @Test
+    void returnsOrderAfterLedgerProcessing() {
+        ExchangeOrder completed = OrderFixtures.placed(quote, WALLET_ID, KEY);
+        when(ledgerProcessor.process(any())).thenReturn(completed);
+
+        assertSame(completed, service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void acceptedOrderIsReturnedEvenIfLedgerProcessingFails() {
+        when(ledgerProcessor.process(any())).thenThrow(new IllegalStateException("db down"));
+
+        ExchangeOrder order = service.place(command(quote.getId(), WALLET_ID));
+
+        assertEquals(ExchangeOrderStatus.PROCESSING, order.getStatus());
+        verify(orderRepository).save(order);
     }
 
     @Test
@@ -223,6 +255,51 @@ class ExchangeOrderServiceTest {
 
         assertSame(order, service.find(USER_ID, orderId));
         assertError(ExchangeOrderErrorCode.ORDER_NOT_FOUND, () -> service.find(USER_ID, UUID.randomUUID()));
+    }
+
+    @Test
+    void listsOwnOrdersNewestFirstWithStableOrder() {
+        Page<ExchangeOrder> expected = new PageImpl<>(List.of(OrderFixtures.placed(quote, WALLET_ID, KEY)));
+        when(queryRepository.findPage(any(), any())).thenReturn(expected);
+
+        Page<ExchangeOrder> page = service.list(USER_ID, ExchangeOrderStatus.COMPLETED,
+                ExchangeOrderType.RE_EXCHANGE, 2, 30);
+
+        assertSame(expected, page);
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(queryRepository).findPage(
+                eq(new ExchangeOrderListCondition(USER_ID, ExchangeOrderStatus.COMPLETED, ExchangeOrderType.RE_EXCHANGE)),
+                pageable.capture());
+        assertEquals(2, pageable.getValue().getPageNumber());
+        assertEquals(30, pageable.getValue().getPageSize());
+        assertEquals(Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")), pageable.getValue().getSort());
+    }
+
+    @Test
+    void listWithoutFiltersPassesNullConditions() {
+        when(queryRepository.findPage(any(), any())).thenReturn(Page.empty());
+
+        service.list(USER_ID, null, null, 0, 20);
+
+        verify(queryRepository).findPage(eq(new ExchangeOrderListCondition(USER_ID, null, null)), any());
+    }
+
+    @Test
+    void listCapsPageSizeAtHundred() {
+        when(queryRepository.findPage(any(), any())).thenReturn(Page.empty());
+
+        service.list(USER_ID, null, null, 0, 500);
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(queryRepository).findPage(any(), pageable.capture());
+        assertEquals(100, pageable.getValue().getPageSize());
+    }
+
+    @Test
+    void listRejectsNegativePageOrNonPositiveSize() {
+        assertError(CommonErrorCode.INVALID_REQUEST, () -> service.list(USER_ID, null, null, -1, 20));
+        assertError(CommonErrorCode.INVALID_REQUEST, () -> service.list(USER_ID, null, null, 0, 0));
+        verifyNoInteractions(queryRepository);
     }
 
     private static PlaceOrderCommand command(UUID quoteId, UUID walletId) {

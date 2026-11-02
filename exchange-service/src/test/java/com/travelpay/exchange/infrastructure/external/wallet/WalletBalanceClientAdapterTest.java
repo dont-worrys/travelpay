@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.travelpay.common.response.ApiResponse;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
@@ -16,6 +17,7 @@ import feign.Response;
 import feign.RetryableException;
 import feign.codec.DecodeException;
 import org.junit.jupiter.api.Test;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,17 +38,18 @@ class WalletBalanceClientAdapterTest {
     private final WalletFeignClient feignClient = mock(WalletFeignClient.class);
     private final WalletBalanceClientAdapter adapter = new WalletBalanceClientAdapter(feignClient);
 
-    /** PR #47 응답 JSON이 응답 record로 해석되는지 확인합니다. Feign도 Jackson으로 같은 record를 만듭니다. */
+    /** PR #47 응답 JSON이 공통 ApiResponse와 data record로 해석되는지 확인합니다. Feign도 Jackson으로 같은 타입을 만듭니다. */
     @Test
-    void readsWalletServiceJsonIntoResponseRecord() {
-        WalletBalancesResponse response = JsonMapper.builder().build().readValue("""
+    void readsWalletServiceJsonIntoCommonApiResponse() {
+        ApiResponse<WalletBalancesResponse> response = JsonMapper.builder().build().readValue("""
                 {"success":true,"data":{"walletId":"%s","status":"ACTIVE","balances":[
                   {"currency":"CNY","balance":3520,"status":"SUSPENDED"}
                 ]},"error":null}
-                """.formatted(WALLET_ID), WalletBalancesResponse.class);
+                """.formatted(WALLET_ID), new TypeReference<ApiResponse<WalletBalancesResponse>>() {
+        });
 
-        assertEquals(new WalletBalancesResponse(new WalletBalancesResponse.Data(WALLET_ID, "ACTIVE",
-                List.of(new WalletBalancesResponse.Balance("CNY", 3520L, "SUSPENDED"))), null), response);
+        assertEquals(ApiResponse.success(new WalletBalancesResponse(WALLET_ID, "ACTIVE",
+                List.of(new WalletBalancesResponse.Balance("CNY", 3520L, "SUSPENDED")))), response);
     }
 
     /** 잔액은 최소 단위 정수이고, 상태는 ACTIVE 여부로만 봅니다. */
@@ -136,11 +139,11 @@ class WalletBalanceClientAdapterTest {
         when(feignClient.getBalances(USER_ID)).thenReturn(null);
         assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
 
-        when(feignClient.getBalances(USER_ID)).thenReturn(new WalletBalancesResponse(null, null));
+        when(feignClient.getBalances(USER_ID)).thenReturn(ApiResponse.success(null));
         assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
 
-        when(feignClient.getBalances(USER_ID)).thenReturn(new WalletBalancesResponse(
-                new WalletBalancesResponse.Data(WALLET_ID, "ACTIVE", null), null));
+        when(feignClient.getBalances(USER_ID)).thenReturn(ApiResponse.success(
+                new WalletBalancesResponse(WALLET_ID, "ACTIVE", null)));
         assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
     }
 
@@ -157,8 +160,8 @@ class WalletBalanceClientAdapterTest {
     }
 
     private void respondWith(String walletStatus, WalletBalancesResponse.Balance... balances) {
-        when(feignClient.getBalances(USER_ID)).thenReturn(new WalletBalancesResponse(
-                new WalletBalancesResponse.Data(WALLET_ID, walletStatus, List.of(balances)), null));
+        when(feignClient.getBalances(USER_ID)).thenReturn(ApiResponse.success(
+                new WalletBalancesResponse(WALLET_ID, walletStatus, List.of(balances))));
     }
 
     private static WalletBalancesResponse.Balance balance(String currency, Long balance, String status) {

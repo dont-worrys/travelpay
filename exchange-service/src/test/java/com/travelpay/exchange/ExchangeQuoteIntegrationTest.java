@@ -54,7 +54,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
-        "exchange.rate.koreaexim.api-key=integration-test"
+        "exchange.rate.koreaexim.api-key=integration-test",
+        "exchange.order.recovery.enabled=false"
 })
 class ExchangeQuoteIntegrationTest {
 
@@ -106,7 +107,7 @@ class ExchangeQuoteIntegrationTest {
     void appliesFlywayMigrationsAndStartsWithSchemaValidation() {
         assertEquals("validate", environment.getProperty("spring.jpa.hibernate.ddl-auto"));
         // version이 없는 행은 Flyway가 스키마를 만들었다는 기록입니다.
-        assertEquals(List.of("1", "2", "3"), jdbcTemplate.queryForList(
+        assertEquals(List.of("1", "2", "3", "4"), jdbcTemplate.queryForList(
                 "SELECT version FROM " + SCHEMA + ".flyway_schema_history"
                         + " WHERE success AND version IS NOT NULL ORDER BY installed_rank",
                 String.class));

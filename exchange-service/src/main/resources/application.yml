@@ -19,6 +19,10 @@ spring:
           wallet-service:
             connect-timeout: 2000
             read-timeout: 3000
+          # 원장 최대 응답(약 5초)까지 기다린다. 넘으면 결과 모름으로 두고 복구 스케줄러가 같은 요청을 다시 보낸다.
+          ledger-service:
+            connect-timeout: 2000
+            read-timeout: 5000
 
 travelpay:
   auth:
@@ -27,10 +31,16 @@ travelpay:
 
 exchange:
   rate:
-    # 환율 수집 모드: koreaexim(한국수출입은행 공식 환율)
-    mode: koreaexim
+    # 환율 수집 모드: koreaexim(한국수출입은행 공식 환율), mock(공식 환율을 중심으로 변동하는 가짜 환율)
+    mode: ${EXCHANGE_RATE_MODE:koreaexim}
     koreaexim:
       api-key: ${KOREAEXIM_API_KEY:}
+    # mock 모드에서만 읽습니다. 간격·변동 비율·신선도는 코드 기본값(5s, 0.0005, 0.02, 30s)을 씁니다.
+    mock:
+      # 공식 환율이 DB에 없을 때 쓸 매매기준율 (JPY는 100엔당, CNY는 1위안당)
+      default-mid-rates:
+        JPY: 900.00
+        CNY: 190.00
   quote:
     # 견적 유효 시간과 수수료율(0.01 = 1%)
     ttl: 5m
@@ -46,6 +56,12 @@ exchange:
       CNY:
         min: 10.00
         max: 10000.00
+  order:
+    # 결과를 모르는 주문을 원장에 다시 보내는 주기와 한 번에 처리할 주문 수
+    recovery:
+      enabled: true
+      fixed-delay: 30s
+      batch-size: 50
 
 server:
   port: 8084

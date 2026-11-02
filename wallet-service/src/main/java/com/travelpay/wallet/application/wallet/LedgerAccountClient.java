@@ -8,8 +8,8 @@ import java.util.UUID;
 
 /**
  * 원장 지갑 계정 호출. 반환 목록은 지원 통화가 하나씩 모두 있고 통화 순(KRW, JPY, CNY)이다.
- * 5xx·타임아웃·연결 실패는 BusinessException(SERVICE_UNAVAILABLE),
- * 그 밖의 4xx·응답 형식 이상은 LedgerResponseException(500)으로 알린다.
+ * 호출 실패는 공통 BusinessException(504·503·502)으로,
+ * 2xx 응답 내용 이상은 LedgerResponseException(500)으로 알린다.
  */
 public interface LedgerAccountClient {
 
