@@ -92,15 +92,20 @@ public class Payment {
         return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.SYSTEM);
     }
 
-    public PaymentHistory refundRequestedHistory(String reason) {
+    public PaymentHistory refundRequestedHistory(String reason, PaymentActor actor) {
         validateRefundable();
         PaymentStatus previous = changeStatus(PaymentStatus.APPROVED, PaymentStatus.REFUND_PENDING);
-        return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.USER);
+        return PaymentHistory.of(this.id, previous, this.status, reason, actor);
     }
 
-    public PaymentHistory refundedHistory() {
-        PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.REFUNDED);
-        return PaymentHistory.of(this.id, previous, this.status, null, PaymentActor.SYSTEM);
+    // 남은 금액이 없으면 REFUNDED, 남아 있으면 부분 환불로 APPROVED로 되돌립니다.
+    public PaymentHistory refundCompletedHistory(long refundAmount, long remainingAmount) {
+        if (remainingAmount == 0) {
+            PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.REFUNDED);
+            return PaymentHistory.of(this.id, previous, this.status, null, PaymentActor.SYSTEM);
+        }
+        PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.APPROVED);
+        return PaymentHistory.of(this.id, previous, this.status, "부분 환불 완료: " + refundAmount, PaymentActor.SYSTEM);
     }
 
     // 환불이 거절되면 결제는 그대로 유효하므로 APPROVED로 되돌립니다. 거절 사유는 이력과 환불 내역에 남깁니다.

@@ -45,6 +45,14 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
     }
 
     @Override
+    public Page<Payment> findPageByMerchantId(UUID merchantId, PaymentStatus status, Pageable pageable) {
+        if (status == null) {
+            return paymentJpaRepository.findByMerchantId(merchantId, pageable);
+        }
+        return paymentJpaRepository.findByMerchantIdAndStatus(merchantId, status, pageable);
+    }
+
+    @Override
     public List<Payment> findStalePending(Instant before, int limit) {
         return paymentJpaRepository.findByStatusAndUpdatedAtBefore(
                 PaymentStatus.PENDING, before, PageRequest.of(0, limit, Sort.by("updatedAt")));

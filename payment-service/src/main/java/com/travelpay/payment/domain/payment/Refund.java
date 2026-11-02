@@ -79,8 +79,8 @@ public class Refund {
         this.declineReason = reason;
     }
 
-    public boolean isSameRequest(UUID paymentId) {
-        return this.paymentId.equals(paymentId);
+    public boolean isSameRequest(UUID paymentId, Long amount) {
+        return this.paymentId.equals(paymentId) && this.amount.equals(amount);
     }
 
     private void changeStatus(RefundStatus next) {
