@@ -111,7 +111,7 @@ public class PaymentService {
         Payment settledPayment = settlePayment(savedPayment);
 
         if (settledPayment.getStatus() == PaymentStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.DECLINED, settledPayment.getDeclineReason());
         }
 
         return PaymentResult.from(settledPayment);
@@ -161,7 +161,7 @@ public class PaymentService {
         RefundProgress settled = settleRefund(started.payment(), started.refund());
 
         if (settled.refund().getStatus() == RefundStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.REFUND_DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.REFUND_DECLINED, settled.refund().getDeclineReason());
         }
         return toResult(settled.payment());
     }
@@ -273,7 +273,7 @@ public class PaymentService {
                 ? settlePayment(existingPayment)
                 : existingPayment;
         if (payment.getStatus() == PaymentStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.DECLINED, payment.getDeclineReason());
         }
         return toResult(payment);
     }
@@ -287,7 +287,7 @@ public class PaymentService {
                 ? settleRefund(payment, existing)
                 : new RefundProgress(payment, existing);
         if (progress.refund().getStatus() == RefundStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.REFUND_DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.REFUND_DECLINED, progress.refund().getDeclineReason());
         }
         return toResult(progress.payment());
     }

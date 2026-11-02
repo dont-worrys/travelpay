@@ -25,6 +25,7 @@ import com.travelpay.payment.domain.payment.MerchantStatus;
 import com.travelpay.payment.domain.payment.Payment;
 import com.travelpay.payment.domain.payment.PaymentActor;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
+import com.travelpay.payment.domain.payment.PaymentDeclinedException;
 import com.travelpay.payment.domain.payment.PaymentHistory;
 import com.travelpay.payment.domain.payment.PaymentHistoryRepository;
 import com.travelpay.payment.domain.payment.PaymentRepository;
@@ -160,10 +161,11 @@ class PaymentServiceTest {
         givenWallet();
         when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.declined("잔액이 부족합니다."));
 
-        BusinessException exception = assertThrows(BusinessException.class,
+        PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.paymentRequest(command(2_000_000L)));
 
         assertEquals(PaymentErrorCode.DECLINED, exception.getErrorCode());
+        assertEquals("잔액이 부족합니다.", exception.getDeclineReason());
 
         ArgumentCaptor<Payment> paymentCaptor = ArgumentCaptor.forClass(Payment.class);
         verify(paymentRepository, times(2)).save(paymentCaptor.capture());
@@ -286,10 +288,11 @@ class PaymentServiceTest {
         existing.declinedHistory("잔액이 부족합니다.");
         when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.of(existing));
 
-        BusinessException exception = assertThrows(BusinessException.class,
+        PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.paymentRequest(command(2_000_000L)));
 
         assertEquals(PaymentErrorCode.DECLINED, exception.getErrorCode());
+        assertEquals("잔액이 부족합니다.", exception.getDeclineReason());
         verifyNoInteractions(merchantRepository, walletClient, ledgerClient, paymentHistoryRepository);
     }
 
@@ -338,10 +341,11 @@ class PaymentServiceTest {
         when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.of(pending));
         when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.declined("잔액이 부족합니다."));
 
-        BusinessException exception = assertThrows(BusinessException.class,
+        PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.paymentRequest(command(10_000L)));
 
         assertEquals(PaymentErrorCode.DECLINED, exception.getErrorCode());
+        assertEquals("잔액이 부족합니다.", exception.getDeclineReason());
         assertEquals(PaymentStatus.DECLINED, pending.getStatus());
         verify(paymentRepository, times(1)).save(pending);
         savedHistories(1);
@@ -562,10 +566,11 @@ class PaymentServiceTest {
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.declined("원거래를 찾을 수 없습니다."));
 
-        BusinessException exception = assertThrows(BusinessException.class,
+        PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID)));
 
         assertEquals(PaymentErrorCode.REFUND_DECLINED, exception.getErrorCode());
+        assertEquals("원거래를 찾을 수 없습니다.", exception.getDeclineReason());
         assertEquals(PaymentStatus.APPROVED, payment.getStatus());
         assertEquals(RefundStatus.DECLINED, savedRefunds.get(0).getStatus());
         assertEquals("원거래를 찾을 수 없습니다.", savedRefunds.get(0).getDeclineReason());
@@ -602,10 +607,11 @@ class PaymentServiceTest {
         when(refundRepository.findByUserIdAndIdempotencyKey(USER_ID, REFUND_KEY)).thenReturn(Optional.of(existing));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
 
-        BusinessException exception = assertThrows(BusinessException.class,
+        PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID)));
 
         assertEquals(PaymentErrorCode.REFUND_DECLINED, exception.getErrorCode());
+        assertEquals("원거래를 찾을 수 없습니다.", exception.getDeclineReason());
         verifyNoInteractions(ledgerClient, paymentHistoryRepository);
     }
 
@@ -656,10 +662,11 @@ class PaymentServiceTest {
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.declined("원거래를 찾을 수 없습니다."));
 
-        BusinessException exception = assertThrows(BusinessException.class,
+        PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.refundRequest(refundCommand(USER_ID, PAYMENT_ID)));
 
         assertEquals(PaymentErrorCode.REFUND_DECLINED, exception.getErrorCode());
+        assertEquals("원거래를 찾을 수 없습니다.", exception.getDeclineReason());
         assertEquals(PaymentStatus.APPROVED, payment.getStatus());
         assertEquals(RefundStatus.DECLINED, existing.getStatus());
         savedHistories(1);
