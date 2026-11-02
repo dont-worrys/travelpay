@@ -31,12 +31,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(OutputCaptureExtension.class)
-class UserRealNameClientAdapterTest {
+class UserFundingIdentityClientAdapterTest {
 
     private static final String REAL_NAME = "홍길동";
 
     private final UserFeignClient feignClient = mock(UserFeignClient.class);
-    private final UserRealNameClientAdapter adapter = new UserRealNameClientAdapter(feignClient);
+    private final UserFundingIdentityClientAdapter adapter = new UserFundingIdentityClientAdapter(feignClient);
 
     private final UUID userId = UUID.randomUUID();
 

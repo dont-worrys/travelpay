@@ -4,7 +4,7 @@ import com.travelpay.common.auth.AuthRole;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.feign.FeignErrors;
 import com.travelpay.common.response.ApiResponse;
-import com.travelpay.wallet.application.charge.UserRealNameClient;
+import com.travelpay.wallet.application.charge.UserFundingIdentityClient;
 import com.travelpay.wallet.application.charge.UserResponseException;
 import com.travelpay.wallet.domain.WalletErrorCode;
 import feign.FeignException;
@@ -17,15 +17,15 @@ import java.util.UUID;
 
 /**
  * 충전 예금주 확인용 회원 실명(funding-identity) 응답 해석. 실명·응답 내용은 예외 메시지·로그에 싣지 않는다.
- * - 2xx: 요청한 회원의 것이고 비어 있지 않고 저장 가능한 길이의 실명만 사용 (아니면 UserResponseException 500)
  * - 403 + USER_ACCOUNT_SUSPENDED·USER_ACCOUNT_CLOSED, 404 + USER_NOT_FOUND: CHARGE_USER_NOT_ACTIVE(409)
- * - 그 밖의 실패: FeignErrors.toCommonException (시간 초과·504 → 504, 연결 실패·503 → 503, 나머지 502).
- *   처리하지 않은 4xx와 2xx 본문 해석 실패는 ERROR로 남긴다
+ * - 호출 실패와 2xx 응답 해석 실패: FeignErrors.toCommonException (시간 초과·504 → 504, 연결 실패·503 → 503, 나머지 502).
+ *   처리하지 않은 4xx와 2xx 응답 해석 실패는 ERROR로 남긴다
+ * - 2xx 응답을 읽었으나 내용 이상(요청한 회원의 것이 아님, 실명 없음·저장 가능 길이 초과): UserResponseException(500)
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class UserRealNameClientAdapter implements UserRealNameClient {
+public class UserFundingIdentityClientAdapter implements UserFundingIdentityClient {
 
     /** charge_requests.holder_name_snapshot 길이 */
     private static final int REAL_NAME_MAX = 100;
