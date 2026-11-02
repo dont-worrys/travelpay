@@ -1,0 +1,41 @@
+# 환율 조회 부하 측정 전용 환경입니다. 팀 공용 compose와 별도이며, 측정할 때만 띄웁니다.
+# 실행 방법은 같은 폴더의 README.md를 봅니다.
+name: travelpay-load-test
+
+services:
+  # 측정 전용 Postgres. 쿼리별 실행 횟수를 보려고 pg_stat_statements를 켭니다(서버 시작 설정이라 공용 DB와 분리).
+  # 데이터를 볼륨에 남기지 않아, 다시 띄우면 항상 빈 DB에서 시작합니다(측정마다 같은 출발점).
+  measure-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18.6-bookworm}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+    environment:
+      POSTGRES_DB: travelpay
+      POSTGRES_USER: exchange_app
+      POSTGRES_PASSWORD: load-test-only
+    ports:
+      # 공용 DB(5432)와 겹치지 않는 포트
+      - "127.0.0.1:5439:5432"
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "exchange_app", "-d", "travelpay"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # 부하 생성기. 필요할 때만 `docker compose run --rm k6 run /scripts/<스크립트>`로 실행합니다(profile 지정).
+  # 컨테이너 안에서 PC에 띄운 환전 서비스로 요청하도록 host.docker.internal을 엽니다.
+  k6:
+    image: ${K6_IMAGE:-grafana/k6:1.3.0}
+    profiles: ["k6"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      BASE_URL: ${BASE_URL:-http://host.docker.internal:18084}
+    volumes:
+      - ./:/scripts:ro
