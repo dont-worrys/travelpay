@@ -17,7 +17,7 @@ import org.springframework.stereotype.Component;
  *     <li>타임아웃·연결 실패·Eureka 미등록(503)·5xx·해석할 수 없는 성공 응답 → {@link TransferLedgerException.Kind#RESULT_UNKNOWN}</li>
  *     <li>그 밖의 4xx(409·400·알 수 없는 422 코드 등) → {@link TransferLedgerException.Kind#REQUEST_NOT_ACCEPTED}</li>
  * </ul>
- * 거절 코드 이름은 현재 ledger-service {@code LedgerErrorCode} 기준이며 원장 연동 확정 시 다시 확인합니다.
+ * 거절 코드는 원장 담당자가 확인한 422 코드 세 가지입니다(2026-11-02).
  */
 @Component
 public class TransferLedgerClientAdapter implements TransferLedgerClient {
