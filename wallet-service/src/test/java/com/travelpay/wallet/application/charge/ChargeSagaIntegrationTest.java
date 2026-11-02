@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -141,7 +142,7 @@ class ChargeSagaIntegrationTest {
         assertEquals(ledgerTxId, row.get("ledger_ref"));
         assertEquals(0, row.get("attempt_count"));
         assertEquals(List.of("REQUESTED", "BANK_PROCESSING", "CREDIT_PROCESSING", "COMPLETED"), historyStatuses());
-        verify(bankClient).withdraw(bankRequestId, "004", "1234567890", "홍길동", AMOUNT);
+        verify(bankClient).withdraw(bankRequestId, "004", "1234567890", "홍길동", AMOUNT, chargeId, 0);
         verify(ledgerClient).postCharge(chargeId, userId, walletId, AMOUNT);
     }
 
@@ -218,12 +219,14 @@ class ChargeSagaIntegrationTest {
         assertEquals("ACCOUNT_DECRYPT_FAILED", row.get("failure_code"));
         assertEquals(AccountNumberCipherException.class.getName(), row.get("last_error"));
         assertEquals(0, row.get("attempt_count"));
-        verify(bankClient, never()).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(bankClient, never()).withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
         verify(ledgerClient, never()).postCharge(any(), any(), any(), anyLong());
 
         executor.execute(chargeId);
         assertEquals("MANUAL_REVIEW", chargeRow().get("status"));
-        verify(bankClient, never()).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(bankClient, never()).withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
     }
 
     @Test
@@ -271,10 +274,12 @@ class ChargeSagaIntegrationTest {
         assertEquals("MANUAL_REVIEW", row.get("status"));
         assertEquals("RETRY_EXHAUSTED", row.get("failure_code"));
         assertEquals(5, row.get("attempt_count"));
-        verify(bankClient, times(5)).withdraw(eq(bankRequestId), anyString(), anyString(), anyString(), anyLong());
+        verify(bankClient, times(5)).withdraw(
+                eq(bankRequestId), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
 
         executor.execute(chargeId);
-        verify(bankClient, times(5)).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(bankClient, times(5)).withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
     }
 
     @Test
@@ -286,7 +291,8 @@ class ChargeSagaIntegrationTest {
         runConcurrently(2);
 
         assertEquals("COMPLETED", chargeRow().get("status"));
-        verify(bankClient, times(1)).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(bankClient, times(1)).withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
         verify(ledgerClient, times(1)).postCharge(any(), any(), any(), anyLong());
     }
 
@@ -300,10 +306,11 @@ class ChargeSagaIntegrationTest {
         runConcurrently(2);
 
         assertEquals("COMPLETED", chargeRow().get("status"));
-        verify(bankClient, atMost(2)).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(bankClient, atMost(2)).withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
         verify(bankClient, never()).withdraw(
                 org.mockito.ArgumentMatchers.argThat(id -> !bankRequestId.equals(id)),
-                anyString(), anyString(), anyString(), anyLong());
+                anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
         verify(ledgerClient, times(1)).postCharge(any(), any(), any(), anyLong());
     }
 
@@ -323,7 +330,8 @@ class ChargeSagaIntegrationTest {
         assertEquals("COMPLETED", chargeRow().get("status"));
         assertEquals(afterFirst.get("updated_at"), chargeRow().get("updated_at"));
         assertEquals(historyAfterFirst, historyStatuses().size());
-        verify(bankClient, times(1)).withdraw(anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(bankClient, times(1)).withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
         verify(ledgerClient, times(1)).postCharge(any(), any(), any(), anyLong());
         Integer traced = jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM charge_status_history WHERE charge_id = ? AND trace_id = ?",
@@ -332,7 +340,8 @@ class ChargeSagaIntegrationTest {
     }
 
     private void givenWithdraw(BankResult result) {
-        when(bankClient.withdraw(anyString(), anyString(), anyString(), anyString(), anyLong())).thenReturn(result);
+        when(bankClient.withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt())).thenReturn(result);
     }
 
     private void givenLedger(LedgerPostResult result) {

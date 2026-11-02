@@ -9,6 +9,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.mock.env.MockEnvironment;
 
 import java.util.UUID;
 import java.util.stream.Stream;
@@ -21,7 +23,10 @@ import static com.travelpay.wallet.infra.client.FeignFailures.undecodable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class BankClientAdapterTest {
@@ -29,7 +34,7 @@ class BankClientAdapterTest {
     private static final String REQUEST_ID = "charge-1";
 
     private final BankFeignClient feignClient = mock(BankFeignClient.class);
-    private final BankClientAdapter adapter = new BankClientAdapter(feignClient);
+    private final BankClientAdapter adapter = adapterWithMode(null);
 
     @Test
     void SUCCEEDED면_Succeeded() {
@@ -87,17 +92,80 @@ class BankClientAdapterTest {
         assertInstanceOf(BankResult.Unknown.class, refund());
     }
 
+    @Test
+    void 장애_주입_설정이_없으면_출금에_헤더_없음() {
+        givenWithdraw(succeededWithdrawal());
+
+        withdrawWithAttempt(adapter, 0);
+
+        verify(feignClient).withdraw(isNull(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void 장애_주입_설정이_공백이면_출금에_헤더_없음(String mode) {
+        givenWithdraw(succeededWithdrawal());
+
+        withdrawWithAttempt(adapterWithMode(mode), 0);
+
+        verify(feignClient).withdraw(isNull(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"LOST|LOST", "DELAY|DELAY", "lost|LOST", "'  Delay  '|DELAY"})
+    void 장애_주입_모드면_첫_출금에_헤더_값을_전달(String mode, String expected) {
+        givenWithdraw(succeededWithdrawal());
+
+        withdrawWithAttempt(adapterWithMode(mode), 0);
+
+        verify(feignClient).withdraw(eq(expected), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"LOST, 1", "LOST, 4", "DELAY, 1", "DELAY, 4"})
+    void 장애_주입_모드여도_재시도_출금에는_헤더_없음(String mode, int attemptCount) {
+        givenWithdraw(succeededWithdrawal());
+
+        withdrawWithAttempt(adapterWithMode(mode), attemptCount);
+
+        verify(feignClient).withdraw(isNull(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"LOST", "DELAY"})
+    void 장애_주입_모드여도_환불은_헤더_파라미터_없는_메서드로_호출(String mode) {
+        UUID originalTxId = UUID.randomUUID();
+        when(feignClient.refund(any())).thenReturn(ApiResponse.success(
+                new BankTransactionResponse(UUID.randomUUID(), REQUEST_ID, "REFUND", "SUCCEEDED", null)));
+
+        adapterWithMode(mode).refund(REQUEST_ID, originalTxId, 10_000);
+
+        verify(feignClient).refund(new BankRefundRequest(REQUEST_ID, originalTxId, 10_000));
+    }
+
+    private BankClientAdapter adapterWithMode(String mode) {
+        return new BankClientAdapter(feignClient, new BankFaultInjection(mode, new MockEnvironment()));
+    }
+
+    private static BankTransactionResponse succeededWithdrawal() {
+        return new BankTransactionResponse(UUID.randomUUID(), REQUEST_ID, "DEBIT", "SUCCEEDED", null);
+    }
+
     private void givenWithdraw(BankTransactionResponse data) {
-        when(feignClient.withdraw(any())).thenReturn(ApiResponse.success(data));
+        when(feignClient.withdraw(any(), any())).thenReturn(ApiResponse.success(data));
     }
 
     private void givenFailure(FeignException failure) {
-        when(feignClient.withdraw(any())).thenThrow(failure);
+        when(feignClient.withdraw(any(), any())).thenThrow(failure);
         when(feignClient.refund(any())).thenThrow(failure);
     }
 
     private BankResult withdraw() {
-        return adapter.withdraw(REQUEST_ID, "004", "1234567890", "홍길동", 10_000);
+        return withdrawWithAttempt(adapter, 0);
+    }
+
+    private static BankResult withdrawWithAttempt(BankClientAdapter adapter, int attemptCount) {
+        return adapter.withdraw(REQUEST_ID, "004", "1234567890", "홍길동", 10_000, UUID.randomUUID(), attemptCount);
     }
 
     private BankResult refund() {

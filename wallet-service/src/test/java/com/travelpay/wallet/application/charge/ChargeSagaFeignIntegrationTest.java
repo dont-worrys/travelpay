@@ -132,7 +132,7 @@ class ChargeSagaFeignIntegrationTest {
 
     @Test
     void 은행_2xx_본문을_해석하지_못하면_BANK_PROCESSING에_머물고_보상하지_않는다() {
-        when(bankFeignClient.withdraw(any())).thenThrow(undecodable());
+        when(bankFeignClient.withdraw(any(), any())).thenThrow(undecodable());
 
         executor.execute(chargeId);
 
@@ -159,7 +159,7 @@ class ChargeSagaFeignIntegrationTest {
 
     private UUID givenWithdrawSucceeded() {
         UUID bankTxId = UUID.randomUUID();
-        when(bankFeignClient.withdraw(any())).thenReturn(ApiResponse.success(
+        when(bankFeignClient.withdraw(any(), any())).thenReturn(ApiResponse.success(
                 new BankTransactionResponse(bankTxId, bankRequestId, "DEBIT", "SUCCEEDED", null)));
         return bankTxId;
     }
