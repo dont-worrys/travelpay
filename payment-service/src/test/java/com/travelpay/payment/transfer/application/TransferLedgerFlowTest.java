@@ -13,6 +13,7 @@ import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse.RejectReason;
 import com.travelpay.payment.transfer.client.TransferLedgerClient;
+import com.travelpay.payment.transfer.client.TransferLedgerException;
 import com.travelpay.payment.transfer.client.TransferUserReader;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
 import com.travelpay.payment.transfer.client.UserRecipientResponse;
@@ -171,6 +172,39 @@ class TransferLedgerFlowTest {
 
         assertEquals(TransferStatus.PROCESSING, response.status());
         assertEquals(TransferStatus.PROCESSING, onlyTransfer().getStatus());
+        verify(transferRepository, never()).finishProcessing(any(), any(), any(), any());
+        assertEquals(10_000L, ledger.balance(SOURCE_WALLET_ID));
+    }
+
+    /** 어댑터가 결과 모름(타임아웃·연결 실패·5xx)으로 알리면 PROCESSING(202)으로 두고, 재요청 때 같은 reference로 완료합니다. */
+    @Test
+    void keepsProcessingWhenAdapterReportsResultUnknownAndCompletesOnRetry() {
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.resultUnknown("원장 거래 등록 실패 status=-1 code=-", null);
+        };
+        TransferResponse first = transferService.request(SENDER_ID, KEY, REQUEST);
+        ledger.onRegister = ledger::apply;
+
+        TransferResponse retry = transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.PROCESSING, first.status());
+        assertEquals(TransferStatus.COMPLETED, retry.status());
+        assertEquals(7_000L, ledger.balance(SOURCE_WALLET_ID));
+        assertEquals(3_000L, ledger.balance(TARGET_WALLET_ID));
+    }
+
+    /** 원장이 요청을 받아들이지 않은 경우(409·400 등)도 FAILED로 단정하지 않고 PROCESSING으로 둡니다. */
+    @Test
+    void keepsProcessingWithoutFailingWhenLedgerDoesNotAcceptRequest() {
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.requestNotAccepted(
+                    "원장 거래 등록 실패 status=409 code=LEDGER_REFERENCE_CONFLICT", null);
+        };
+
+        TransferResponse response = transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.PROCESSING, response.status());
+        assertNull(onlyTransfer().getFailureReason());
         verify(transferRepository, never()).finishProcessing(any(), any(), any(), any());
         assertEquals(10_000L, ledger.balance(SOURCE_WALLET_ID));
     }

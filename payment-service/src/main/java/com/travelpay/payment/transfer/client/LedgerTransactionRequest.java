@@ -10,8 +10,9 @@ import com.travelpay.payment.transfer.domain.Transfer;
  * 재전송도 저장된 송금 값으로 만들어 처음 요청과 같은 내용을 보냅니다.
  * 송금인 지갑 DEBIT(TRANSFER_OUT)과 수취인 지갑 CREDIT(TRANSFER_IN)을 한 거래로 보내 원장이 함께 반영하거나 함께 거절합니다.
  * memo는 원장 description에 보내지 않습니다.
- * 미확정(현재 ledger-service 코드 기준, 원장 연동 시 재확인): 사용자 계정을 walletId + currency로 지정하는 방식,
- * entryType 값(TRANSFER_OUT·TRANSFER_IN, 원장 DB CHECK 미추가), userId 전송 여부.
+ * 사용자 계정은 walletId + currency로 지정합니다. userId는 거래를 발생시킨 사용자 기록용 선택값으로 송금인 ID를 보내며,
+ * 원장은 계정 조회에 사용하지 않습니다(원장 담당자 확인, 2026-11-02).
+ * 미확정: entryType 값(TRANSFER_OUT·TRANSFER_IN, 원장 DB CHECK 미추가).
  */
 public record LedgerTransactionRequest(
         String referenceType,
