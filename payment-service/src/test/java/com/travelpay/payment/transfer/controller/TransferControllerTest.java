@@ -93,6 +93,16 @@ class TransferControllerTest {
                 .andExpect(jsonPath("$.data.status").value("PROCESSING"));
     }
 
+    /** 자동 처리를 멈춘 송금(MANUAL_REVIEW)도 결과가 확정되지 않았으므로 202입니다. */
+    @Test
+    void returnsAcceptedWhenTransferIsUnderManualReview() throws Exception {
+        givenTransferResult(TransferStatus.MANUAL_REVIEW);
+
+        postTransfer()
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("MANUAL_REVIEW"));
+    }
+
     @Test
     void returnsUnprocessableEntityForInsufficientBalance() throws Exception {
         when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
