@@ -10,6 +10,7 @@ import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -17,6 +18,7 @@ import java.util.UUID;
 public interface RefundJpaRepository extends JpaRepository<Refund, UUID> {
     Optional<Refund> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     List<Refund> findAllByPaymentIdOrderByCreatedAtAsc(UUID paymentId);
+    List<Refund> findAllByPaymentIdIn(Collection<UUID> paymentIds);
     List<Refund> findByStatusAndUpdatedAtBefore(RefundStatus status, Instant before, Pageable pageable);
 
     @Transactional

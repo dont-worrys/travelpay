@@ -13,6 +13,7 @@ public interface PaymentRepository {
     Optional<Payment> findById(UUID paymentId);
     Optional<Payment> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     Page<Payment> findPageByUserId(UUID userId, PaymentStatus status, Pageable pageable);
+    Page<Payment> findPageByMerchantId(UUID merchantId, PaymentStatus status, Pageable pageable);
     List<Payment> findStalePending(Instant before, int limit);
     void deferPendingRetry(UUID paymentId, Instant retriedAt);
     long countPendingCreatedBefore(Instant before);

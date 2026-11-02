@@ -9,6 +9,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -32,6 +33,14 @@ public class RefundRepositoryImpl implements RefundRepository {
     @Override
     public List<Refund> findAllByPaymentId(UUID paymentId) {
         return refundJpaRepository.findAllByPaymentIdOrderByCreatedAtAsc(paymentId);
+    }
+
+    @Override
+    public List<Refund> findAllByPaymentIdIn(Collection<UUID> paymentIds) {
+        if (paymentIds.isEmpty()) {
+            return List.of();
+        }
+        return refundJpaRepository.findAllByPaymentIdIn(paymentIds);
     }
 
     @Override

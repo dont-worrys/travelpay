@@ -1,5 +1,7 @@
 package com.travelpay.payment.application.payment;
 
+import com.travelpay.common.auth.AuthRole;
+import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.util.PageableUtils;
@@ -9,6 +11,7 @@ import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
 import com.travelpay.payment.application.payment.client.ledger.LedgerTransactionCommand;
 import com.travelpay.payment.application.payment.client.wallet.Wallet;
 import com.travelpay.payment.application.payment.client.wallet.WalletClient;
+import com.travelpay.payment.application.payment.dto.MerchantPaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
@@ -30,8 +33,10 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -39,6 +44,7 @@ import java.util.*;
 public class PaymentService {
 
     private static final int MAX_CONSECUTIVE_UNKNOWN = 3;
+    private static final Duration REFUND_PERIOD = Duration.ofDays(3);
 
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
@@ -128,19 +134,56 @@ public class PaymentService {
                 .map(PaymentListResult::from);
     }
 
+    // 가맹점 결제 목록 (가맹점 주인 또는 MASTER). 한 페이지 결제들의 완료된 환불 합계를 함께 담는다
+    public Page<MerchantPaymentListResult> getMerchantPayments(AuthenticatedUser user, UUID merchantId,
+                                                              PaymentStatus status, int page, int size) {
+        validateMerchantAccess(user, merchantId);
+        if (page < 0 || size < 1) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        Pageable pageable = PageableUtils.toStablePageable(
+                PageRequest.of(page, size, LIST_SORT), LIST_SORT_FIELDS, "id", MAX_PAGE_SIZE);
+
+        Page<Payment> payments = paymentRepository.findPageByMerchantId(merchantId, status, pageable);
+        Map<UUID, Long> refunded = refundRepository.findAllByPaymentIdIn(
+                        payments.map(Payment::getId).getContent()).stream()
+                .filter(refund -> refund.getStatus() == RefundStatus.COMPLETED)
+                .collect(Collectors.groupingBy(Refund::getPaymentId, Collectors.summingLong(Refund::getAmount)));
+
+        return payments.map(payment ->
+                MerchantPaymentListResult.from(payment, refunded.getOrDefault(payment.getId(), 0L)));
+    }
+
+    // 가맹점 결제 단건 (가맹점 주인 또는 MASTER). 다른 가맹점의 결제면 404
+    public PaymentResult getMerchantPayment(AuthenticatedUser user, UUID merchantId, UUID paymentId) {
+        validateMerchantAccess(user, merchantId);
+        Payment payment = paymentRepository.findById(paymentId)
+                .filter(found -> found.getMerchantId().equals(merchantId))
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+        return toResult(payment);
+    }
+
     public PaymentResult getPayment(UUID userId, UUID paymentId) {
         return toResult(findOwnPayment(userId, paymentId));
     }
 
     public PaymentResult refundRequest(RefundCommand command) {
-        // 유저의 결제 정보 확인
-        Payment payment = findOwnPayment(command.userId(), command.paymentId());
+        // 환불할 결제 확인 (가맹점 주인 또는 MASTER)
+        Payment payment = findRefundablePayment(command);
 
         // 환불 요청 기록 중복 확인
         Optional<Refund> existing = refundRepository.findByUserIdAndIdempotencyKey(
                 command.userId(), command.idempotencyKey());
         if (existing.isPresent()) {
-            return replayRefund(existing.get(), payment);
+            return replayRefund(existing.get(), payment, command.amount());
+        }
+
+        // 결제 승인 후 환불 기간이 지났으면 환불 불가
+        payment.validateRefundable();
+        Instant approvedAt = paymentHistoryRepository.findApprovedAt(payment.getId())
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.NOT_REFUNDABLE));
+        if (Instant.now().isAfter(approvedAt.plus(REFUND_PERIOD))) {
+            throw new BusinessException(PaymentErrorCode.REFUND_PERIOD_EXPIRED);
         }
 
         // 환불 요청 REFUND_PENDING 상태 저장
@@ -148,13 +191,13 @@ public class PaymentService {
         try {
             started = transactionOperations.execute(status -> startRefund(command));
         } catch (OptimisticLockingFailureException e) {
-            findOwnPayment(command.userId(), command.paymentId()).validateRefundable();
+            findRefundablePayment(command).validateRefundable();
             throw new BusinessException(CommonErrorCode.CONFLICT);
         } catch (DataIntegrityViolationException e) {
             Refund existingRefund = refundRepository.findByUserIdAndIdempotencyKey(
                             command.userId(), command.idempotencyKey())
                     .orElseThrow(() -> e);
-            return replayRefund(existingRefund, findOwnPayment(command.userId(), command.paymentId()));
+            return replayRefund(existingRefund, findRefundablePayment(command), command.amount());
         }
 
         // 원장에 환불 요청 전송, 환불 요청 승인·거절 결과 저장, 모르면 REFUND_PENDING 유지
@@ -317,8 +360,8 @@ public class PaymentService {
         return toResult(payment);
     }
 
-    private PaymentResult replayRefund(Refund existing, Payment payment) {
-        if (!existing.isSameRequest(payment.getId())) {
+    private PaymentResult replayRefund(Refund existing, Payment payment, Long amount) {
+        if (!existing.isSameRequest(payment.getId(), amount)) {
             throw new BusinessException(PaymentErrorCode.REFUND_IDEMPOTENCY_KEY_REUSED);
         }
         // 결과를 모른 채 남은 환불은 원장에 다시 물어 확정, 원장은 같은 환불 ID로 중복 처리하지 않아야 함
@@ -332,12 +375,23 @@ public class PaymentService {
     }
 
     private RefundProgress startRefund(RefundCommand command) {
-        Payment payment = findOwnPayment(command.userId(), command.paymentId());
-        PaymentHistory history = payment.refundRequestedHistory(command.reason());
+        Payment payment = findRefundablePayment(command);
+        PaymentActor actor = command.role() == AuthRole.MASTER ? PaymentActor.MASTER : PaymentActor.USER;
+        PaymentHistory history = payment.refundRequestedHistory(command.reason(), actor);
+
+        // 남은 금액 = 결제 금액 - (완료된 환불 + 결과를 모르는 환불), 트랜잭션 안에서 다시 읽은 결제 기준
+        long refunded = refundRepository.findAllByPaymentId(payment.getId()).stream()
+                .filter(r -> r.getStatus() == RefundStatus.COMPLETED || r.getStatus() == RefundStatus.REQUESTED)
+                .mapToLong(Refund::getAmount)
+                .sum();
+        if (command.amount() > payment.getAmount() - refunded) {
+            throw new BusinessException(PaymentErrorCode.REFUND_AMOUNT_EXCEEDED);
+        }
+
         Payment savedPayment = paymentRepository.save(payment);
         Refund refund = refundRepository.save(Refund.request(
                 savedPayment.getId(), command.userId(), command.idempotencyKey(),
-                savedPayment.getAmount(), savedPayment.getCurrency(), command.reason()));
+                command.amount(), savedPayment.getCurrency(), command.reason()));
         paymentHistoryRepository.save(history);
         return new RefundProgress(savedPayment, refund);
     }
@@ -346,7 +400,11 @@ public class PaymentService {
         PaymentHistory history;
         if (ledgerResult.status() == LedgerResult.Status.APPROVED) {
             refund.complete(ledgerResult.transactionId());
-            history = payment.refundedHistory();
+            long completed = refundRepository.findAllByPaymentId(payment.getId()).stream()
+                    .filter(r -> r.getStatus() == RefundStatus.COMPLETED && !r.getId().equals(refund.getId()))
+                    .mapToLong(Refund::getAmount)
+                    .sum() + refund.getAmount();
+            history = payment.refundCompletedHistory(refund.getAmount(), payment.getAmount() - completed);
         } else {
             refund.decline(ledgerResult.declineReason());
             history = payment.refundDeclinedHistory(ledgerResult.declineReason());
@@ -367,6 +425,25 @@ public class PaymentService {
     private Payment findOwnPayment(UUID userId, UUID paymentId) {
         return paymentRepository.findById(paymentId)
                 .filter(found -> found.isOwnedBy(userId))
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+    }
+
+    // 가맹점이 없거나 주인·MASTER가 아니면 404 (가맹점 잔액 조회와 같은 규칙)
+    private void validateMerchantAccess(AuthenticatedUser user, UUID merchantId) {
+        Merchant merchant = merchantRepository.findById(merchantId)
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.MERCHANT_NOT_FOUND));
+        if (user.role() != AuthRole.MASTER && !merchant.getOwnerUserId().equals(user.userId())) {
+            throw new BusinessException(PaymentErrorCode.MERCHANT_NOT_FOUND);
+        }
+    }
+
+    // 환불은 결제한 가맹점의 주인 또는 MASTER만 가능, 아니면 결제가 없는 것처럼 404
+    private Payment findRefundablePayment(RefundCommand command) {
+        return paymentRepository.findById(command.paymentId())
+                .filter(payment -> command.role() == AuthRole.MASTER
+                        || merchantRepository.findById(payment.getMerchantId())
+                        .map(merchant -> merchant.getOwnerUserId().equals(command.userId()))
+                        .orElse(false))
                 .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
     }
 

@@ -19,6 +19,8 @@ public interface PaymentJpaRepository extends JpaRepository<Payment, UUID> {
     Optional<Payment> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     Page<Payment> findByUserId(UUID userId, Pageable pageable);
     Page<Payment> findByUserIdAndStatus(UUID userId, PaymentStatus status, Pageable pageable);
+    Page<Payment> findByMerchantId(UUID merchantId, Pageable pageable);
+    Page<Payment> findByMerchantIdAndStatus(UUID merchantId, PaymentStatus status, Pageable pageable);
     List<Payment> findByStatusAndUpdatedAtBefore(PaymentStatus status, Instant before, Pageable pageable);
 
     @Transactional
