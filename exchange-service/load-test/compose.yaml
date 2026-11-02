@@ -41,3 +41,5 @@ services:
       BASE_URL: ${BASE_URL:-http://host.docker.internal:18084}
     volumes:
       - ./:/scripts:ro
+      # 측정 결과 JSON을 남기는 곳 (results/는 커밋하지 않음)
+      - ./results:/results
