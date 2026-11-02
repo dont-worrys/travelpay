@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.travelpay.common.response.ApiResponse;
 import com.travelpay.exchange.domain.ledger.LedgerDirection;
 import com.travelpay.exchange.domain.ledger.LedgerEntry;
 import com.travelpay.exchange.domain.ledger.LedgerEntryType;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -49,22 +51,37 @@ class LedgerClientAdapterTest {
     private final LedgerFeignClient feignClient = mock(LedgerFeignClient.class);
     private final LedgerClientAdapter adapter = new LedgerClientAdapter(feignClient);
 
+    /** 원장 서비스의 성공 응답 JSON이 공통 ApiResponse와 data record로 해석되는지 확인합니다. Feign도 Jackson으로 같은 타입을 만듭니다. */
+    @Test
+    void readsLedgerJsonIntoCommonApiResponse() {
+        ApiResponse<LedgerTransactionResponse> response = JsonMapper.builder().build().readValue("""
+                {"success":true,"data":{"transactionId":"%s","status":"POSTED"},"error":null}
+                """.formatted(TX_ID), new TypeReference<ApiResponse<LedgerTransactionResponse>>() {
+        });
+
+        assertEquals(ApiResponse.success(new LedgerTransactionResponse(TX_ID, "POSTED")), response);
+    }
+
     @Test
     void postedWithTransactionId() {
-        when(feignClient.register(any())).thenReturn(new LedgerTransactionResponse(true,
-                new LedgerTransactionResponse.Data(TX_ID, "POSTED"), null));
+        when(feignClient.register(any()))
+                .thenReturn(ApiResponse.success(new LedgerTransactionResponse(TX_ID, "POSTED")));
 
         assertEquals(new LedgerPostResult.Posted(TX_ID), adapter.post(POSTING));
     }
 
+    /** 본문은 읽었는데 내용이 계약과 다르면 다시 보내도 같은 응답이라 사람 확인(Invalid)이다 */
     @Test
     void successWithoutPostedTransactionIsMalformed() {
-        when(feignClient.register(any())).thenReturn(new LedgerTransactionResponse(true,
-                new LedgerTransactionResponse.Data(null, "POSTED"), null));
+        when(feignClient.register(any()))
+                .thenReturn(ApiResponse.success(new LedgerTransactionResponse(null, "POSTED")));
         assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
 
-        when(feignClient.register(any())).thenReturn(new LedgerTransactionResponse(true,
-                new LedgerTransactionResponse.Data(TX_ID, "REJECTED"), null));
+        when(feignClient.register(any()))
+                .thenReturn(ApiResponse.success(new LedgerTransactionResponse(TX_ID, "REJECTED")));
+        assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
+
+        when(feignClient.register(any())).thenReturn(ApiResponse.success(null));
         assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
     }
 
@@ -109,11 +126,47 @@ class LedgerClientAdapterTest {
         assertEquals(new LedgerPostResult.Unknown("RetryableException"), adapter.post(POSTING));
     }
 
-    @Test
-    void unreadableSuccessBodyIsMalformed() {
-        when(feignClient.register(any())).thenThrow(new DecodeException(201, "bad json", REQUEST));
+    /** 따라가지 않은 리다이렉트는 원장 거래 등록까지 가지 못한 설정 오류라, 다시 보내도 같아 사람 확인이다 */
+    @ParameterizedTest
+    @ValueSource(ints = {301, 302, 307})
+    void unfollowedRedirectIsMalformed(int status) {
+        when(feignClient.register(any())).thenThrow(error(status, ""));
 
         assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
+    }
+
+    /** Retry-After가 있는 3xx는 Feign이 RetryableException으로 주므로 다시 확인한다 */
+    @Test
+    void retryableRedirectIsUnknown() {
+        when(feignClient.register(any())).thenThrow(
+                new RetryableException(302, "redirect", Request.HttpMethod.POST, (Long) null, REQUEST));
+
+        assertEquals(new LedgerPostResult.Unknown("HTTP 302"), adapter.post(POSTING));
+    }
+
+    /** Retry-After가 있는 429는 "지금은 처리하지 않았으니 나중에 다시 보내라"는 뜻이라 다시 확인한다 */
+    @Test
+    void retryableTooManyRequestsIsUnknown() {
+        when(feignClient.register(any())).thenThrow(
+                new RetryableException(429, "too many requests", Request.HttpMethod.POST, (Long) null, REQUEST));
+
+        assertEquals(new LedgerPostResult.Unknown("HTTP 429"), adapter.post(POSTING));
+    }
+
+    /** 재시도 신호가 없는 429는 다른 4xx처럼 사람 확인이다 */
+    @Test
+    void tooManyRequestsWithoutRetrySignalIsMalformed() {
+        when(feignClient.register(any())).thenThrow(error(429, ""));
+
+        assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
+    }
+
+    /** 2xx인데 본문을 해석하지 못하면 원장은 이미 기록했을 수 있다. 같은 요청을 다시 보내 결과를 확인하도록 Unknown이다 */
+    @Test
+    void unreadableSuccessBodyIsUnknown() {
+        when(feignClient.register(any())).thenThrow(new DecodeException(201, "bad json", REQUEST));
+
+        assertEquals(new LedgerPostResult.Unknown("응답 본문 해석 실패(HTTP 201)"), adapter.post(POSTING));
     }
 
     @Test
