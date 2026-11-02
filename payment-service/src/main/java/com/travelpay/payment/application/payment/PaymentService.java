@@ -14,6 +14,10 @@ import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
 import com.travelpay.payment.application.payment.dto.RefundResult;
+import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
+import com.travelpay.payment.domain.merchant.Merchant;
+import com.travelpay.payment.domain.merchant.MerchantRepository;
+import com.travelpay.payment.domain.merchant.MerchantStatus;
 import com.travelpay.payment.domain.payment.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,10 +31,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.time.Instant;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 
 @Slf4j
 @Service
@@ -39,7 +40,6 @@ public class PaymentService {
 
     private static final int MAX_CONSECUTIVE_UNKNOWN = 3;
 
-    private static final String LEDGER_REFUND_REFERENCE_TYPE = "PAYMENT_REFUND";
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
     private static final Set<String> LIST_SORT_FIELDS = Set.of("createdAt", "id");
@@ -65,7 +65,7 @@ public class PaymentService {
         Merchant merchant = merchantRepository.findById(command.merchantId())
                 .orElseThrow(() -> new BusinessException(PaymentErrorCode.MERCHANT_NOT_FOUND));
 
-        if (merchant.getStatus() != MerchantStatus.ACTIVE) {
+        if (merchant.getStatus() != MerchantStatus.ACTIVE || merchant.getLedgerWalletId() == null) {
             throw new BusinessException(PaymentErrorCode.MERCHANT_NOT_ACTIVE);
         }
 
@@ -108,10 +108,10 @@ public class PaymentService {
         }
 
         // 거래 원장에 요청 전달, 결제 요청 승인·거절 결과 저장, 모르면 PENDING 유지
-        Payment settledPayment = settlePayment(savedPayment);
+        Payment settledPayment = settlePayment(Objects.requireNonNull(savedPayment));
 
         if (settledPayment.getStatus() == PaymentStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.DECLINED, settledPayment.getDeclineReason());
         }
 
         return PaymentResult.from(settledPayment);
@@ -158,10 +158,10 @@ public class PaymentService {
         }
 
         // 원장에 환불 요청 전송, 환불 요청 승인·거절 결과 저장, 모르면 REFUND_PENDING 유지
-        RefundProgress settled = settleRefund(started.payment(), started.refund());
+        RefundProgress settled = settleRefund(Objects.requireNonNull(started).payment(), started.refund());
 
         if (settled.refund().getStatus() == RefundStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.REFUND_DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.REFUND_DECLINED, settled.refund().getDeclineReason());
         }
         return toResult(settled.payment());
     }
@@ -170,13 +170,7 @@ public class PaymentService {
     public void settleStalePayments(Instant before, int limit) {
         int consecutiveUnknown = 0;
         for (Payment payment : paymentRepository.findStalePending(before, limit)) {
-            try {
-                Payment settled = settlePayment(payment);
-                consecutiveUnknown = settled.getStatus() == PaymentStatus.PENDING ? consecutiveUnknown + 1 : 0;
-            } catch (RuntimeException e) {
-                consecutiveUnknown++;
-                log.warn("처리 중 결제 복구 실패 paymentId={}", payment.getId(), e);
-            }
+            consecutiveUnknown = settleStalePayment(payment) ? 0 : consecutiveUnknown + 1;
             if (consecutiveUnknown >= MAX_CONSECUTIVE_UNKNOWN) {
                 log.warn("원장 응답 불가로 결제 복구를 다음 주기로 미룹니다.");
                 return;
@@ -188,15 +182,7 @@ public class PaymentService {
     public void settleStaleRefunds(Instant before, int limit) {
         int consecutiveUnknown = 0;
         for (Refund refund : refundRepository.findStaleRequested(before, limit)) {
-            try {
-                Payment payment = paymentRepository.findById(refund.getPaymentId())
-                        .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
-                RefundProgress settled = settleRefund(payment, refund);
-                consecutiveUnknown = settled.refund().getStatus() == RefundStatus.REQUESTED ? consecutiveUnknown + 1 : 0;
-            } catch (RuntimeException e) {
-                consecutiveUnknown++;
-                log.warn("처리 중 환불 복구 실패 refundId={}", refund.getId(), e);
-            }
+            consecutiveUnknown = settleStaleRefund(refund) ? 0 : consecutiveUnknown + 1;
             if (consecutiveUnknown >= MAX_CONSECUTIVE_UNKNOWN) {
                 log.warn("원장 응답 불가로 환불 복구를 다음 주기로 미룹니다.");
                 return;
@@ -204,17 +190,61 @@ public class PaymentService {
         }
     }
 
+    public StuckSettlementResult findStuckSettlements(Instant createdBefore, int sampleSize) {
+        return new StuckSettlementResult(
+                paymentRepository.countPendingCreatedBefore(createdBefore),
+                paymentRepository.findPendingIdsCreatedBefore(createdBefore, sampleSize),
+                refundRepository.countRequestedCreatedBefore(createdBefore),
+                refundRepository.findRequestedIdsCreatedBefore(createdBefore, sampleSize));
+    }
+
 //    ---------------------------- Helper Method ----------------------------
+
+    private boolean settleStalePayment(Payment payment) {
+        try {
+            if (settlePayment(payment).getStatus() != PaymentStatus.PENDING) {
+                return true;
+            }
+        } catch (RuntimeException e) {
+            log.warn("처리 중 결제 복구 실패 paymentId={}", payment.getId(), e);
+        }
+
+        try {
+            paymentRepository.deferPendingRetry(payment.getId(), Instant.now());
+        } catch (RuntimeException e) {
+            log.warn("결제 재시도 순서 갱신 실패 paymentId={}", payment.getId(), e);
+        }
+        return false;
+    }
+
+    private boolean settleStaleRefund(Refund refund) {
+        try {
+            Payment payment = paymentRepository.findById(refund.getPaymentId())
+                    .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+            if (settleRefund(payment, refund).refund().getStatus() != RefundStatus.REQUESTED) {
+                return true;
+            }
+        } catch (RuntimeException e) {
+            log.warn("처리 중 환불 복구 실패 refundId={}", refund.getId(), e);
+        }
+
+        try {
+            refundRepository.deferRequestedRetry(refund.getId(), Instant.now());
+        } catch (RuntimeException e) {
+            log.warn("환불 재시도 순서 갱신 실패 refundId={}", refund.getId(), e);
+        }
+        return false;
+    }
 
     // PENDING 결제를 원장 결과로 확정, 결과를 모르면 PENDING인 결제를 그대로 반환
     private Payment settlePayment(Payment payment) {
         LedgerResult ledgerResult = ledgerClient.createTransaction(new LedgerTransactionCommand(
-                payment.getUserWalletId(),
-                payment.getCurrency(),
-                payment.getAmount(),
-                "PAYMENT",
                 payment.getId(),
-                payment.getMerchantId()));
+                payment.getUserId(),
+                payment.getUserWalletId(),
+                findMerchantWalletId(payment.getMerchantId()),
+                payment.getCurrency(),
+                payment.getAmount()));
 
         if (ledgerResult.status() == LedgerResult.Status.UNKNOWN) {
             return payment;
@@ -239,11 +269,13 @@ public class PaymentService {
     // 환불 요청(REQUESTED)을 원장 결과로 확정, 결과를 모르면 결제와 환불을 그대로 반환
     private RefundProgress settleRefund(Payment payment, Refund refund) {
         LedgerResult ledgerResult = ledgerClient.refundTransaction(new LedgerRefundCommand(
+                refund.getId(),
                 payment.getLedgerId(),
+                payment.getUserId(),
+                payment.getUserWalletId(),
+                findMerchantWalletId(payment.getMerchantId()),
                 refund.getCurrency(),
-                refund.getAmount(),
-                LEDGER_REFUND_REFERENCE_TYPE,
-                refund.getId()));
+                refund.getAmount()));
 
         if (ledgerResult.status() == LedgerResult.Status.UNKNOWN) {
             return new RefundProgress(payment, refund);
@@ -264,6 +296,13 @@ public class PaymentService {
         }
     }
 
+    // 결제 시 ledgerWalletId가 있는 가맹점만 통과하므로, 없으면 데이터 이상
+    private UUID findMerchantWalletId(UUID merchantId) {
+        return merchantRepository.findById(merchantId)
+                .map(Merchant::getLedgerWalletId)
+                .orElseThrow(() -> new IllegalStateException("가맹점 원장 지갑을 찾을 수 없습니다. merchantId=" + merchantId));
+    }
+
     private PaymentResult replayPayment(Payment existingPayment, PaymentCommand command) {
         if (!existingPayment.isSameRequest(command.merchantId(), command.currency(), command.amount())) {
             throw new BusinessException(PaymentErrorCode.IDEMPOTENCY_KEY_REUSED);
@@ -273,7 +312,7 @@ public class PaymentService {
                 ? settlePayment(existingPayment)
                 : existingPayment;
         if (payment.getStatus() == PaymentStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.DECLINED, payment.getDeclineReason());
         }
         return toResult(payment);
     }
@@ -287,7 +326,7 @@ public class PaymentService {
                 ? settleRefund(payment, existing)
                 : new RefundProgress(payment, existing);
         if (progress.refund().getStatus() == RefundStatus.DECLINED) {
-            throw new BusinessException(PaymentErrorCode.REFUND_DECLINED);
+            throw new PaymentDeclinedException(PaymentErrorCode.REFUND_DECLINED, progress.refund().getDeclineReason());
         }
         return toResult(progress.payment());
     }
