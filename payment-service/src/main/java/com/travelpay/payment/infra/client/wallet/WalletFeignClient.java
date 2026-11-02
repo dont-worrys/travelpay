@@ -1,17 +1,14 @@
 package com.travelpay.payment.infra.client.wallet;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.feign.FeignErrors;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.payment.application.payment.client.wallet.Wallet;
 import com.travelpay.payment.application.payment.client.wallet.WalletClient;
 import feign.FeignException;
-import feign.RetryableException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import tools.jackson.core.JacksonException;
-import tools.jackson.databind.json.JsonMapper;
 
 import java.util.Optional;
 import java.util.UUID;
@@ -23,22 +20,18 @@ public class WalletFeignClient implements WalletClient {
     private static final String WALLET_NOT_FOUND = "WALLET_NOT_FOUND";
 
     private final WalletFeignApi walletFeignApi;
-    private final JsonMapper jsonMapper;
 
     @Override
     public Optional<Wallet> findWallet(UUID userId) {
         ApiResponse<WalletFeignApi.WalletResponse> response;
         try {
             response = walletFeignApi.getWallet(userId);
-        } catch (FeignException.NotFound exception) {
-            if (isWalletNotFound(exception)) {
+        } catch (FeignException exception) {
+            // 경로 오류 등으로 생기는 다른 404는 지갑 없음이 아니므로 WALLET_NOT_FOUND일 때만 empty로 본다
+            if (FeignErrors.hasErrorCode(exception, WALLET_NOT_FOUND)) {
                 return Optional.empty();
             }
-            throw new BusinessException(CommonErrorCode.BAD_GATEWAY, exception);
-        } catch (RetryableException | FeignException.ServiceUnavailable exception) {
-            throw new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE, exception);
-        } catch (FeignException exception) {
-            throw new BusinessException(CommonErrorCode.BAD_GATEWAY, exception);
+            throw FeignErrors.toCommonException(exception);
         }
 
         if (response == null || !response.success() || response.data() == null
@@ -46,22 +39,5 @@ public class WalletFeignClient implements WalletClient {
             throw new BusinessException(CommonErrorCode.BAD_GATEWAY);
         }
         return Optional.of(new Wallet(response.data().walletId(), response.data().status()));
-    }
-
-    private boolean isWalletNotFound(FeignException exception) {
-        try {
-            ErrorBody body = jsonMapper.readValue(exception.contentUTF8(), ErrorBody.class);
-            return body != null && body.error() != null && WALLET_NOT_FOUND.equals(body.error().code());
-        } catch (JacksonException | IllegalArgumentException ignored) {
-            return false;
-        }
-    }
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    record ErrorBody(ErrorCodeBody error) {
-    }
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    record ErrorCodeBody(String code) {
     }
 }

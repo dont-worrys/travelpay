@@ -15,6 +15,9 @@ import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
 import com.travelpay.payment.application.payment.dto.RefundResult;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
+import com.travelpay.payment.domain.merchant.Merchant;
+import com.travelpay.payment.domain.merchant.MerchantRepository;
+import com.travelpay.payment.domain.merchant.MerchantStatus;
 import com.travelpay.payment.domain.payment.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,10 +31,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionOperations;
 
 import java.time.Instant;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 
 @Slf4j
 @Service
@@ -40,7 +40,6 @@ public class PaymentService {
 
     private static final int MAX_CONSECUTIVE_UNKNOWN = 3;
 
-    private static final String LEDGER_REFUND_REFERENCE_TYPE = "PAYMENT_REFUND";
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
     private static final Set<String> LIST_SORT_FIELDS = Set.of("createdAt", "id");
@@ -66,7 +65,7 @@ public class PaymentService {
         Merchant merchant = merchantRepository.findById(command.merchantId())
                 .orElseThrow(() -> new BusinessException(PaymentErrorCode.MERCHANT_NOT_FOUND));
 
-        if (merchant.getStatus() != MerchantStatus.ACTIVE) {
+        if (merchant.getStatus() != MerchantStatus.ACTIVE || merchant.getLedgerWalletId() == null) {
             throw new BusinessException(PaymentErrorCode.MERCHANT_NOT_ACTIVE);
         }
 
@@ -109,7 +108,7 @@ public class PaymentService {
         }
 
         // 거래 원장에 요청 전달, 결제 요청 승인·거절 결과 저장, 모르면 PENDING 유지
-        Payment settledPayment = settlePayment(savedPayment);
+        Payment settledPayment = settlePayment(Objects.requireNonNull(savedPayment));
 
         if (settledPayment.getStatus() == PaymentStatus.DECLINED) {
             throw new PaymentDeclinedException(PaymentErrorCode.DECLINED, settledPayment.getDeclineReason());
@@ -159,7 +158,7 @@ public class PaymentService {
         }
 
         // 원장에 환불 요청 전송, 환불 요청 승인·거절 결과 저장, 모르면 REFUND_PENDING 유지
-        RefundProgress settled = settleRefund(started.payment(), started.refund());
+        RefundProgress settled = settleRefund(Objects.requireNonNull(started).payment(), started.refund());
 
         if (settled.refund().getStatus() == RefundStatus.DECLINED) {
             throw new PaymentDeclinedException(PaymentErrorCode.REFUND_DECLINED, settled.refund().getDeclineReason());
@@ -240,12 +239,12 @@ public class PaymentService {
     // PENDING 결제를 원장 결과로 확정, 결과를 모르면 PENDING인 결제를 그대로 반환
     private Payment settlePayment(Payment payment) {
         LedgerResult ledgerResult = ledgerClient.createTransaction(new LedgerTransactionCommand(
-                payment.getUserWalletId(),
-                payment.getCurrency(),
-                payment.getAmount(),
-                "PAYMENT",
                 payment.getId(),
-                payment.getMerchantId()));
+                payment.getUserId(),
+                payment.getUserWalletId(),
+                findMerchantWalletId(payment.getMerchantId()),
+                payment.getCurrency(),
+                payment.getAmount()));
 
         if (ledgerResult.status() == LedgerResult.Status.UNKNOWN) {
             return payment;
@@ -270,11 +269,13 @@ public class PaymentService {
     // 환불 요청(REQUESTED)을 원장 결과로 확정, 결과를 모르면 결제와 환불을 그대로 반환
     private RefundProgress settleRefund(Payment payment, Refund refund) {
         LedgerResult ledgerResult = ledgerClient.refundTransaction(new LedgerRefundCommand(
+                refund.getId(),
                 payment.getLedgerId(),
+                payment.getUserId(),
+                payment.getUserWalletId(),
+                findMerchantWalletId(payment.getMerchantId()),
                 refund.getCurrency(),
-                refund.getAmount(),
-                LEDGER_REFUND_REFERENCE_TYPE,
-                refund.getId()));
+                refund.getAmount()));
 
         if (ledgerResult.status() == LedgerResult.Status.UNKNOWN) {
             return new RefundProgress(payment, refund);
@@ -293,6 +294,13 @@ public class PaymentService {
                     .orElseThrow(() -> new IllegalStateException("확정된 환불을 다시 찾을 수 없습니다."));
             return new RefundProgress(latestPayment, latestRefund);
         }
+    }
+
+    // 결제 시 ledgerWalletId가 있는 가맹점만 통과하므로, 없으면 데이터 이상
+    private UUID findMerchantWalletId(UUID merchantId) {
+        return merchantRepository.findById(merchantId)
+                .map(Merchant::getLedgerWalletId)
+                .orElseThrow(() -> new IllegalStateException("가맹점 원장 지갑을 찾을 수 없습니다. merchantId=" + merchantId));
     }
 
     private PaymentResult replayPayment(Payment existingPayment, PaymentCommand command) {

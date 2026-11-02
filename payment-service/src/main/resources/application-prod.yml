@@ -25,6 +25,12 @@ spring:
           paymentWalletApi:
             connect-timeout: 2000
             read-timeout: 3000
+          paymentLedgerApi:
+            connect-timeout: 1000
+            read-timeout: 6000
+          paymentUserApi:
+            connect-timeout: 2000
+            read-timeout: 3000
 
 travelpay:
   auth:

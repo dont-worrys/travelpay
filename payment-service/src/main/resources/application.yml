@@ -25,8 +25,21 @@ spring:
           paymentWalletApi:
             connect-timeout: 2000
             read-timeout: 3000
+          paymentLedgerApi:
+            connect-timeout: 1000
+            read-timeout: 6000
+          paymentUserApi:
+            connect-timeout: 2000
+            read-timeout: 3000
 
 travelpay:
+  client:
+    ledger:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
+      url: ${LEDGER_SERVICE_URL:}
+    user:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 user-service를 찾는다
+      url: ${USER_SERVICE_URL:}
   auth:
     header-context:
       enabled: true

@@ -12,12 +12,11 @@ import com.travelpay.payment.application.payment.client.wallet.Wallet;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
-import feign.RetryableException;
+import com.travelpay.payment.support.FeignFailures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import tools.jackson.databind.json.JsonMapper;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,7 +39,7 @@ class WalletFeignClientTest {
     @BeforeEach
     void setUp() {
         walletFeignApi = mock(WalletFeignApi.class);
-        walletClient = new WalletFeignClient(walletFeignApi, JsonMapper.builder().build());
+        walletClient = new WalletFeignClient(walletFeignApi);
     }
 
     @ParameterizedTest
@@ -77,12 +76,32 @@ class WalletFeignClientTest {
 
     @Test
     void reportsConnectionProblemsAsServiceUnavailable() {
-        when(walletFeignApi.getWallet(USER_ID)).thenThrow(mock(RetryableException.class));
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(FeignFailures.connectionRefused());
 
         var exception = assertThrows(BusinessException.class,
                 () -> walletClient.findWallet(USER_ID));
 
         assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
+    }
+
+    @Test
+    void reportsTimeoutAsGatewayTimeout() {
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(FeignFailures.readTimeout());
+
+        var exception = assertThrows(BusinessException.class,
+                () -> walletClient.findWallet(USER_ID));
+
+        assertSame(CommonErrorCode.GATEWAY_TIMEOUT, exception.getErrorCode());
+    }
+
+    @Test
+    void reportsWalletGatewayTimeoutAsGatewayTimeout() {
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(feignError(504, null));
+
+        var exception = assertThrows(BusinessException.class,
+                () -> walletClient.findWallet(USER_ID));
+
+        assertSame(CommonErrorCode.GATEWAY_TIMEOUT, exception.getErrorCode());
     }
 
     @Test

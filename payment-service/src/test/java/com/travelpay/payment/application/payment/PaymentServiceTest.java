@@ -20,9 +20,9 @@ import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
 import com.travelpay.payment.domain.payment.CurrencyCode;
-import com.travelpay.payment.domain.payment.Merchant;
-import com.travelpay.payment.domain.payment.MerchantRepository;
-import com.travelpay.payment.domain.payment.MerchantStatus;
+import com.travelpay.payment.domain.merchant.Merchant;
+import com.travelpay.payment.domain.merchant.MerchantRepository;
+import com.travelpay.payment.domain.merchant.MerchantStatus;
 import com.travelpay.payment.domain.payment.Payment;
 import com.travelpay.payment.domain.payment.PaymentActor;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
@@ -73,6 +73,7 @@ class PaymentServiceTest {
     private static final UUID REFUND_TRANSACTION_ID = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
     private static final UUID OTHER_PAYMENT_ID = UUID.fromString("99999999-9999-9999-9999-999999999999");
     private static final UUID OLDER_PAYMENT_ID = UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd");
+    private static final UUID MERCHANT_WALLET_ID = UUID.fromString("77777777-7777-7777-7777-777777777777");
     private static final Instant CREATED_AT = Instant.parse("2026-10-29T00:12:34.567Z");
     private static final String KEY = "payment-key-1";
     private static final String REFUND_KEY = "refund-key-1";
@@ -100,6 +101,9 @@ class PaymentServiceTest {
 
         when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.empty());
         when(paymentRepository.save(any(Payment.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        // 원장 거래에 넣을 가맹점 원장 지갑. 가맹점 검증 테스트는 각자 다시 지정합니다.
+        givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
 
         // 환불 id는 저장 시 채워지므로 테스트에서는 저장할 때 넣고, 결제별 환불 목록으로 돌려줍니다.
         savedRefunds = new ArrayList<>();
@@ -150,11 +154,24 @@ class PaymentServiceTest {
         verify(ledgerClient).createTransaction(captor.capture());
         LedgerTransactionCommand sent = captor.getValue();
         // 재시도해도 같은 요청이 되도록 지갑 조회 결과가 아닌 결제에 저장된 지갑 ID를 보냅니다.
-        assertEquals(WALLET_ID, sent.debitAccountId());
+        assertEquals(WALLET_ID, sent.userWalletId());
+        assertEquals(MERCHANT_WALLET_ID, sent.merchantWalletId());
+        assertEquals(USER_ID, sent.userId());
         assertEquals(CurrencyCode.KRW, sent.currency());
         assertEquals(10_000L, sent.amount());
-        assertEquals("PAYMENT", sent.referenceType());
-        assertEquals(MERCHANT_ID, sent.merchantId());
+    }
+
+    @Test
+    void throwsWhenMerchantHasNoLedgerWallet() {
+        Merchant merchant = givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
+        when(merchant.getLedgerWalletId()).thenReturn(null);
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.paymentRequest(command(10_000L)));
+
+        assertEquals(PaymentErrorCode.MERCHANT_NOT_ACTIVE, exception.getErrorCode());
+        verify(paymentRepository, never()).save(any(Payment.class));
+        verifyNoInteractions(walletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
@@ -334,7 +351,7 @@ class PaymentServiceTest {
         List<PaymentHistory> histories = savedHistories(1);
         assertEquals(PaymentStatus.PENDING, histories.get(0).getPreviousStatus());
         assertEquals(PaymentStatus.APPROVED, histories.get(0).getCurrentStatus());
-        verifyNoInteractions(merchantRepository, walletClient);
+        verifyNoInteractions(walletClient);
     }
 
     @Test
@@ -426,13 +443,15 @@ class PaymentServiceTest {
                 CurrencyCode.KRW, amount);
     }
 
-    private void givenMerchant(MerchantStatus status, CurrencyCode currency) {
+    private Merchant givenMerchant(MerchantStatus status, CurrencyCode currency) {
         Merchant merchant = mock(Merchant.class);
         when(merchant.getId()).thenReturn(MERCHANT_ID);
         when(merchant.getName()).thenReturn("테스트 가맹점");
         when(merchant.getStatus()).thenReturn(status);
         when(merchant.getCurrency()).thenReturn(currency);
+        when(merchant.getLedgerWalletId()).thenReturn(MERCHANT_WALLET_ID);
         when(merchantRepository.findById(MERCHANT_ID)).thenReturn(Optional.of(merchant));
+        return merchant;
     }
 
     private void givenWallet() {
@@ -543,8 +562,10 @@ class PaymentServiceTest {
         verify(ledgerClient).refundTransaction(captor.capture());
         LedgerRefundCommand command = captor.getValue();
         assertEquals(LEDGER_TRANSACTION_ID, command.originalTransactionId());
-        assertEquals("PAYMENT_REFUND", command.referenceType());
         assertEquals(REFUND_ID, command.referenceId());
+        assertEquals(USER_ID, command.userId());
+        assertEquals(WALLET_ID, command.userWalletId());
+        assertEquals(MERCHANT_WALLET_ID, command.merchantWalletId());
         assertEquals(10_000L, command.amount());
         assertEquals(CurrencyCode.KRW, command.currency());
     }
