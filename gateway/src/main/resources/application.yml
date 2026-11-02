@@ -11,9 +11,85 @@ spring:
             enabled: true
           observability:
             enabled: true
+          globalcors:
+            add-to-simple-url-handler-mapping: true
+            cors-configurations:
+              '[/api/v1/**]':
+                # 프런트 로컬 포트가 정해지면 http://localhost:포트를 실행 환경 변수로 지정합니다.
+                allowed-origins: ${GATEWAY_CORS_ALLOWED_ORIGINS:}
+                allowed-methods: [GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE]
+                allowed-headers: [Accept, Content-Type, Csrf-Token, Idempotency-Key]
+                exposed-headers: [Request-Id, Location, Retry-After]
+                allow-credentials: true
+                max-age: 600
+          routes:
+            - id: user-service
+              uri: lb://user-service
+              predicates:
+                - Path=/api/v1/auth/**,/api/v1/terms/**,/api/v1/users/**
+            - id: wallet-service
+              uri: lb://wallet-service
+              predicates:
+                - Path=/api/v1/wallets/**,/api/v1/charges/**
+              filters:
+                # 업무 서비스는 Gateway가 붙인 회원 헤더만 쓰므로 세션 쿠키를 넘기지 않음
+                - RemoveRequestHeader=Cookie
+            - id: payment-service
+              uri: lb://payment-service
+              predicates:
+                - Path=/api/v1/payments/**,/api/v1/transfers/**
+              filters:
+                - RemoveRequestHeader=Cookie
+            - id: exchange-service
+              uri: lb://exchange-service
+              predicates:
+                - Path=/api/v1/exchange-rates/**,/api/v1/exchange-limits/**,/api/v1/exchange-quotes/**,/api/v1/exchanges/**
+              filters:
+                - RemoveRequestHeader=Cookie
+
+travelpay:
+  gateway:
+    session-verification:
+      # user-service의 세션 확인 API. 주소의 user-service는 Eureka에서 찾는 서비스 이름
+      uri: http://user-service/internal/v1/auth/session
+      # User 서버에 연결하기까지의 대기 상한입니다.
+      connect-timeout: ${GATEWAY_SESSION_VERIFICATION_CONNECT_TIMEOUT:2s}
+      # 응답을 읽을 때 다음 데이터가 오기까지의 대기 상한입니다.
+      response-timeout: ${GATEWAY_SESSION_VERIFICATION_RESPONSE_TIMEOUT:3s}
+      # 연결 전 대기부터 응답 본문 해석까지 포함한 전체 상한입니다. 초과하면 503을 반환합니다.
+      total-timeout: ${GATEWAY_SESSION_VERIFICATION_TOTAL_TIMEOUT:5s}
+    client-ip:
+      # 이 대역에서 온 연결만 CF-Connecting-IP(Cloudflare가 넣는 실제 IP)를 믿음. 출처: https://www.cloudflare.com/ips/ (2026-11-02 확인)
+      cloudflare-addresses:
+        - 173.245.48.0/20
+        - 103.21.244.0/22
+        - 103.22.200.0/22
+        - 103.31.4.0/22
+        - 141.101.64.0/18
+        - 108.162.192.0/18
+        - 190.93.240.0/20
+        - 188.114.96.0/20
+        - 197.234.240.0/22
+        - 198.41.128.0/17
+        - 162.158.0.0/15
+        - 104.16.0.0/13
+        - 104.24.0.0/14
+        - 172.64.0.0/13
+        - 131.0.72.0/22
+        - 2400:cb00::/32
+        - 2606:4700::/32
+        - 2803:f800::/32
+        - 2405:b500::/32
+        - 2405:8100::/32
+        - 2a06:98c0::/29
+        - 2c0f:f248::/32
+      # Cloudflare 요청만 받아 Gateway로 넘기는 우리 쪽 프록시(AWS ALB 서브넷, cloudflared)의 대역. 로컬과 Cloudflare 직접 연결은 비움
+      proxy-addresses: ${GATEWAY_CLOUDFLARE_PROXY_ADDRESSES:}
 
 server:
   port: 8080
+  # 연결 주소는 외부 헤더로 바꾸지 않고, Cloudflare IP는 ClientIpResolver가 판단
+  forward-headers-strategy: none
 
 eureka:
   instance:
@@ -25,6 +101,18 @@ eureka:
       defaultZone: http://localhost:8761/eureka/
 
 management:
+  tracing:
+    propagation:
+      # 외부 부모 trace는 추출하지 않고 Gateway에서 새 trace를 시작합니다.
+      consume: []
+      # 내부 호출에는 Gateway가 만든 W3C 추적 정보만 전달합니다.
+      produce: [W3C]
+    baggage:
+      enabled: false
+  server:
+    # API와 다른 양수 고정 포트 사용(0 자동 할당 제외), 기본 주소는 로컬 전용
+    port: ${GATEWAY_MANAGEMENT_PORT:18080}
+    address: ${GATEWAY_MANAGEMENT_ADDRESS:127.0.0.1}
   endpoints:
     web:
       exposure:

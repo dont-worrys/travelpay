@@ -6,6 +6,7 @@ import java.util.Set;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -13,6 +14,7 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
 import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.ErrorResponseException;
 import org.springframework.web.server.MethodNotAllowedException;
 import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.JsonNode;
@@ -56,6 +58,20 @@ class GatewayErrorHandlerTest {
     }
 
     @Test
+    void frameworkHeadersArePreservedButTheirCachePolicyIsReplaced() {
+        var exchange = exchange();
+        var failure = new ErrorResponseException(HttpStatus.SERVICE_UNAVAILABLE);
+        failure.getHeaders().setCacheControl("public, max-age=600");
+        failure.getHeaders().set(HttpHeaders.RETRY_AFTER, "120");
+
+        handler.handle(exchange, failure).block(Duration.ofSeconds(2));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
+        assertEquals("120", exchange.getResponse().getHeaders().getFirst(HttpHeaders.RETRY_AFTER));
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(exchange).get("code").stringValue());
+    }
+
+    @Test
     void methodErrorPreservesTheAllowHeader() {
         var exchange = exchange();
 
@@ -94,6 +110,7 @@ class GatewayErrorHandlerTest {
     @Test
     void committedResponseIsNotRewritten() {
         var exchange = exchange();
+        exchange.getResponse().getHeaders().setCacheControl("private, max-age=60");
         exchange.getResponse().setComplete().block(Duration.ofSeconds(2));
         var failure = new IllegalStateException("already committed");
 
@@ -101,6 +118,7 @@ class GatewayErrorHandlerTest {
                 () -> handler.handle(exchange, failure).block(Duration.ofSeconds(2)));
 
         assertSame(failure, propagated);
+        assertEquals("private, max-age=60", exchange.getResponse().getHeaders().getCacheControl());
     }
 
     @Test
@@ -185,6 +203,7 @@ class GatewayErrorHandlerTest {
                 .block(Duration.ofSeconds(2));
 
         assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
+        assertEquals("no-store", exchange.getResponse().getHeaders().getCacheControl());
         assertEquals("", exchange.getResponse().getBodyAsString().defaultIfEmpty("").block(Duration.ofSeconds(2)));
     }
 
@@ -210,6 +229,7 @@ class GatewayErrorHandlerTest {
     }
 
     private JsonNode errorBody(MockServerWebExchange exchange) {
+        assertEquals("no-store", exchange.getResponse().getHeaders().getCacheControl());
         var body = mapper.readTree(exchange.getResponse().getBodyAsString().block(Duration.ofSeconds(2)));
         assertEquals(3, body.size());
         assertNotNull(body.get("success"));

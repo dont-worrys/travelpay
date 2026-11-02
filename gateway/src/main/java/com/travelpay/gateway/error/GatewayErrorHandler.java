@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.core.annotation.Order;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatusCode;
@@ -72,6 +73,8 @@ public class GatewayErrorHandler implements WebExceptionHandler {
         response.setStatusCode(status);
         response.getHeaders().putAll(headers);
         response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+        // 프레임워크 헤더를 복사한 뒤, HEAD를 포함한 오류 응답의 저장 금지를 명시합니다.
+        response.getHeaders().setCacheControl(CacheControl.noStore());
         if (exchange.getRequest().getMethod() == HttpMethod.HEAD) {
             return response.setComplete();
         }

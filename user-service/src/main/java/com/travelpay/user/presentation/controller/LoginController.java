@@ -24,7 +24,7 @@ public class LoginController {
     @PostMapping("/api/v1/auth/login")
     public ApiResponse<LoginResponse> login(@Valid @RequestBody LoginRequest body,
             HttpServletRequest request, HttpServletResponse response) {
-        // Gateway를 거치면 Gateway 주소가 되므로, Gateway 연결 때 실제 클라이언트 IP를 전달받도록 바꿔야 합니다.
+        // Gateway를 거치면 Tomcat이 Client-Ip 헤더의 실제 클라이언트 IP를 넣어 줌(remote-ip-header)
         var result = loginService.login(body.toCommand(request.getRemoteAddr()));
         sessionLoginHandler.onLoginSuccess(result, request, response);
         return ApiResponse.success(LoginResponse.from(result));
