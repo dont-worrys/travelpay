@@ -1,5 +1,7 @@
 package com.travelpay.payment.transfer.client;
 
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -16,7 +18,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import tools.jackson.databind.json.JsonMapper;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,7 +40,7 @@ class TransferWalletReaderTest {
     @BeforeEach
     void setUp() {
         walletClient = mock(WalletClient.class);
-        walletReader = new TransferWalletReader(walletClient, JsonMapper.builder().build());
+        walletReader = new TransferWalletReader(walletClient);
     }
 
     @Test
@@ -95,11 +96,31 @@ class TransferWalletReaderTest {
 
     @Test
     void reportsConnectionProblemsAsServiceUnavailable() {
-        when(walletClient.getWallet(USER_ID)).thenThrow(mock(RetryableException.class));
+        when(walletClient.getWallet(USER_ID)).thenThrow(new RetryableException(-1, "Connection refused",
+                Request.HttpMethod.GET, new ConnectException("Connection refused"), (Long) null, request()));
 
         var exception = assertThrows(BusinessException.class, () -> walletReader.findActiveWalletId(USER_ID));
 
         assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
+    }
+
+    @Test
+    void reportsTimeoutAsGatewayTimeout() {
+        when(walletClient.getWallet(USER_ID)).thenThrow(new RetryableException(-1, "Read timed out",
+                Request.HttpMethod.GET, new SocketTimeoutException("Read timed out"), (Long) null, request()));
+
+        var exception = assertThrows(BusinessException.class, () -> walletReader.findActiveWalletId(USER_ID));
+
+        assertSame(CommonErrorCode.GATEWAY_TIMEOUT, exception.getErrorCode());
+    }
+
+    @Test
+    void reportsWalletServiceGatewayTimeoutAsGatewayTimeout() {
+        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(504));
+
+        var exception = assertThrows(BusinessException.class, () -> walletReader.findWallet(USER_ID));
+
+        assertSame(CommonErrorCode.GATEWAY_TIMEOUT, exception.getErrorCode());
     }
 
     @ParameterizedTest
@@ -141,13 +162,16 @@ class TransferWalletReaderTest {
         return feignError(status, null);
     }
 
-    private static FeignException feignError(int status, String body) {
-        Request request = Request.create(Request.HttpMethod.GET, "http://wallet-service/internal/v1/wallets",
+    private static Request request() {
+        return Request.create(Request.HttpMethod.GET, "http://wallet-service/internal/v1/wallets",
                 Map.of(), null, UTF_8, null);
+    }
+
+    private static FeignException feignError(int status, String body) {
         Response.Builder builder = Response.builder()
                 .status(status)
                 .reason("error")
-                .request(request)
+                .request(request())
                 .headers(Map.of());
         if (body != null) {
             builder.body(body, UTF_8);
