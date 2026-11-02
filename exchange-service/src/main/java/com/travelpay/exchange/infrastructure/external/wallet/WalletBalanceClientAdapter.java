@@ -35,6 +35,11 @@ public class WalletBalanceClientAdapter implements WalletBalanceReader {
 
     private final WalletFeignClient feignClient;
 
+    /**
+     * 회원의 지갑 잔액을 조회합니다. 지갑이 없으면 empty입니다.
+     *
+     * @throws WalletBalanceFetchException 호출이 실패했거나 응답을 해석하지 못했을 때
+     */
     @Override
     public Optional<WalletBalances> read(UUID userId) {
         Objects.requireNonNull(userId, "userId");

@@ -34,6 +34,7 @@ public class LedgerClientAdapter implements LedgerClient {
 
     private final LedgerFeignClient feignClient;
 
+    /** 원장에 거래 등록을 요청하고 결과를 Posted·Rejected·Unknown·Invalid 중 하나로 돌려줍니다. 실패도 예외 대신 결과로 줍니다. */
     @Override
     public LedgerPostResult post(LedgerPosting posting) {
         Objects.requireNonNull(posting, "posting");
@@ -51,6 +52,10 @@ public class LedgerClientAdapter implements LedgerClient {
         return new LedgerPostResult.Posted(data.transactionId());
     }
 
+    /**
+     * 실패 응답을 분류합니다. 재시도 신호 → 4xx 거절 여부 → 상태 코드 순서로 봅니다.
+     * 다시 보내서 풀릴 수 있으면 Unknown, 다시 보내도 같으면 Invalid입니다.
+     */
     private static LedgerPostResult classify(LedgerPosting posting, FeignException e) {
         // 재시도 신호를 상태 코드보다 먼저 본다. Retry-After가 붙은 응답(3xx·429·503 등)은 Feign이
         // RetryableException으로 주는데, 429처럼 4xx여도 "지금은 처리하지 않았으니 나중에 다시 보내라"는 뜻이다.
