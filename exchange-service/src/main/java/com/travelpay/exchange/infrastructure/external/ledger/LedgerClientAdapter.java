@@ -2,6 +2,8 @@ package com.travelpay.exchange.infrastructure.external.ledger;
 
 import java.util.Objects;
 
+import com.travelpay.common.feign.FeignErrors;
+import com.travelpay.common.response.ApiResponse;
 import com.travelpay.exchange.domain.ledger.LedgerClient;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult.InvalidKind;
@@ -12,16 +14,15 @@ import feign.codec.DecodeException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-import tools.jackson.core.JacksonException;
-import tools.jackson.databind.json.JsonMapper;
 
 /**
  * 원장 거래 등록 응답을 4분류로 바꿉니다. 예외를 던지지 않습니다. 원장 응답 본문은 결과·로그에 싣지 않고 error.code만 봅니다.
  * - 201·200 + 거래 ID + POSTED: Posted
  * - 422 + LEDGER_REJECTED_*: Rejected (같은 reference로 다시 보내도 같은 422)
- * - 타임아웃·연결 실패·5xx: Unknown (기록됐는지 모름, 같은 요청을 다시 보냄)
+ * - 재시도 신호(Retry-After)가 있는 응답, 4xx로 거절되지 않은 실패(타임아웃·연결 실패·5xx·2xx인데 본문을 해석하지 못함): Unknown
+ *   원장이 이미 기록했을 수 있으므로 실패로 끝내지 않고 같은 요청을 다시 보내 결과를 확인한다.
  * - 400: Invalid(BAD_REQUEST), 409: Invalid(CONFLICT)
- * - 그 밖의 4xx·성공인데 형식이 맞지 않는 응답: Invalid(MALFORMED_RESPONSE)
+ * - 그 밖의 4xx·따라가지 않은 3xx·본문은 읽었지만 내용이 계약과 다른 성공 응답: Invalid(MALFORMED_RESPONSE)
  */
 @Slf4j
 @Component
@@ -30,39 +31,47 @@ public class LedgerClientAdapter implements LedgerClient {
 
     private static final String POSTED = "POSTED";
     private static final String REJECTED_PREFIX = "LEDGER_REJECTED_";
-    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     private final LedgerFeignClient feignClient;
 
+    /** 원장에 거래 등록을 요청하고 결과를 Posted·Rejected·Unknown·Invalid 중 하나로 돌려줍니다. 실패도 예외 대신 결과로 줍니다. */
     @Override
     public LedgerPostResult post(LedgerPosting posting) {
         Objects.requireNonNull(posting, "posting");
-        LedgerTransactionResponse response;
+        ApiResponse<LedgerTransactionResponse> response;
         try {
             response = feignClient.register(RegisterLedgerTransactionRequest.from(posting));
-        } catch (DecodeException e) {
-            // 2xx인데 본문을 해석하지 못함: 기록됐을 수 있지만 거래 ID를 알 수 없음
-            return invalid(posting, InvalidKind.MALFORMED_RESPONSE, "응답 본문 해석 실패");
         } catch (FeignException e) {
             return classify(posting, e);
         }
-        if (response == null || !response.success() || response.data() == null
-                || response.data().transactionId() == null || !POSTED.equals(response.data().status())) {
+        LedgerTransactionResponse data = response == null ? null : response.data();
+        // 본문은 읽었는데 내용이 계약과 다르면 다시 보내도 같은 응답이라 사람이 확인해야 한다
+        if (data == null || data.transactionId() == null || !POSTED.equals(data.status())) {
             return invalid(posting, InvalidKind.MALFORMED_RESPONSE, "성공 응답 형식 이상");
         }
-        return new LedgerPostResult.Posted(response.data().transactionId());
+        return new LedgerPostResult.Posted(data.transactionId());
     }
 
+    /**
+     * 실패 응답을 분류합니다. 재시도 신호 → 4xx 거절 여부 → 상태 코드 순서로 봅니다.
+     * 다시 보내서 풀릴 수 있으면 Unknown, 다시 보내도 같으면 Invalid입니다.
+     */
     private static LedgerPostResult classify(LedgerPosting posting, FeignException e) {
-        int status = e.status();
-        // 타임아웃·연결 실패는 응답이 없어 status가 음수다
-        if (e instanceof RetryableException || status < 0 || status >= 500) {
-            String cause = status < 0 ? e.getClass().getSimpleName() : "HTTP " + status;
+        // 재시도 신호를 상태 코드보다 먼저 본다. Retry-After가 붙은 응답(3xx·429·503 등)은 Feign이
+        // RetryableException으로 주는데, 429처럼 4xx여도 "지금은 처리하지 않았으니 나중에 다시 보내라"는 뜻이다.
+        boolean retryable = e instanceof RetryableException;
+        if (retryable || !FeignErrors.isRejected(e)) {
+            // 따라가지 않은 리다이렉트(3xx)는 원장 거래 등록까지 가지 못한 설정 오류라 다시 보내도 같다.
+            if (!retryable && e.status() >= 300 && e.status() < 400) {
+                return invalid(posting, InvalidKind.MALFORMED_RESPONSE, "HTTP " + e.status());
+            }
+            String cause = cause(e);
             log.warn("원장 결과를 확인하지 못했습니다: orderId={}, cause={}", posting.orderId(), cause);
             return new LedgerPostResult.Unknown(cause);
         }
+        int status = e.status();
         if (status == 422) {
-            String code = errorCode(e);
+            String code = FeignErrors.errorCode(e).orElse(null);
             if (code != null && code.startsWith(REJECTED_PREFIX)) {
                 return new LedgerPostResult.Rejected(code);
             }
@@ -77,24 +86,18 @@ public class LedgerClientAdapter implements LedgerClient {
         return invalid(posting, InvalidKind.MALFORMED_RESPONSE, "HTTP " + status);
     }
 
+    /** 결과를 모르는 이유. 타임아웃·연결 실패는 응답이 없어 status가 음수다 */
+    private static String cause(FeignException e) {
+        if (e instanceof DecodeException) {
+            return "응답 본문 해석 실패(HTTP " + e.status() + ")";
+        }
+        return e.status() < 0 ? e.getClass().getSimpleName() : "HTTP " + e.status();
+    }
+
     /** 다시 보내도 풀리지 않는 응답이라 사람이 확인해야 한다. 원인을 찾을 수 있게 error로 남긴다 */
     private static LedgerPostResult invalid(LedgerPosting posting, InvalidKind kind, String detail) {
         log.error("원장이 처리할 수 없는 응답을 줬습니다: orderId={}, kind={}, detail={}",
                 posting.orderId(), kind, detail);
         return new LedgerPostResult.Invalid(kind);
-    }
-
-    /** 오류 응답 본문의 error.code. 해석하지 못하면 null */
-    private static String errorCode(FeignException e) {
-        String body = e.contentUTF8();
-        if (body == null || body.isBlank()) {
-            return null;
-        }
-        try {
-            LedgerTransactionResponse response = JSON.readValue(body, LedgerTransactionResponse.class);
-            return response.error() == null ? null : response.error().code();
-        } catch (JacksonException e2) {
-            return null;
-        }
     }
 }
