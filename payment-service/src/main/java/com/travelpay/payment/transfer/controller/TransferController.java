@@ -60,7 +60,7 @@ public class TransferController {
         return ApiResponse.success(transferService.get(user.userId(), transferId));
     }
 
-    /** 송금 전 수취인 확인용이며, 송금 가능 여부만 반환합니다. */
+    /** 송금 전 수취인 확인용이며, 마스킹한 이름과 송금 가능 여부만 반환합니다. */
     @GetMapping("/recipients/{receiverId}")
     public ApiResponse<RecipientResponse> getRecipient(
             @CurrentUser AuthenticatedUser user,

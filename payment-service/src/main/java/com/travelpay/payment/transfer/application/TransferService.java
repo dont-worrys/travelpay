@@ -14,6 +14,7 @@ import com.travelpay.common.util.PageableUtils;
 import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
 import com.travelpay.payment.transfer.client.TransferLedgerClient;
+import com.travelpay.payment.transfer.client.TransferUserReader;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
 import com.travelpay.payment.transfer.client.WalletResponse;
 import com.travelpay.payment.transfer.domain.Transfer;
@@ -59,22 +60,26 @@ public class TransferService {
 
     private final TransferRepository transferRepository;
     private final TransferWalletReader walletReader;
+    private final TransferUserReader userReader;
     private final Optional<TransferLedgerClient> ledgerClient;
 
     public TransferService(
             TransferRepository transferRepository,
             TransferWalletReader walletReader,
+            TransferUserReader userReader,
             Optional<TransferLedgerClient> ledgerClient
     ) {
         this.transferRepository = transferRepository;
         this.walletReader = walletReader;
+        this.userReader = userReader;
         this.ledgerClient = ledgerClient;
     }
 
     /**
      * 송금을 요청합니다. 같은 송금인·키·요청 내용의 재요청은 처음 처리 결과를 반환하며,
      * 처리 중(PROCESSING)으로 남은 송금이면 원장 거래 등록을 다시 요청합니다.
-     * 지갑 조회·원장 호출(원격 호출) 동안 DB 트랜잭션을 잡지 않도록 메소드 전체를 트랜잭션으로 묶지 않습니다.
+     * 재요청은 처음 요청 때 검증을 통과한 송금이므로 지갑·회원을 다시 조회하지 않습니다.
+     * 지갑·회원 조회·원장 호출(원격 호출) 동안 DB 트랜잭션을 잡지 않도록 메소드 전체를 트랜잭션으로 묶지 않습니다.
      */
     public TransferResponse request(UUID senderId, String idempotencyKey, TransferCreateRequest request) {
         if (idempotencyKey == null || !IDEMPOTENCY_KEY_PATTERN.matcher(idempotencyKey).matches()) {
@@ -95,11 +100,13 @@ public class TransferService {
         if (!TransferCurrency.isSupported(request.currency())) {
             throw new BusinessException(TransferErrorCode.UNSUPPORTED_CURRENCY);
         }
-        // TODO(user-service): 수취인 회원 상태가 ACTIVE인지 확인해야 합니다(인프라 담당자 답변).
-        //  내부 회원 조회 API의 경로·응답 형식·제공 시점이 확정되면 추가하고, 아니면 RECEIVER_UNAVAILABLE로 거절합니다.
         // 회원당 지갑은 1개이고 통화별 계정은 원장이 지갑 ID와 통화로 찾으므로, 지갑 상태만 확인합니다.
         UUID sourceWalletId = walletReader.findActiveWalletId(senderId)
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.SENDER_WALLET_UNAVAILABLE));
+        // 송금인 회원 상태는 Gateway 인증 단계에서 확인하므로, 수취인만 ACTIVE 회원인지 확인합니다. 이름은 쓰지 않습니다.
+        if (userReader.findRecipient(request.receiverId()).isEmpty()) {
+            throw new BusinessException(TransferErrorCode.RECEIVER_UNAVAILABLE);
+        }
         UUID targetWalletId = walletReader.findActiveWalletId(request.receiverId())
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.RECEIVER_UNAVAILABLE));
 
@@ -149,18 +156,22 @@ public class TransferService {
     }
 
     /**
-     * 송금 전 수취인을 확인합니다. 지갑이 없으면 404, 지갑이 송금할 수 없는 상태면 transferable=false를 반환합니다.
-     * 송금 요청과 같은 기준(ACTIVE 지갑)으로 판단하며, 실제 송금 시점에 다시 검증합니다.
+     * 송금 전 수취인을 확인합니다. ACTIVE 회원이 아니거나(없는 회원 포함) 지갑이 없으면 404,
+     * 지갑이 송금할 수 없는 상태면 transferable=false를 반환합니다. 이름은 마스킹해서만 내보냅니다.
+     * 송금 요청과 같은 기준(ACTIVE 회원·ACTIVE 지갑)으로 판단하며, 실제 송금 시점에 다시 검증합니다.
      */
     public RecipientResponse findRecipient(UUID userId, UUID receiverId) {
         if (userId.equals(receiverId)) {
             throw new BusinessException(TransferErrorCode.SELF_TRANSFER);
         }
-        // TODO(user-service): 수취인 회원 상태(ACTIVE) 확인은 내부 회원 조회 API가 확정되면 송금 요청과 함께 추가합니다.
+        // user-service가 없는 회원과 정지·종료 회원을 구분하지 않으므로 둘 다 같은 404로 응답합니다.
+        String maskedName = userReader.findRecipient(receiverId)
+                .map(recipient -> RecipientNameMasker.mask(recipient.realName()))
+                .orElseThrow(() -> new BusinessException(TransferErrorCode.RECEIVER_NOT_FOUND));
         boolean transferable = walletReader.findWallet(receiverId)
                 .map(WalletResponse::isActive)
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.RECEIVER_NOT_FOUND));
-        return new RecipientResponse(receiverId, transferable);
+        return new RecipientResponse(receiverId, maskedName, transferable);
     }
 
     /**

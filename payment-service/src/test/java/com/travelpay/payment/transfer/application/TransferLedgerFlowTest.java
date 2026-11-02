@@ -13,7 +13,9 @@ import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse.RejectReason;
 import com.travelpay.payment.transfer.client.TransferLedgerClient;
+import com.travelpay.payment.transfer.client.TransferUserReader;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
+import com.travelpay.payment.transfer.client.UserRecipientResponse;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
 import com.travelpay.payment.transfer.domain.TransferFailureReason;
@@ -303,7 +305,10 @@ class TransferLedgerFlowTest {
         TransferWalletReader walletReader = mock(TransferWalletReader.class);
         when(walletReader.findActiveWalletId(SENDER_ID)).thenReturn(Optional.of(SOURCE_WALLET_ID));
         when(walletReader.findActiveWalletId(RECEIVER_ID)).thenReturn(Optional.of(TARGET_WALLET_ID));
-        return new TransferService(transferRepository, walletReader, Optional.of(fakeLedger));
+        TransferUserReader userReader = mock(TransferUserReader.class);
+        when(userReader.findRecipient(RECEIVER_ID))
+                .thenReturn(Optional.of(new UserRecipientResponse(RECEIVER_ID, "홍길동")));
+        return new TransferService(transferRepository, walletReader, userReader, Optional.of(fakeLedger));
     }
 
     private Transfer onlyTransfer() {

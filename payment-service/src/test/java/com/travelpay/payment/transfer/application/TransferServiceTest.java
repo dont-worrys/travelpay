@@ -8,7 +8,9 @@ import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.payment.transfer.client.TransferUserReader;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
+import com.travelpay.payment.transfer.client.UserRecipientResponse;
 import com.travelpay.payment.transfer.client.WalletResponse;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferDirection;
@@ -54,14 +56,16 @@ class TransferServiceTest {
 
     private TransferRepository transferRepository;
     private TransferWalletReader walletReader;
+    private TransferUserReader userReader;
     private TransferService transferService;
 
     @BeforeEach
     void setUp() {
         transferRepository = mock(TransferRepository.class);
         walletReader = mock(TransferWalletReader.class);
+        userReader = mock(TransferUserReader.class);
         // 원장 거래 등록 구현이 없는 현재 운영 구성입니다. 구현이 있을 때의 흐름은 TransferLedgerFlowTest에서 검증합니다.
-        transferService = new TransferService(transferRepository, walletReader, Optional.empty());
+        transferService = new TransferService(transferRepository, walletReader, userReader, Optional.empty());
     }
 
     @Test
@@ -107,7 +111,7 @@ class TransferServiceTest {
         var response = transferService.request(SENDER_ID, KEY, request(10_000L, "KRW", null));
 
         assertEquals(existing.getId(), response.transferId());
-        verifyNoInteractions(walletReader);
+        verifyNoInteractions(walletReader, userReader);
         verify(transferRepository, never()).saveAndFlush(any());
     }
 
@@ -158,7 +162,7 @@ class TransferServiceTest {
                 () -> transferService.request(SENDER_ID, key, request(10_000L, "KRW", null)));
 
         assertSame(TransferErrorCode.INVALID_IDEMPOTENCY_KEY, exception.getErrorCode());
-        verifyNoInteractions(transferRepository, walletReader);
+        verifyNoInteractions(transferRepository, walletReader, userReader);
     }
 
     @Test
@@ -181,7 +185,7 @@ class TransferServiceTest {
                 () -> transferService.request(SENDER_ID, KEY, selfRequest));
 
         assertSame(TransferErrorCode.SELF_TRANSFER, exception.getErrorCode());
-        verifyNoInteractions(walletReader);
+        verifyNoInteractions(walletReader, userReader);
     }
 
     @ParameterizedTest
@@ -193,7 +197,7 @@ class TransferServiceTest {
                 () -> transferService.request(SENDER_ID, KEY, request(10_000L, currency, null)));
 
         assertSame(TransferErrorCode.UNSUPPORTED_CURRENCY, exception.getErrorCode());
-        verifyNoInteractions(walletReader);
+        verifyNoInteractions(walletReader, userReader);
     }
 
     @Test
@@ -206,12 +210,42 @@ class TransferServiceTest {
 
         assertSame(TransferErrorCode.SENDER_WALLET_UNAVAILABLE, exception.getErrorCode());
         verify(transferRepository, never()).saveAndFlush(any());
+        verifyNoInteractions(userReader);
+    }
+
+    @Test
+    void rejectsWhenReceiverIsNotActiveMemberWithoutCheckingReceiverWallet() {
+        when(transferRepository.findBySenderIdAndIdempotencyKey(SENDER_ID, KEY)).thenReturn(Optional.empty());
+        when(walletReader.findActiveWalletId(SENDER_ID)).thenReturn(Optional.of(SOURCE_WALLET_ID));
+        when(userReader.findRecipient(RECEIVER_ID)).thenReturn(Optional.empty());
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.request(SENDER_ID, KEY, request(10_000L, "KRW", null)));
+
+        assertSame(TransferErrorCode.RECEIVER_UNAVAILABLE, exception.getErrorCode());
+        verify(walletReader, never()).findActiveWalletId(RECEIVER_ID);
+        verify(transferRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void propagatesUserServiceErrorOnTransferRequestWithoutSaving() {
+        when(transferRepository.findBySenderIdAndIdempotencyKey(SENDER_ID, KEY)).thenReturn(Optional.empty());
+        when(walletReader.findActiveWalletId(SENDER_ID)).thenReturn(Optional.of(SOURCE_WALLET_ID));
+        when(userReader.findRecipient(RECEIVER_ID))
+                .thenThrow(new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE));
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.request(SENDER_ID, KEY, request(10_000L, "KRW", null)));
+
+        assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
+        verify(transferRepository, never()).saveAndFlush(any());
     }
 
     @Test
     void rejectsWhenReceiverHasNoActiveWallet() {
         when(transferRepository.findBySenderIdAndIdempotencyKey(SENDER_ID, KEY)).thenReturn(Optional.empty());
         when(walletReader.findActiveWalletId(SENDER_ID)).thenReturn(Optional.of(SOURCE_WALLET_ID));
+        givenActiveRecipient();
         when(walletReader.findActiveWalletId(RECEIVER_ID)).thenReturn(Optional.empty());
 
         var exception = assertThrows(BusinessException.class,
@@ -222,12 +256,14 @@ class TransferServiceTest {
     }
 
     @Test
-    void showsRecipientWithActiveWalletAsTransferable() {
+    void showsRecipientWithActiveWalletAsTransferableWithMaskedName() {
+        givenActiveRecipient();
         when(walletReader.findWallet(RECEIVER_ID)).thenReturn(Optional.of(new WalletResponse(TARGET_WALLET_ID, "ACTIVE")));
 
         var response = transferService.findRecipient(SENDER_ID, RECEIVER_ID);
 
         assertEquals(RECEIVER_ID, response.receiverId());
+        assertEquals("홍*동", response.receiverName());
         assertTrue(response.transferable());
         verifyNoInteractions(transferRepository);
     }
@@ -235,13 +271,26 @@ class TransferServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"PENDING", "SUSPENDED", "CLOSED"})
     void showsRecipientWithNonActiveWalletAsNotTransferable(String status) {
+        givenActiveRecipient();
         when(walletReader.findWallet(RECEIVER_ID)).thenReturn(Optional.of(new WalletResponse(TARGET_WALLET_ID, status)));
 
         assertFalse(transferService.findRecipient(SENDER_ID, RECEIVER_ID).transferable());
     }
 
     @Test
+    void returnsNotFoundForRecipientWhoIsNotActiveMemberWithoutCheckingWallet() {
+        when(userReader.findRecipient(RECEIVER_ID)).thenReturn(Optional.empty());
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.findRecipient(SENDER_ID, RECEIVER_ID));
+
+        assertSame(TransferErrorCode.RECEIVER_NOT_FOUND, exception.getErrorCode());
+        verifyNoInteractions(walletReader);
+    }
+
+    @Test
     void returnsNotFoundForRecipientWithoutWallet() {
+        givenActiveRecipient();
         when(walletReader.findWallet(RECEIVER_ID)).thenReturn(Optional.empty());
 
         var exception = assertThrows(BusinessException.class,
@@ -256,11 +305,24 @@ class TransferServiceTest {
                 () -> transferService.findRecipient(SENDER_ID, SENDER_ID));
 
         assertSame(TransferErrorCode.SELF_TRANSFER, exception.getErrorCode());
+        verifyNoInteractions(walletReader, userReader);
+    }
+
+    @Test
+    void propagatesUserServiceErrorOnRecipientLookup() {
+        when(userReader.findRecipient(RECEIVER_ID))
+                .thenThrow(new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE));
+
+        var exception = assertThrows(BusinessException.class,
+                () -> transferService.findRecipient(SENDER_ID, RECEIVER_ID));
+
+        assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
         verifyNoInteractions(walletReader);
     }
 
     @Test
     void propagatesWalletServiceErrorOnRecipientLookup() {
+        givenActiveRecipient();
         when(walletReader.findWallet(RECEIVER_ID))
                 .thenThrow(new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE));
 
@@ -429,6 +491,12 @@ class TransferServiceTest {
     private void givenActiveWallets() {
         when(walletReader.findActiveWalletId(SENDER_ID)).thenReturn(Optional.of(SOURCE_WALLET_ID));
         when(walletReader.findActiveWalletId(RECEIVER_ID)).thenReturn(Optional.of(TARGET_WALLET_ID));
+        givenActiveRecipient();
+    }
+
+    private void givenActiveRecipient() {
+        when(userReader.findRecipient(RECEIVER_ID))
+                .thenReturn(Optional.of(new UserRecipientResponse(RECEIVER_ID, "홍길동")));
     }
 
     private static TransferCreateRequest request(long amount, String currency, String memo) {
