@@ -1,2 +1,3 @@
 com.travelpay.common.config.CommonWebAutoConfiguration
 com.travelpay.common.config.CommonAuthWebAutoConfiguration
+com.travelpay.common.config.CommonFeignAutoConfiguration

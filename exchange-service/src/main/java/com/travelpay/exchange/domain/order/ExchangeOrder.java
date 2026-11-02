@@ -3,10 +3,17 @@ package com.travelpay.exchange.domain.order;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.exchange.domain.ledger.LedgerDirection;
+import com.travelpay.exchange.domain.ledger.LedgerEntry;
+import com.travelpay.exchange.domain.ledger.LedgerEntryType;
+import com.travelpay.exchange.domain.ledger.LedgerPosting;
+import com.travelpay.exchange.domain.ledger.LedgerSystemAccount;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
@@ -175,6 +182,30 @@ public class ExchangeOrder extends BaseTimeEntity {
                 ChangedByType.USER);
     }
 
+    /**
+     * 이 주문을 원장 거래로 바꿉니다. 저장된 스냅샷 값만 쓰므로 몇 번을 만들어도 같은 항목이 나옵니다.
+     * 보내는 금액(EXCHANGE_OUT), 수수료(EXCHANGE_FEE), 받는 금액(EXCHANGE_IN)을 항목 유형마다 차변·대변 한 쌍으로 만듭니다.
+     * 수수료가 0이면 원장이 금액 0 항목을 거절하므로 수수료 한 쌍을 뺀 4항목입니다.
+     */
+    public LedgerPosting toLedgerPosting() {
+        Money from = fromMoney();
+        Money fee = feeMoney();
+        Money to = toMoney();
+        List<LedgerEntry> entries = new ArrayList<>(6);
+        entries.add(LedgerEntry.wallet(walletId, from, LedgerDirection.DEBIT, LedgerEntryType.EXCHANGE_OUT));
+        entries.add(LedgerEntry.system(LedgerSystemAccount.FX_POSITION, from, LedgerDirection.CREDIT,
+                LedgerEntryType.EXCHANGE_OUT));
+        if (!fee.isZero()) {
+            entries.add(LedgerEntry.wallet(walletId, fee, LedgerDirection.DEBIT, LedgerEntryType.EXCHANGE_FEE));
+            entries.add(LedgerEntry.system(LedgerSystemAccount.FEE_REVENUE, fee, LedgerDirection.CREDIT,
+                    LedgerEntryType.EXCHANGE_FEE));
+        }
+        entries.add(LedgerEntry.system(LedgerSystemAccount.FX_POSITION, to, LedgerDirection.DEBIT,
+                LedgerEntryType.EXCHANGE_IN));
+        entries.add(LedgerEntry.wallet(walletId, to, LedgerDirection.CREDIT, LedgerEntryType.EXCHANGE_IN));
+        return new LedgerPosting(requireId(), userId, entries);
+    }
+
     /** 같은 멱등 키로 다시 온 신청이 처음과 같은 견적·지갑인지 확인합니다. 다르면 키를 다른 신청에 재사용한 것입니다. */
     public boolean isSameRequest(UUID quoteId, UUID walletId) {
         return this.quoteId.equals(quoteId) && this.walletId.equals(walletId);
@@ -203,7 +234,7 @@ public class ExchangeOrder extends BaseTimeEntity {
 
     private UUID requireId() {
         if (id == null) {
-            throw new IllegalStateException("order must be saved before creating history");
+            throw new IllegalStateException("order must be saved first");
         }
         return id;
     }
