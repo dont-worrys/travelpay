@@ -14,6 +14,7 @@ import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
 import com.travelpay.payment.application.payment.dto.RefundResult;
+import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
 import com.travelpay.payment.domain.payment.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -170,13 +171,7 @@ public class PaymentService {
     public void settleStalePayments(Instant before, int limit) {
         int consecutiveUnknown = 0;
         for (Payment payment : paymentRepository.findStalePending(before, limit)) {
-            try {
-                Payment settled = settlePayment(payment);
-                consecutiveUnknown = settled.getStatus() == PaymentStatus.PENDING ? consecutiveUnknown + 1 : 0;
-            } catch (RuntimeException e) {
-                consecutiveUnknown++;
-                log.warn("처리 중 결제 복구 실패 paymentId={}", payment.getId(), e);
-            }
+            consecutiveUnknown = settleStalePayment(payment) ? 0 : consecutiveUnknown + 1;
             if (consecutiveUnknown >= MAX_CONSECUTIVE_UNKNOWN) {
                 log.warn("원장 응답 불가로 결제 복구를 다음 주기로 미룹니다.");
                 return;
@@ -188,15 +183,7 @@ public class PaymentService {
     public void settleStaleRefunds(Instant before, int limit) {
         int consecutiveUnknown = 0;
         for (Refund refund : refundRepository.findStaleRequested(before, limit)) {
-            try {
-                Payment payment = paymentRepository.findById(refund.getPaymentId())
-                        .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
-                RefundProgress settled = settleRefund(payment, refund);
-                consecutiveUnknown = settled.refund().getStatus() == RefundStatus.REQUESTED ? consecutiveUnknown + 1 : 0;
-            } catch (RuntimeException e) {
-                consecutiveUnknown++;
-                log.warn("처리 중 환불 복구 실패 refundId={}", refund.getId(), e);
-            }
+            consecutiveUnknown = settleStaleRefund(refund) ? 0 : consecutiveUnknown + 1;
             if (consecutiveUnknown >= MAX_CONSECUTIVE_UNKNOWN) {
                 log.warn("원장 응답 불가로 환불 복구를 다음 주기로 미룹니다.");
                 return;
@@ -204,7 +191,51 @@ public class PaymentService {
         }
     }
 
+    public StuckSettlementResult findStuckSettlements(Instant createdBefore, int sampleSize) {
+        return new StuckSettlementResult(
+                paymentRepository.countPendingCreatedBefore(createdBefore),
+                paymentRepository.findPendingIdsCreatedBefore(createdBefore, sampleSize),
+                refundRepository.countRequestedCreatedBefore(createdBefore),
+                refundRepository.findRequestedIdsCreatedBefore(createdBefore, sampleSize));
+    }
+
 //    ---------------------------- Helper Method ----------------------------
+
+    private boolean settleStalePayment(Payment payment) {
+        try {
+            if (settlePayment(payment).getStatus() != PaymentStatus.PENDING) {
+                return true;
+            }
+        } catch (RuntimeException e) {
+            log.warn("처리 중 결제 복구 실패 paymentId={}", payment.getId(), e);
+        }
+
+        try {
+            paymentRepository.deferPendingRetry(payment.getId(), Instant.now());
+        } catch (RuntimeException e) {
+            log.warn("결제 재시도 순서 갱신 실패 paymentId={}", payment.getId(), e);
+        }
+        return false;
+    }
+
+    private boolean settleStaleRefund(Refund refund) {
+        try {
+            Payment payment = paymentRepository.findById(refund.getPaymentId())
+                    .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+            if (settleRefund(payment, refund).refund().getStatus() != RefundStatus.REQUESTED) {
+                return true;
+            }
+        } catch (RuntimeException e) {
+            log.warn("처리 중 환불 복구 실패 refundId={}", refund.getId(), e);
+        }
+
+        try {
+            refundRepository.deferRequestedRetry(refund.getId(), Instant.now());
+        } catch (RuntimeException e) {
+            log.warn("환불 재시도 순서 갱신 실패 refundId={}", refund.getId(), e);
+        }
+        return false;
+    }
 
     // PENDING 결제를 원장 결과로 확정, 결과를 모르면 PENDING인 결제를 그대로 반환
     private Payment settlePayment(Payment payment) {

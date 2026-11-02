@@ -50,4 +50,19 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
                 PaymentStatus.PENDING, before, PageRequest.of(0, limit, Sort.by("updatedAt")));
     }
 
+    @Override
+    public void deferPendingRetry(UUID paymentId, Instant retriedAt) {
+        paymentJpaRepository.touchUpdatedAt(paymentId, PaymentStatus.PENDING, retriedAt);
+    }
+
+    @Override
+    public long countPendingCreatedBefore(Instant before) {
+        return paymentJpaRepository.countByStatusAndCreatedAtBefore(PaymentStatus.PENDING, before);
+    }
+
+    @Override
+    public List<UUID> findPendingIdsCreatedBefore(Instant before, int limit) {
+        return paymentJpaRepository.findIdsByStatusAndCreatedAtBefore(
+                PaymentStatus.PENDING, before, PageRequest.of(0, limit));
+    }
 }

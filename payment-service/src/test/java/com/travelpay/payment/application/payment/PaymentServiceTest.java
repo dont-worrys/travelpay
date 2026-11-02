@@ -18,6 +18,7 @@ import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
+import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.domain.payment.Merchant;
 import com.travelpay.payment.domain.payment.MerchantRepository;
@@ -52,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -995,6 +997,57 @@ class PaymentServiceTest {
 
         verify(ledgerClient, times(3)).createTransaction(any());
         verify(paymentRepository, never()).save(any(Payment.class));
+        verify(paymentRepository, times(3)).deferPendingRetry(any(), any());
+    }
+
+    @Test
+    void defersPaymentRetryWhenLedgerResultIsUnknown() {
+        Payment payment = savedPayment(PAYMENT_ID, CREATED_AT);
+        when(paymentRepository.findStalePending(STALE_BEFORE, 100)).thenReturn(List.of(payment));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+
+        paymentService.settleStalePayments(STALE_BEFORE, 100);
+
+        verify(paymentRepository).deferPendingRetry(eq(PAYMENT_ID), any());
+    }
+
+    @Test
+    void defersPaymentRetryWhenRecoveryThrows() {
+        Payment payment = savedPayment(PAYMENT_ID, CREATED_AT);
+        when(paymentRepository.findStalePending(STALE_BEFORE, 100)).thenReturn(List.of(payment));
+        when(ledgerClient.createTransaction(any())).thenThrow(new IllegalStateException("원장 409"));
+
+        paymentService.settleStalePayments(STALE_BEFORE, 100);
+
+        verify(paymentRepository).deferPendingRetry(eq(PAYMENT_ID), any());
+    }
+
+    @Test
+    void doesNotDeferPaymentRetryWhenSettled() {
+        Payment payment = savedPayment(PAYMENT_ID, CREATED_AT);
+        when(paymentRepository.findStalePending(STALE_BEFORE, 100)).thenReturn(List.of(payment));
+        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+
+        paymentService.settleStalePayments(STALE_BEFORE, 100);
+
+        verify(paymentRepository, never()).deferPendingRetry(any(), any());
+    }
+
+    @Test
+    void continuesPaymentRecoveryWhenDeferringRetryFails() {
+        Payment first = savedPayment(PAYMENT_ID, CREATED_AT);
+        Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
+        when(paymentRepository.findStalePending(STALE_BEFORE, 100)).thenReturn(List.of(first, second));
+        when(ledgerClient.createTransaction(any()))
+                .thenReturn(LedgerResult.unknown())
+                .thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+        doThrow(new IllegalStateException("DB 연결 실패"))
+                .when(paymentRepository).deferPendingRetry(eq(PAYMENT_ID), any());
+
+        paymentService.settleStalePayments(STALE_BEFORE, 100);
+
+        assertEquals(PaymentStatus.PENDING, first.getStatus());
+        assertEquals(PaymentStatus.APPROVED, second.getStatus());
     }
 
     @Test
@@ -1036,5 +1089,79 @@ class PaymentServiceTest {
 
         verify(ledgerClient, times(3)).refundTransaction(any());
         verify(refundRepository, never()).save(any());
+        verify(refundRepository, times(3)).deferRequestedRetry(any(), any());
+    }
+
+    @Test
+    void defersRefundRetryWhenLedgerResultIsUnknown() {
+        Refund refund = existingRefund();
+        when(refundRepository.findStaleRequested(STALE_BEFORE, 100)).thenReturn(List.of(refund));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundPendingPayment()));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.unknown());
+
+        paymentService.settleStaleRefunds(STALE_BEFORE, 100);
+
+        verify(refundRepository).deferRequestedRetry(eq(REFUND_ID), any());
+    }
+
+    @Test
+    void defersRefundRetryWhenRecoveryThrows() {
+        Refund refund = existingRefund();
+        when(refundRepository.findStaleRequested(STALE_BEFORE, 100)).thenReturn(List.of(refund));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.empty());
+
+        paymentService.settleStaleRefunds(STALE_BEFORE, 100);
+
+        verify(refundRepository).deferRequestedRetry(eq(REFUND_ID), any());
+    }
+
+    @Test
+    void doesNotDeferRefundRetryWhenSettled() {
+        Refund refund = existingRefund();
+        when(refundRepository.findStaleRequested(STALE_BEFORE, 100)).thenReturn(List.of(refund));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundPendingPayment()));
+        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+
+        paymentService.settleStaleRefunds(STALE_BEFORE, 100);
+
+        verify(refundRepository, never()).deferRequestedRetry(any(), any());
+    }
+
+    @Test
+    void continuesRefundRecoveryWhenDeferringRetryFails() {
+        Refund first = existingRefund();
+        Refund second = existingRefund();
+        ReflectionTestUtils.setField(second, "id", UUID.randomUUID());
+        when(refundRepository.findStaleRequested(STALE_BEFORE, 100)).thenReturn(List.of(first, second));
+        when(paymentRepository.findById(PAYMENT_ID)).thenAnswer(invocation -> Optional.of(refundPendingPayment()));
+        when(ledgerClient.refundTransaction(any()))
+                .thenReturn(LedgerResult.unknown())
+                .thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        doThrow(new IllegalStateException("DB 연결 실패"))
+                .when(refundRepository).deferRequestedRetry(eq(REFUND_ID), any());
+
+        paymentService.settleStaleRefunds(STALE_BEFORE, 100);
+
+        assertEquals(RefundStatus.REQUESTED, first.getStatus());
+        assertEquals(RefundStatus.COMPLETED, second.getStatus());
+    }
+
+    // ---------- 오래 막힌 건 집계 ----------
+
+    @Test
+    void findsStuckSettlementsWithSameCutoffAndSampleSize() {
+        Instant cutoff = Instant.parse("2026-10-30T00:30:00Z");
+        UUID stuckRefundId = UUID.randomUUID();
+        when(paymentRepository.countPendingCreatedBefore(cutoff)).thenReturn(12L);
+        when(paymentRepository.findPendingIdsCreatedBefore(cutoff, 10)).thenReturn(List.of(PAYMENT_ID));
+        when(refundRepository.countRequestedCreatedBefore(cutoff)).thenReturn(1L);
+        when(refundRepository.findRequestedIdsCreatedBefore(cutoff, 10)).thenReturn(List.of(stuckRefundId));
+
+        StuckSettlementResult result = paymentService.findStuckSettlements(cutoff, 10);
+
+        assertEquals(12L, result.paymentCount());
+        assertEquals(List.of(PAYMENT_ID), result.paymentIds());
+        assertEquals(1L, result.refundCount());
+        assertEquals(List.of(stuckRefundId), result.refundIds());
     }
 }
