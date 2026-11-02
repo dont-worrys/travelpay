@@ -1,5 +1,6 @@
 package com.travelpay.wallet.infra.client.ledger;
 
+import com.travelpay.common.response.ApiResponse;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -14,5 +15,5 @@ import org.springframework.web.bind.annotation.RequestBody;
 public interface LedgerTransactionFeignClient {
 
     @PostMapping
-    LedgerApiResponse<LedgerTransactionResponse> register(@RequestBody RegisterLedgerTransactionRequest request);
+    ApiResponse<LedgerTransactionResponse> register(@RequestBody RegisterLedgerTransactionRequest request);
 }
