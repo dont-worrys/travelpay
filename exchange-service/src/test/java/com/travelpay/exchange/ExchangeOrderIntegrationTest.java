@@ -210,6 +210,111 @@ class ExchangeOrderIntegrationTest {
     }
 
     @Test
+    void listsOwnOrdersNewestFirstWithFilters() throws Exception {
+        OrderIds ids = placeOrdersForList();
+
+        list(OWNER, "")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.totalElements").value(3))
+                .andExpect(jsonPath("$.data.items[0].orderId").value(ids.processingReExchange()))
+                .andExpect(jsonPath("$.data.items[1].orderId").value(ids.failed()))
+                .andExpect(jsonPath("$.data.items[2].orderId").value(ids.completed()))
+                .andExpect(jsonPath("$.data.items[0].type").value("RE_EXCHANGE"))
+                .andExpect(jsonPath("$.data.items[0].status").value("PROCESSING"))
+                .andExpect(jsonPath("$.data.items[0].fromCurrency").value("JPY"))
+                .andExpect(jsonPath("$.data.items[0].toCurrency").value("KRW"))
+                .andExpect(jsonPath("$.data.items[0].settledAt").doesNotExist())
+                .andExpect(jsonPath("$.data.items[1].failureReason").value("INSUFFICIENT_BALANCE"))
+                .andExpect(jsonPath("$.data.items[2].status").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.items[2].totalDebitAmount").value("101000"))
+                .andExpect(jsonPath("$.data.items[2].settledAt").exists());
+
+        list(OWNER, "status=COMPLETED")
+                .andExpect(jsonPath("$.data.totalElements").value(1))
+                .andExpect(jsonPath("$.data.items[0].orderId").value(ids.completed()));
+        list(OWNER, "type=RE_EXCHANGE")
+                .andExpect(jsonPath("$.data.totalElements").value(1))
+                .andExpect(jsonPath("$.data.items[0].orderId").value(ids.processingReExchange()));
+        list(OWNER, "status=PROCESSING&type=EXCHANGE")
+                .andExpect(jsonPath("$.data.totalElements").value(0))
+                .andExpect(jsonPath("$.data.items.length()").value(0));
+    }
+
+    @Test
+    void listsOrdersPageByPageWithoutOverlap() throws Exception {
+        OrderIds ids = placeOrdersForList();
+
+        list(OWNER, "size=2")
+                .andExpect(jsonPath("$.data.totalPages").value(2))
+                .andExpect(jsonPath("$.data.items.length()").value(2))
+                .andExpect(jsonPath("$.data.items[0].orderId").value(ids.processingReExchange()))
+                .andExpect(jsonPath("$.data.items[1].orderId").value(ids.failed()));
+        list(OWNER, "size=2&page=1")
+                .andExpect(jsonPath("$.data.page").value(1))
+                .andExpect(jsonPath("$.data.items.length()").value(1))
+                .andExpect(jsonPath("$.data.items[0].orderId").value(ids.completed()));
+        list(OWNER, "size=1000")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.size").value(100));
+    }
+
+    @Test
+    void listRejectsInvalidParameters() throws Exception {
+        list(OWNER, "status=DONE")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+        list(OWNER, "page=-1")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+        list(OWNER, "size=0")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+    }
+
+    private record OrderIds(String completed, String failed, String processingReExchange) {
+    }
+
+    /**
+     * 본인 주문 3건(1분 간격: 완료된 환전 → 실패한 환전 → 처리 중인 재환전)과 다른 사람의 가장 최근 주문 1건을 API로 만듭니다.
+     * 견적 유효 시간(5분) 안에 신청하도록 시계를 옮기면서 견적을 발급합니다.
+     */
+    private OrderIds placeOrdersForList() throws Exception {
+        ledger.postsSucceed();
+        String completed = orderId(place(OWNER, "key-1", issuedQuoteId(OWNER)).andExpect(status().isOk()));
+
+        clock.set(NOW.plus(Duration.ofMinutes(1)));
+        ledger.respond(posting -> new LedgerPostResult.Rejected("LEDGER_REJECTED_INSUFFICIENT_BALANCE"));
+        place(OWNER, "key-2", issuedQuoteId(OWNER)).andExpect(status().isUnprocessableEntity());
+        // FAILED는 422 오류 응답이라 본문에 주문이 없어 DB에서 찾는다
+        String failed = jdbcTemplate.queryForObject("SELECT order_id FROM " + SCHEMA
+                + ".exchange_orders WHERE user_id = ? AND idempotency_key = 'key-2'", String.class, OWNER);
+
+        clock.set(NOW.plus(Duration.ofMinutes(2)));
+        ledger.respond(posting -> new LedgerPostResult.Unknown("test"));
+        String reExchangeQuoteId = JsonPath.read(mockMvc.perform(post("/api/v1/exchange-quotes")
+                        .header("User-Id", OWNER)
+                        .header("User-Role", "USER")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"fromCurrency":"JPY","toCurrency":"KRW","amount":"10000"}
+                                """))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString(), "$.data.quoteId");
+        String processing = orderId(place(OWNER, "key-3", reExchangeQuoteId).andExpect(status().isAccepted()));
+
+        clock.set(NOW.plus(Duration.ofMinutes(3)));
+        place(OTHER, "key-1", issuedQuoteId(OTHER)).andExpect(status().isAccepted());
+
+        return new OrderIds(completed, failed, processing);
+    }
+
+    private ResultActions list(UUID userId, String query) throws Exception {
+        return mockMvc.perform(get("/api/v1/exchanges?" + query)
+                .header("User-Id", userId)
+                .header("User-Role", "USER"));
+    }
+
+    @Test
     void postedLedgerCompletesOrderWithSixEntries() throws Exception {
         ledger.postsSucceed();
         String quoteId = issuedQuoteId(OWNER);

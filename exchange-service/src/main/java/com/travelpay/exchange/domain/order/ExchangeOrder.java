@@ -211,9 +211,14 @@ public class ExchangeOrder extends BaseTimeEntity {
         return this.quoteId.equals(quoteId) && this.walletId.equals(walletId);
     }
 
-    /** 외화를 원화로 바꾸는 재환전이면 true입니다. 한쪽은 항상 원화라 받는 통화만 보면 됩니다. */
+    /** 환전(원화 → 외화)인지 재환전(외화 → 원화)인지입니다. 한쪽은 항상 원화라 받는 통화만 보면 됩니다. */
+    public ExchangeOrderType type() {
+        return ExchangeOrderType.of(toCurrency);
+    }
+
+    /** 외화를 원화로 바꾸는 재환전이면 true입니다. */
     public boolean isReExchange() {
-        return toCurrency == Currency.KRW;
+        return type() == ExchangeOrderType.RE_EXCHANGE;
     }
 
     public Money fromMoney() {

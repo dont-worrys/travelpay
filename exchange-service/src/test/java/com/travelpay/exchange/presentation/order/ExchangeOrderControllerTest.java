@@ -1,6 +1,7 @@
 package com.travelpay.exchange.presentation.order;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -8,6 +9,7 @@ import com.travelpay.common.auth.AuthRole;
 import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.auth.web.CurrentUserArgumentResolver;
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.GlobalExceptionHandler;
 import com.travelpay.exchange.application.order.ExchangeOrderService;
 import com.travelpay.exchange.application.order.PlaceOrderCommand;
@@ -15,11 +17,14 @@ import com.travelpay.exchange.domain.order.ExchangeFailureReason;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderErrorCode;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
+import com.travelpay.exchange.domain.order.ExchangeOrderType;
 import com.travelpay.exchange.domain.order.OrderFixtures;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.MediaType;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
@@ -204,6 +209,72 @@ class ExchangeOrderControllerTest {
         mockMvc.perform(get("/api/v1/exchanges/{orderId}", ORDER_ID))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("EXCHANGE_ORDER_NOT_FOUND"));
+    }
+
+    @Test
+    void listsOwnOrdersWithPageInfo() throws Exception {
+        ExchangeOrder order = failedOrder();
+        when(orderService.list(USER_ID, null, null, 0, 20))
+                .thenReturn(new PageImpl<>(List.of(order), PageRequest.of(0, 20), 21));
+
+        mockMvc.perform(get("/api/v1/exchanges"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.data.page").value(0))
+                .andExpect(jsonPath("$.data.size").value(20))
+                .andExpect(jsonPath("$.data.totalElements").value(21))
+                .andExpect(jsonPath("$.data.totalPages").value(2))
+                .andExpect(jsonPath("$.data.items.length()").value(1))
+                .andExpect(jsonPath("$.data.items[0].orderId").value(ORDER_ID.toString()))
+                .andExpect(jsonPath("$.data.items[0].type").value("EXCHANGE"))
+                .andExpect(jsonPath("$.data.items[0].status").value("FAILED"))
+                .andExpect(jsonPath("$.data.items[0].failureReason").value("INSUFFICIENT_BALANCE"))
+                .andExpect(jsonPath("$.data.items[0].fromCurrency").value("KRW"))
+                .andExpect(jsonPath("$.data.items[0].fromAmount").value("100000"))
+                .andExpect(jsonPath("$.data.items[0].toCurrency").value("JPY"))
+                .andExpect(jsonPath("$.data.items[0].toAmount").value("11928"))
+                .andExpect(jsonPath("$.data.items[0].totalDebitAmount").value("101000"))
+                .andExpect(jsonPath("$.data.items[0].requestedAt").value("2026-10-29T03:01:00Z"))
+                .andExpect(jsonPath("$.data.items[0].settledAt").value("2026-10-29T03:01:02Z"))
+                .andExpect(jsonPath("$.data.items[0].appliedRate").doesNotExist())
+                .andExpect(jsonPath("$.data.items[0].quoteId").doesNotExist());
+    }
+
+    @Test
+    void passesFiltersAndPagingToService() throws Exception {
+        when(orderService.list(USER_ID, ExchangeOrderStatus.COMPLETED, ExchangeOrderType.RE_EXCHANGE, 2, 50))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(2, 50), 0));
+
+        mockMvc.perform(get("/api/v1/exchanges")
+                        .param("status", "COMPLETED").param("type", "RE_EXCHANGE")
+                        .param("page", "2").param("size", "50"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items.length()").value(0))
+                .andExpect(jsonPath("$.data.page").value(2));
+
+        verify(orderService).list(USER_ID, ExchangeOrderStatus.COMPLETED, ExchangeOrderType.RE_EXCHANGE, 2, 50);
+    }
+
+    @Test
+    void rejectsUnknownFilterValue() throws Exception {
+        mockMvc.perform(get("/api/v1/exchanges").param("status", "DONE"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+        mockMvc.perform(get("/api/v1/exchanges").param("type", "exchange"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+
+        verifyNoInteractions(orderService);
+    }
+
+    @Test
+    void returnsInvalidPagingErrorFromService() throws Exception {
+        when(orderService.list(USER_ID, null, null, -1, 20))
+                .thenThrow(new BusinessException(CommonErrorCode.INVALID_REQUEST));
+
+        mockMvc.perform(get("/api/v1/exchanges").param("page", "-1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
     }
 
     /** 원화 10만 원 → 엔화, 견적 발급 1분 뒤 신청한 처리 중 주문입니다. */
