@@ -59,6 +59,15 @@ public class Transfer {
     @Column(name = "failure_reason", length = 30)
     private TransferFailureReason failureReason;
 
+    /** 원장 거래 등록 결과를 확인하지 못한 횟수입니다. 복구 재시도 간격과 한도 판단에 씁니다. */
+    @Column(name = "attempt_count", nullable = false)
+    private int attemptCount;
+
+    /** 자동 처리를 멈춘 사유이며 MANUAL_REVIEW일 때만 있습니다. */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "review_reason", length = 30)
+    private TransferReviewReason reviewReason;
+
     @Column(name = "memo", length = 100)
     private String memo;
 
@@ -206,6 +215,14 @@ public class Transfer {
 
     public TransferFailureReason getFailureReason() {
         return failureReason;
+    }
+
+    public int getAttemptCount() {
+        return attemptCount;
+    }
+
+    public TransferReviewReason getReviewReason() {
+        return reviewReason;
     }
 
     public String getMemo() {

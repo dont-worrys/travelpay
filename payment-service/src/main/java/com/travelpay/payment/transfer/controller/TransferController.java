@@ -39,7 +39,8 @@ public class TransferController {
 
     /**
      * 실제 자금 이동 여부는 응답의 status로 구분합니다.
-     * 원장 처리 결과를 아직 모르는 송금(PROCESSING)은 202, 그 외(REQUESTED·COMPLETED)는 201이며, 원장이 거절한 송금은 422입니다.
+     * 원장 처리 결과가 확정되지 않은 송금(PROCESSING·MANUAL_REVIEW)은 202, 그 외(REQUESTED·COMPLETED)는 201이며,
+     * 원장이 거절한 송금은 422입니다.
      */
     @PostMapping
     public ResponseEntity<ApiResponse<TransferResponse>> request(
@@ -48,7 +49,9 @@ public class TransferController {
             @Valid @RequestBody TransferCreateRequest request
     ) {
         TransferResponse response = transferService.request(user.userId(), idempotencyKey, request);
-        HttpStatus status = response.status() == TransferStatus.PROCESSING ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
+        boolean unsettled = response.status() == TransferStatus.PROCESSING
+                || response.status() == TransferStatus.MANUAL_REVIEW;
+        HttpStatus status = unsettled ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
         return ResponseEntity.status(status).body(ApiResponse.success(response));
     }
 
