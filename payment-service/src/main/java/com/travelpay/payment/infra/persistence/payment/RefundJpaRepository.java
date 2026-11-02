@@ -4,6 +4,10 @@ import com.travelpay.payment.domain.payment.Refund;
 import com.travelpay.payment.domain.payment.RefundStatus;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
@@ -14,4 +18,18 @@ public interface RefundJpaRepository extends JpaRepository<Refund, UUID> {
     Optional<Refund> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     List<Refund> findAllByPaymentIdOrderByCreatedAtAsc(UUID paymentId);
     List<Refund> findByStatusAndUpdatedAtBefore(RefundStatus status, Instant before, Pageable pageable);
+
+    @Transactional
+    @Modifying
+    @Query("update Refund r set r.updatedAt = :retriedAt where r.id = :id and r.status = :status")
+    int touchUpdatedAt(@Param("id") UUID id,
+                       @Param("status") RefundStatus status,
+                       @Param("retriedAt") Instant retriedAt);
+
+    long countByStatusAndCreatedAtBefore(RefundStatus status, Instant before);
+
+    @Query("select r.id from Refund r where r.status = :status and r.createdAt < :before order by r.createdAt")
+    List<UUID> findIdsByStatusAndCreatedAtBefore(@Param("status") RefundStatus status,
+                                                 @Param("before") Instant before,
+                                                 Pageable pageable);
 }

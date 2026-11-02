@@ -110,7 +110,8 @@ public class ChargeSagaExecutor {
                     ChargeStepResult.failed(ChargeFailureCode.ACCOUNT_DECRYPT_FAILED, errorClass), eventId);
         }
         BankResult result = bankClient.withdraw(charge.getBankRequestId(), charge.getBankAccount().getBankCode(),
-                accountNumber, charge.getHolderNameSnapshot(), charge.getAmount());
+                accountNumber, charge.getHolderNameSnapshot(), charge.getAmount(), charge.getId(),
+                charge.getAttemptCount());
         return switch (result) {
             case BankResult.Succeeded succeeded -> advance(charge, BANK_PROCESSING, CREDIT_PROCESSING,
                     ChargeStepResult.withdrawn(succeeded.bankTxId()), eventId);

@@ -39,4 +39,20 @@ public class RefundRepositoryImpl implements RefundRepository {
         return refundJpaRepository.findByStatusAndUpdatedAtBefore(
                 RefundStatus.REQUESTED, before, PageRequest.of(0, limit, Sort.by("updatedAt")));
     }
+
+    @Override
+    public void deferRequestedRetry(UUID refundId, Instant retriedAt) {
+        refundJpaRepository.touchUpdatedAt(refundId, RefundStatus.REQUESTED, retriedAt);
+    }
+
+    @Override
+    public long countRequestedCreatedBefore(Instant before) {
+        return refundJpaRepository.countByStatusAndCreatedAtBefore(RefundStatus.REQUESTED, before);
+    }
+
+    @Override
+    public List<UUID> findRequestedIdsCreatedBefore(Instant before, int limit) {
+        return refundJpaRepository.findIdsByStatusAndCreatedAtBefore(
+                RefundStatus.REQUESTED, before, PageRequest.of(0, limit));
+    }
 }

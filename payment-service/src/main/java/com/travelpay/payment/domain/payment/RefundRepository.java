@@ -10,4 +10,7 @@ public interface RefundRepository {
     Optional<Refund> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     List<Refund> findAllByPaymentId(UUID paymentId);
     List<Refund> findStaleRequested(Instant before, int limit);
+    void deferRequestedRetry(UUID refundId, Instant retriedAt);
+    long countRequestedCreatedBefore(Instant before);
+    List<UUID> findRequestedIdsCreatedBefore(Instant before, int limit);
 }
