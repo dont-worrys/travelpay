@@ -61,7 +61,7 @@ public class PaymentController {
                                                                       @PathVariable UUID paymentId,
                                                                       @RequestHeader("Idempotency-Key") @NotBlank @Size(max = 255) String idempotencyKey,
                                                                       @RequestBody @Valid RefundRequest request) {
-        RefundCommand command = request.toCommand(user.userId(), paymentId, idempotencyKey);
+        RefundCommand command = request.toCommand(user, paymentId, idempotencyKey);
         PaymentResponse response = PaymentResponse.from(paymentService.refundRequest(command));
         return ResponseEntity.ok(ApiResponse.success(response));
     }
