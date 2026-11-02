@@ -1,6 +1,8 @@
 package com.travelpay.exchange.infrastructure.persistence.order;
 
 import java.math.BigDecimal;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -41,6 +43,7 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -197,6 +200,56 @@ class ExchangeOrderListQueryIntegrationTest {
 
         assertTrue(page.isEmpty());
         assertEquals(0, page.getTotalElements());
+    }
+
+    /**
+     * 목록 쿼리가 회원 인덱스 ix_exchange_orders_user_created(user_id, created_at DESC)를 쓸 수 있는 모양인지 실행 계획으로 확인합니다.
+     * 테스트 데이터는 몇 건뿐이라 PostgreSQL이 테이블 전체 읽기(Seq Scan)를 고르므로, 이 연결에서만 전체 읽기를 꺼 두고 확인합니다.
+     * 그래서 "많은 데이터에서 인덱스를 고른다"가 아니라 "조건·정렬이 인덱스와 맞는다"를 확인합니다(user_id 조건이 빠지는 등의 회귀를 잡음).
+     * EXPLAIN은 JPQL이 아닌 SQL로 해야 해서 findPage와 같은 조건·정렬의 SQL을 씁니다. null인 조건은 생략된 모양입니다.
+     */
+    @Test
+    void listQueryUsesUserCreatedIndex() {
+        order(OWNER, Currency.KRW, Currency.JPY, T0);
+        order(OTHER, Currency.KRW, Currency.JPY, T0.plusSeconds(60));
+
+        String noFilter = """
+                select * from exchange_orders
+                 where user_id = '%s'
+                 order by created_at desc, order_id desc
+                 limit 20 offset 0
+                """.formatted(OWNER);
+        String statusAndReExchange = """
+                select * from exchange_orders
+                 where user_id = '%s' and status = 'COMPLETED' and to_currency = 'KRW'
+                 order by created_at desc, order_id desc
+                 limit 20 offset 0
+                """.formatted(OWNER);
+
+        for (String query : List.of(noFilter, statusAndReExchange)) {
+            String plan = explainWithoutSeqScan(query);
+            assertTrue(plan.contains("ix_exchange_orders_user_created"), plan);
+        }
+    }
+
+    private String explainWithoutSeqScan(String query) {
+        return jdbcTemplate.execute((ConnectionCallback<String>) connection -> {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("SET enable_seqscan = off");
+                try (ResultSet rows = statement.executeQuery("EXPLAIN " + query)) {
+                    StringBuilder plan = new StringBuilder();
+                    while (rows.next()) {
+                        plan.append(rows.getString(1)).append('\n');
+                    }
+                    return plan.toString();
+                }
+            } finally {
+                // 풀에 돌아간 연결을 다른 테스트가 쓰므로 원래대로 되돌린다
+                try (Statement statement = connection.createStatement()) {
+                    statement.execute("RESET enable_seqscan");
+                }
+            }
+        });
     }
 
     private Page<ExchangeOrder> page(ExchangeOrderListCondition condition, int page, int size) {
