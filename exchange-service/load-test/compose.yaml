@@ -22,6 +22,8 @@ services:
       - "127.0.0.1:5439:5432"
     volumes:
       - ./init:/docker-entrypoint-initdb.d:ro
+      # 적재 SQL을 컨테이너 안 psql로 실행하려고 이 폴더를 읽기 전용으로 연결
+      - ./:/load-test:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "exchange_app", "-d", "travelpay"]
       interval: 2s
