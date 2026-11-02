@@ -106,6 +106,8 @@ export function handleSummary(data) {
         measureSeconds,
         warmup: WARMUP,
         requests: total,
+        // 예열 포함 전체 요청 수. pg_stat_statements(예열 포함) 검산에 씀
+        requestsAll: metric('http_reqs').count || 0,
         latencyMs: {
             avg: round(duration.avg),
             p50: round(duration.med),

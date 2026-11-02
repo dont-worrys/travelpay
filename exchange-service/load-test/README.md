@@ -12,6 +12,7 @@ DB만 조회할 때와 Redis 캐시를 쓸 때를 같은 방법으로 재서 비
 | `init/01-extensions.sql` | 측정 DB를 처음 만들 때 pg_stat_statements 확장 생성 |
 | `seed-rate-history.sql` | 측정 전에 환율 테이블을 표준 상태로 맞춤 (공식 30일 + 가짜 이력, 쿼리 통계 초기화) |
 | `rate-query.js` | k6 스크립트. 예열 후 측정 구간만 집계해 화면에 표로, `results/`에 JSON으로 남김 |
+| `measure.sh` | 한 단계 측정: 이력 적재 → k6 실행(그동안 DB·커넥션 지표 1초 간격 기록) → 지표 정리 |
 | `results/` | 측정 결과 JSON (커밋하지 않음. 비교에 쓴 값은 측정 기록 문서에 옮겨 적음) |
 
 필요한 것은 Docker뿐입니다. k6는 설치하지 않고 `grafana/k6` 이미지로 실행합니다.
@@ -37,8 +38,17 @@ EXCHANGE_DB_URL="jdbc:postgresql://127.0.0.1:5439/travelpay?currentSchema=exchan
 EXCHANGE_DB_USERNAME=exchange_app EXCHANGE_DB_PASSWORD=load-test-only \
 EXCHANGE_RATE_MODE=mock \
 java -jar exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar \
-  --eureka.client.enabled=false --server.port=18084
+  --eureka.client.enabled=false --server.port=18084 \
+  --management.server.port=18085 \
+  --server.tomcat.max-keep-alive-requests=-1
 ```
+
+측정용으로 붙이는 옵션 두 개 (DB 측정과 Redis 측정 모두 같게):
+
+| 옵션 | 이유 |
+| --- | --- |
+| `--management.server.port=18085` | Actuator(지표)를 별도 포트로 띄움. 같은 포트면 지표 요청이 부하 요청 뒤에 줄 서서, 바쁠 때 지표를 못 읽음 |
+| `--server.tomcat.max-keep-alive-requests=-1` | 톰캣은 기본으로 연결 하나에 요청 100번을 받으면 끊음. 초당 수백 번 새 연결이 생기며 Docker 네트워크에서 가끔 연결 시간 초과(`dial: i/o timeout`)가 남. 측정 중 연결을 계속 재사용하게 함 |
 
 ## 환율 이력 적재 (측정 직전마다)
 
@@ -85,11 +95,28 @@ docker compose run --rm -e VUS=50 -e LABEL=db k6 run --quiet /scripts/rate-query
   1초 초과 0 | 오래된 환율 응답 0
 ```
 
-### 단계마다 순서
+### 한 단계 측정: `measure.sh`
 
-같은 조건에서 시작하도록 단계마다 이력을 다시 적재합니다(쿼리 통계도 0으로 초기화됨).
+이력 적재 → k6 실행 → DB·커넥션 지표 정리를 한 번에 합니다. 단계마다 이력을 다시 적재하므로(쿼리 통계도 0으로) 같은 조건에서 시작합니다.
 
-1. 환율 이력 적재 (`seed-rate-history.sql`)
-2. k6 실행 (`VUS=50`)
-3. 측정 직후 DB·커넥션 지표 기록 (아래 4단계에서 정리)
-4. `VUS=100`, `VUS=300`으로 1~3 반복
+```bash
+cd exchange-service/load-test
+./measure.sh db 50      # LABEL=db, 동시 사용자 50명
+```
+
+결과: `results/db-vus50.json`(k6 응답·처리량) + `results/db-vus50-db.json`(DB·커넥션 지표)
+
+| DB·커넥션 지표 | 출처 | 계산 |
+| --- | --- | --- |
+| `hikariPending` | Actuator `hikaricp_connections_pending` | 연결을 기다리는 요청 수, 측정 구간 표본의 평균·최대 |
+| `hikariActive` | `hikaricp_connections_active` | 사용 중 연결 수(최대 10), 평균·최대 |
+| `acquireMs` | `hikaricp_connections_acquire_seconds` | 연결을 얻는 데 걸린 시간. 평균은 구간의 합계·횟수 차이, 최대는 `_max`의 최댓값 |
+| `dbActiveSessions` | `pg_stat_activity` (state=active) | DB에서 실제로 실행 중인 쿼리 수, 평균·최대 |
+| `rateSelectCalls` | `pg_stat_statements` | 환율 SELECT 호출 수. 예열·수집기 포함이라 검산용 (≈ 전체 요청 × 2 + 수집기) |
+
+- 표본은 1초 간격이 목표지만, 부하가 높으면 지표 요청이 늦어 1~3초 간격이 됩니다. `samples`에 실제 표본 수가 남습니다.
+- 한 PC에서 k6·Docker·앱·DB가 CPU를 나눠 써서 실행마다 수치가 흔들립니다. **단계마다 3번 실행하고 중앙값**을 씁니다.
+
+```bash
+for vus in 50 100 300; do for rep in 1 2 3; do ./measure.sh "db-r$rep" "$vus"; done; done
+```
