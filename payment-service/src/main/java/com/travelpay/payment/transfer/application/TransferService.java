@@ -14,6 +14,7 @@ import com.travelpay.common.util.PageableUtils;
 import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
 import com.travelpay.payment.transfer.client.TransferLedgerClient;
+import com.travelpay.payment.transfer.client.TransferLedgerException;
 import com.travelpay.payment.transfer.client.TransferUserReader;
 import com.travelpay.payment.transfer.client.TransferWalletReader;
 import com.travelpay.payment.transfer.client.WalletResponse;
@@ -222,6 +223,16 @@ public class TransferService {
         LedgerTransactionResponse result;
         try {
             result = ledgerClient.get().register(LedgerTransactionRequest.of(transfer));
+        } catch (TransferLedgerException exception) {
+            if (exception.getKind() == TransferLedgerException.Kind.REQUEST_NOT_ACCEPTED) {
+                // 원장이 받아들이지 않은 요청(409·400 등)은 송금 요청을 잘못 만든 버그나 계약 불일치라 확인이 필요합니다.
+                log.error("원장이 거래 등록 요청을 받아들이지 않아 처리 중으로 둡니다. transferId={}",
+                        transfer.getId(), exception);
+            } else {
+                log.warn("원장 거래 등록 결과를 확인할 수 없어 처리 중으로 둡니다. transferId={}",
+                        transfer.getId(), exception);
+            }
+            return transfer;
         } catch (RuntimeException exception) {
             log.warn("원장 거래 등록 결과를 확인할 수 없어 처리 중으로 둡니다. transferId={}", transfer.getId(), exception);
             return transfer;
