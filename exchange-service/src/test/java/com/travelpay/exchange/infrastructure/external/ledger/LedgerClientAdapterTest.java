@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.travelpay.common.response.ApiResponse;
 import com.travelpay.exchange.domain.ledger.LedgerDirection;
 import com.travelpay.exchange.domain.ledger.LedgerEntry;
 import com.travelpay.exchange.domain.ledger.LedgerEntryType;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -49,22 +51,37 @@ class LedgerClientAdapterTest {
     private final LedgerFeignClient feignClient = mock(LedgerFeignClient.class);
     private final LedgerClientAdapter adapter = new LedgerClientAdapter(feignClient);
 
+    /** 원장 서비스의 성공 응답 JSON이 공통 ApiResponse와 data record로 해석되는지 확인합니다. Feign도 Jackson으로 같은 타입을 만듭니다. */
+    @Test
+    void readsLedgerJsonIntoCommonApiResponse() {
+        ApiResponse<LedgerTransactionResponse> response = JsonMapper.builder().build().readValue("""
+                {"success":true,"data":{"transactionId":"%s","status":"POSTED"},"error":null}
+                """.formatted(TX_ID), new TypeReference<ApiResponse<LedgerTransactionResponse>>() {
+        });
+
+        assertEquals(ApiResponse.success(new LedgerTransactionResponse(TX_ID, "POSTED")), response);
+    }
+
     @Test
     void postedWithTransactionId() {
-        when(feignClient.register(any())).thenReturn(new LedgerTransactionResponse(true,
-                new LedgerTransactionResponse.Data(TX_ID, "POSTED"), null));
+        when(feignClient.register(any()))
+                .thenReturn(ApiResponse.success(new LedgerTransactionResponse(TX_ID, "POSTED")));
 
         assertEquals(new LedgerPostResult.Posted(TX_ID), adapter.post(POSTING));
     }
 
+    /** 본문은 읽었는데 내용이 계약과 다르면 다시 보내도 같은 응답이라 사람 확인(Invalid)이다 */
     @Test
     void successWithoutPostedTransactionIsMalformed() {
-        when(feignClient.register(any())).thenReturn(new LedgerTransactionResponse(true,
-                new LedgerTransactionResponse.Data(null, "POSTED"), null));
+        when(feignClient.register(any()))
+                .thenReturn(ApiResponse.success(new LedgerTransactionResponse(null, "POSTED")));
         assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
 
-        when(feignClient.register(any())).thenReturn(new LedgerTransactionResponse(true,
-                new LedgerTransactionResponse.Data(TX_ID, "REJECTED"), null));
+        when(feignClient.register(any()))
+                .thenReturn(ApiResponse.success(new LedgerTransactionResponse(TX_ID, "REJECTED")));
+        assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
+
+        when(feignClient.register(any())).thenReturn(ApiResponse.success(null));
         assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
     }
 
@@ -109,11 +126,12 @@ class LedgerClientAdapterTest {
         assertEquals(new LedgerPostResult.Unknown("RetryableException"), adapter.post(POSTING));
     }
 
+    /** 2xx인데 본문을 해석하지 못하면 원장은 이미 기록했을 수 있다. 같은 요청을 다시 보내 결과를 확인하도록 Unknown이다 */
     @Test
-    void unreadableSuccessBodyIsMalformed() {
+    void unreadableSuccessBodyIsUnknown() {
         when(feignClient.register(any())).thenThrow(new DecodeException(201, "bad json", REQUEST));
 
-        assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
+        assertEquals(new LedgerPostResult.Unknown("응답 본문 해석 실패(HTTP 201)"), adapter.post(POSTING));
     }
 
     @Test
