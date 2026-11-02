@@ -126,6 +126,24 @@ class LedgerClientAdapterTest {
         assertEquals(new LedgerPostResult.Unknown("RetryableException"), adapter.post(POSTING));
     }
 
+    /** 따라가지 않은 리다이렉트는 원장 거래 등록까지 가지 못한 설정 오류라, 다시 보내도 같아 사람 확인이다 */
+    @ParameterizedTest
+    @ValueSource(ints = {301, 302, 307})
+    void unfollowedRedirectIsMalformed(int status) {
+        when(feignClient.register(any())).thenThrow(error(status, ""));
+
+        assertEquals(invalid(InvalidKind.MALFORMED_RESPONSE), adapter.post(POSTING));
+    }
+
+    /** Retry-After가 있는 3xx는 Feign이 RetryableException으로 주므로 다시 확인한다 */
+    @Test
+    void retryableRedirectIsUnknown() {
+        when(feignClient.register(any())).thenThrow(
+                new RetryableException(302, "redirect", Request.HttpMethod.POST, (Long) null, REQUEST));
+
+        assertEquals(new LedgerPostResult.Unknown("HTTP 302"), adapter.post(POSTING));
+    }
+
     /** 2xx인데 본문을 해석하지 못하면 원장은 이미 기록했을 수 있다. 같은 요청을 다시 보내 결과를 확인하도록 Unknown이다 */
     @Test
     void unreadableSuccessBodyIsUnknown() {

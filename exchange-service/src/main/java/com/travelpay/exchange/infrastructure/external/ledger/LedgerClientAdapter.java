@@ -9,6 +9,7 @@ import com.travelpay.exchange.domain.ledger.LedgerPostResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult.InvalidKind;
 import com.travelpay.exchange.domain.ledger.LedgerPosting;
 import feign.FeignException;
+import feign.RetryableException;
 import feign.codec.DecodeException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,7 +22,7 @@ import org.springframework.stereotype.Component;
  * - 4xx로 거절되지 않은 실패(타임아웃·연결 실패·5xx·2xx인데 본문을 해석하지 못함): Unknown
  *   원장이 이미 기록했을 수 있으므로 실패로 끝내지 않고 같은 요청을 다시 보내 결과를 확인한다.
  * - 400: Invalid(BAD_REQUEST), 409: Invalid(CONFLICT)
- * - 그 밖의 4xx·본문은 읽었지만 내용이 계약과 다른 성공 응답: Invalid(MALFORMED_RESPONSE)
+ * - 그 밖의 4xx·따라가지 않은 3xx·본문은 읽었지만 내용이 계약과 다른 성공 응답: Invalid(MALFORMED_RESPONSE)
  */
 @Slf4j
 @Component
@@ -52,6 +53,11 @@ public class LedgerClientAdapter implements LedgerClient {
 
     private static LedgerPostResult classify(LedgerPosting posting, FeignException e) {
         if (!FeignErrors.isRejected(e)) {
+            // 따라가지 않은 리다이렉트(3xx)는 원장 거래 등록까지 가지 못한 설정 오류라 다시 보내도 같다.
+            // Retry-After가 있는 3xx는 Feign이 RetryableException으로 주므로 다시 확인(Unknown)한다.
+            if (e.status() >= 300 && e.status() < 400 && !(e instanceof RetryableException)) {
+                return invalid(posting, InvalidKind.MALFORMED_RESPONSE, "HTTP " + e.status());
+            }
             String cause = cause(e);
             log.warn("원장 결과를 확인하지 못했습니다: orderId={}, cause={}", posting.orderId(), cause);
             return new LedgerPostResult.Unknown(cause);
