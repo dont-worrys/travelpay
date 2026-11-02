@@ -1,6 +1,7 @@
 package com.travelpay.wallet.infra.client.user;
 
 import com.travelpay.common.auth.AuthHeaders;
+import com.travelpay.common.response.ApiResponse;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -17,7 +18,7 @@ import java.util.UUID;
 public interface UserFeignClient {
 
     @GetMapping("/{userId}/funding-identity")
-    UserApiResponse<UserFundingIdentityResponse> getFundingIdentity(
+    ApiResponse<UserFundingIdentityResponse> getFundingIdentity(
             @PathVariable("userId") UUID userId,
             @RequestHeader(AuthHeaders.USER_ID) UUID requesterId,
             @RequestHeader(AuthHeaders.USER_ROLE) String requesterRole);

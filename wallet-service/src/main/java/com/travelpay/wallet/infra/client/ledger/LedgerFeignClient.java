@@ -1,5 +1,6 @@
 package com.travelpay.wallet.infra.client.ledger;
 
+import com.travelpay.common.response.ApiResponse;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -18,8 +19,8 @@ import java.util.UUID;
 public interface LedgerFeignClient {
 
     @PostMapping
-    LedgerApiResponse<List<LedgerAccountResponse>> openWalletAccounts(@RequestBody OpenLedgerAccountsRequest request);
+    ApiResponse<List<LedgerAccountResponse>> openWalletAccounts(@RequestBody OpenLedgerAccountsRequest request);
 
     @GetMapping
-    LedgerApiResponse<List<LedgerAccountResponse>> getWalletAccounts(@RequestParam("walletId") UUID walletId);
+    ApiResponse<List<LedgerAccountResponse>> getWalletAccounts(@RequestParam("walletId") UUID walletId);
 }

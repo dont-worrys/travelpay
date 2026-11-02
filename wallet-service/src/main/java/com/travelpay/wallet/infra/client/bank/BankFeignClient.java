@@ -1,5 +1,6 @@
 package com.travelpay.wallet.infra.client.bank;
 
+import com.travelpay.common.response.ApiResponse;
 import org.springframework.cloud.openfeign.FeignClient;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -13,8 +14,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 public interface BankFeignClient {
 
     @PostMapping("/withdrawals")
-    BankApiResponse<BankTransactionResponse> withdraw(@RequestBody BankWithdrawalRequest request);
+    ApiResponse<BankTransactionResponse> withdraw(@RequestBody BankWithdrawalRequest request);
 
     @PostMapping("/refunds")
-    BankApiResponse<BankTransactionResponse> refund(@RequestBody BankRefundRequest request);
+    ApiResponse<BankTransactionResponse> refund(@RequestBody BankRefundRequest request);
 }
