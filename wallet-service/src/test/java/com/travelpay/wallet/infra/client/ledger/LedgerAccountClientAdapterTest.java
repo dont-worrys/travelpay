@@ -2,10 +2,13 @@ package com.travelpay.wallet.infra.client.ledger;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.error.ErrorCode;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.wallet.application.wallet.LedgerResponseException;
 import com.travelpay.wallet.application.wallet.dto.LedgerAccount;
+import com.travelpay.wallet.domain.WalletErrorCode;
 import feign.FeignException;
+import feign.codec.EncodeException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -96,43 +99,70 @@ class LedgerAccountClientAdapterTest {
         assertTrue(output.getOut().contains("status=200"));
     }
 
-    @ParameterizedTest
-    @ValueSource(ints = {500, 502})
-    void 상대_500_502는_502이고_ERROR를_남기지_않는다(int status, CapturedOutput output) {
-        givenFindFails(response(status, ""));
+    @Test
+    void 요청_인코딩_실패는_502() {
+        givenFindFails(new EncodeException("요청을 만들 수 없습니다."));
 
         assertFindFails(CommonErrorCode.BAD_GATEWAY);
-        assertFalse(output.getOut().contains("ERROR"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {500, 501, 502, 503, 504, 505})
+    void 원장_5xx는_원장_장애_503과_WARN(int status, CapturedOutput output) {
+        givenFindFails(response(status, ""));
+        assertFindFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
+
+        when(feignClient.openWalletAccounts(any())).thenThrow(response(status, ""));
+        assertOpenFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
+
+        assertOutageLogged(output, "HTTP_" + status);
+        assertTrue(output.getOut().contains("status=" + status));
     }
 
     @Test
-    void 상대_503과_연결_실패는_503() {
-        givenFindFails(response(503, ""));
-        assertFindFails(CommonErrorCode.SERVICE_UNAVAILABLE);
+    void 연결_실패는_원장_장애_503과_WARN(CapturedOutput output) {
+        givenFindFails(connectionRefused());
+        assertFindFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
 
         when(feignClient.openWalletAccounts(any())).thenThrow(connectionRefused());
-        assertOpenFails(CommonErrorCode.SERVICE_UNAVAILABLE);
+        assertOpenFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
+
+        assertOutageLogged(output, "CONNECTION_FAILURE");
+        assertTrue(output.getOut().contains("exception=java.net.ConnectException"));
+        assertFalse(output.getOut().contains("Connection refused"));
     }
 
     @Test
-    void 상대_504와_시간_초과는_504() {
-        givenFindFails(response(504, ""));
-        assertFindFails(CommonErrorCode.GATEWAY_TIMEOUT);
+    void 시간_초과는_원장_장애_503과_WARN(CapturedOutput output) {
+        givenFindFails(timeout());
+        assertFindFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
 
         when(feignClient.openWalletAccounts(any())).thenThrow(timeout());
-        assertOpenFails(CommonErrorCode.GATEWAY_TIMEOUT);
+        assertOpenFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
+
+        assertOutageLogged(output, "TIMEOUT");
+        assertTrue(output.getOut().contains("exception=java.net.SocketTimeoutException"));
+        assertFalse(output.getOut().contains("Read timed out"));
+    }
+
+    private void assertOutageLogged(CapturedOutput output, String type) {
+        assertTrue(output.getOut().contains("WARN"));
+        assertTrue(output.getOut().contains("type=" + type));
+        assertTrue(output.getOut().contains("walletId=" + walletId));
+        assertFalse(output.getOut().contains("ERROR"));
     }
 
     private void givenFindFails(FeignException failure) {
         when(feignClient.getWalletAccounts(any())).thenThrow(failure);
     }
 
-    private void assertFindFails(CommonErrorCode errorCode) {
+    private void assertFindFails(ErrorCode errorCode) {
         BusinessException e = assertThrows(BusinessException.class, () -> adapter.findAccounts(walletId));
         assertEquals(errorCode, e.getErrorCode());
+        assertEquals(errorCode.getStatus(), e.getErrorCode().getStatus());
     }
 
-    private void assertOpenFails(CommonErrorCode errorCode) {
+    private void assertOpenFails(ErrorCode errorCode) {
         BusinessException e = assertThrows(BusinessException.class, () -> adapter.openAccounts(walletId));
         assertEquals(errorCode, e.getErrorCode());
     }
