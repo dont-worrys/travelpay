@@ -42,7 +42,7 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
                 .andExpect(jsonPath("$.success").value(false))
                 .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
 
-        verifyNoInteractions(walletClient, userClient, ledgerFeignClient);
+        verifyNoInteractions(walletFeignApi, userFeignApi, ledgerFeignApi);
         assertEquals(0L, countTransfersOf(senderId));
     }
 
@@ -85,7 +85,7 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
     @Test
     void senderComesFromHeaderNotFromBody() throws Exception {
         UUID spoofed = UUID.randomUUID();
-        doReturn(posted(UUID.randomUUID())).when(ledgerFeignClient).register(any());
+        doReturn(posted(UUID.randomUUID())).when(ledgerFeignApi).register(any());
 
         UUID transferId = transferIdOf(mvc.perform(asUser(post("/api/v1/transfers"), senderId)
                         .header(TransferController.IDEMPOTENCY_KEY_HEADER, "tc26-spoof")
@@ -100,13 +100,13 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
         assertEquals(senderId, row.get("sender_id"));
         assertEquals(receiverId, row.get("receiver_id"));
         assertEquals(0L, countTransfersOf(spoofed));
-        verify(walletClient, never()).getWallet(spoofed);
+        verify(walletFeignApi, never()).getWallet(spoofed);
     }
 
     /** TC-26-I5: 상세는 송금인·수취인만(각자 기준 direction), 제3자는 404. 취소는 송금인만이며 수취인·제3자는 404입니다. */
     @Test
     void transferIsScopedToItsParticipants() throws Exception {
-        doReturn(posted(UUID.randomUUID())).when(ledgerFeignClient).register(any());
+        doReturn(posted(UUID.randomUUID())).when(ledgerFeignApi).register(any());
         UUID transferId = transferIdOf(requestTransfer("tc26-scope").andExpect(status().isCreated()));
         UUID stranger = UUID.randomUUID();
 

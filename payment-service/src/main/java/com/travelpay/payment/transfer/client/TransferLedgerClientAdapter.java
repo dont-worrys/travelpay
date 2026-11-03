@@ -5,12 +5,17 @@ import java.util.Optional;
 
 import com.travelpay.common.feign.FeignErrors;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse.RejectReason;
 import feign.FeignException;
 import org.springframework.stereotype.Component;
 
 /**
- * 원장 거래 등록 응답을 송금 쪽 결과로 해석합니다. 응답 본문은 결과·예외 메시지에 싣지 않고 오류 코드만 사용합니다.
+ * 송금을 원장 거래 등록 API({@link LedgerFeignApi#register}, 결제와 같은 클라이언트)로 보내고 응답을 송금 쪽 결과로 해석합니다.
+ * 송금은 원거래가 없으므로 originalTransactionId는 null로 보냅니다. 원장 요청 해시는 originalTransactionId를 포함하지만
+ * 전환 전에도 이 필드를 보내지 않아(null) 해시가 같으므로, 진행 중인 송금의 재전송이 409가 되지 않습니다.
+ * 자동 재시도는 {@code LedgerFeignConfig}에서 꺼져 있고, 타임아웃은 paymentLedgerApi 설정(연결 1초·읽기 6초)을 따릅니다.
+ * 응답 해석: 응답 본문은 결과·예외 메시지에 싣지 않고 오류 코드만 사용합니다.
  * <ul>
  *     <li>201·200 + status POSTED → {@link LedgerTransactionResponse#posted}</li>
  *     <li>422 + LEDGER_REJECTED_* → {@link LedgerTransactionResponse#rejected} (같은 reference 재요청도 같은 422)</li>
@@ -30,17 +35,17 @@ public class TransferLedgerClientAdapter implements TransferLedgerClient {
             "LEDGER_REJECTED_ACCOUNT_NOT_FOUND", RejectReason.ACCOUNT_NOT_FOUND
     );
 
-    private final TransferLedgerFeignClient feignClient;
+    private final LedgerFeignApi ledgerFeignApi;
 
-    public TransferLedgerClientAdapter(TransferLedgerFeignClient feignClient) {
-        this.feignClient = feignClient;
+    public TransferLedgerClientAdapter(LedgerFeignApi ledgerFeignApi) {
+        this.ledgerFeignApi = ledgerFeignApi;
     }
 
     @Override
     public LedgerTransactionResponse register(LedgerTransactionRequest request) {
-        ApiResponse<LedgerRegisterResponse> response;
+        ApiResponse<LedgerFeignApi.TransactionResponse> response;
         try {
-            response = feignClient.register(request);
+            response = ledgerFeignApi.register(toRegisterRequest(request));
         } catch (FeignException exception) {
             return rejectedOrThrow(exception);
         }
@@ -50,6 +55,19 @@ public class TransferLedgerClientAdapter implements TransferLedgerClient {
             throw TransferLedgerException.resultUnknown("원장 성공 응답을 해석할 수 없습니다.", null);
         }
         return LedgerTransactionResponse.posted(response.data().transactionId());
+    }
+
+    private static LedgerFeignApi.RegisterRequest toRegisterRequest(LedgerTransactionRequest request) {
+        return new LedgerFeignApi.RegisterRequest(
+                request.referenceType(),
+                request.referenceId(),
+                request.userId(),
+                null,
+                request.entries().stream()
+                        .map(entry -> new LedgerFeignApi.Entry(entry.ownerType(), entry.walletId(), entry.currency(),
+                                entry.direction(), entry.amount(), entry.entryType()))
+                        .toList()
+        );
     }
 
     private static LedgerTransactionResponse rejectedOrThrow(FeignException exception) {

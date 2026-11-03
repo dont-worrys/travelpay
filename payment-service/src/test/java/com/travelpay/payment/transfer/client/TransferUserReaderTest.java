@@ -10,6 +10,7 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.payment.infra.client.user.UserFeignApi;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
@@ -35,26 +36,26 @@ class TransferUserReaderTest {
             {"success":false,"data":null,"error":{"code":"USER_RECIPIENT_NOT_FOUND","message":"수취인을 찾을 수 없습니다.","details":[]}}
             """;
 
-    private UserClient userClient;
+    private UserFeignApi userFeignApi;
     private TransferUserReader userReader;
 
     @BeforeEach
     void setUp() {
-        userClient = mock(UserClient.class);
-        userReader = new TransferUserReader(userClient);
+        userFeignApi = mock(UserFeignApi.class);
+        userReader = new TransferUserReader(userFeignApi);
     }
 
     @Test
     void returnsActiveRecipient() {
-        when(userClient.getRecipient(USER_ID))
-                .thenReturn(ApiResponse.success(new UserRecipientResponse(USER_ID, "홍길동")));
+        when(userFeignApi.getActiveUser(USER_ID))
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(USER_ID, "홍길동")));
 
         assertEquals(Optional.of(new UserRecipientResponse(USER_ID, "홍길동")), userReader.findRecipient(USER_ID));
     }
 
     @Test
     void treatsRecipientNotFoundAsEmpty() {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(404, RECIPIENT_NOT_FOUND_BODY));
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(404, RECIPIENT_NOT_FOUND_BODY));
 
         assertEquals(Optional.empty(), userReader.findRecipient(USER_ID));
     }
@@ -67,7 +68,7 @@ class TransferUserReaderTest {
             ""
     })
     void reportsNotFoundOtherThanMissingRecipientAsBadGateway(String body) {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(404, body));
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(404, body));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
 
@@ -77,7 +78,7 @@ class TransferUserReaderTest {
     @ParameterizedTest
     @ValueSource(ints = {400, 409, 500})
     void doesNotTreatRecipientNotFoundCodeWithOtherStatusAsEmpty(int status) {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(status, RECIPIENT_NOT_FOUND_BODY));
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(status, RECIPIENT_NOT_FOUND_BODY));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
 
@@ -86,7 +87,7 @@ class TransferUserReaderTest {
 
     @Test
     void reportsRecipientNotFoundCodeWithServiceUnavailableStatusAsServiceUnavailable() {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(503, RECIPIENT_NOT_FOUND_BODY));
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(503, RECIPIENT_NOT_FOUND_BODY));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
 
@@ -95,7 +96,7 @@ class TransferUserReaderTest {
 
     @Test
     void keepsUserServiceRateLimitAsTooManyRequests() {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(429, """
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(429, """
                 {"success":false,"data":null,"error":{"code":"COMMON_TOO_MANY_REQUESTS","message":"요청이 너무 많습니다.","details":[]}}
                 """));
 
@@ -106,7 +107,7 @@ class TransferUserReaderTest {
 
     @Test
     void reportsConnectionProblemsAsServiceUnavailable() {
-        when(userClient.getRecipient(USER_ID)).thenThrow(new RetryableException(-1, "Connection refused",
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(new RetryableException(-1, "Connection refused",
                 Request.HttpMethod.GET, new ConnectException("Connection refused"), (Long) null, request()));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
@@ -116,7 +117,7 @@ class TransferUserReaderTest {
 
     @Test
     void reportsTimeoutAsGatewayTimeout() {
-        when(userClient.getRecipient(USER_ID)).thenThrow(new RetryableException(-1, "Read timed out",
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(new RetryableException(-1, "Read timed out",
                 Request.HttpMethod.GET, new SocketTimeoutException("Read timed out"), (Long) null, request()));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
@@ -126,7 +127,7 @@ class TransferUserReaderTest {
 
     @Test
     void reportsUserServiceGatewayTimeoutAsGatewayTimeout() {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(504, null));
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(504, null));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
 
@@ -139,7 +140,7 @@ class TransferUserReaderTest {
             "{\"success\":false,\"data\":null,\"error\":{\"code\":\"COMMON_SERVICE_UNAVAILABLE\",\"message\":\"서비스를 일시적으로 사용할 수 없습니다.\",\"details\":[]}}"
     })
     void reportsUserServiceUnavailableAsServiceUnavailable(String body) {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(503, body));
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(503, body));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
 
@@ -148,7 +149,7 @@ class TransferUserReaderTest {
 
     @Test
     void reportsOtherUserServiceErrorsAsBadGateway() {
-        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(500, null));
+        when(userFeignApi.getActiveUser(USER_ID)).thenThrow(feignError(500, null));
 
         var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
 
@@ -157,13 +158,13 @@ class TransferUserReaderTest {
 
     @Test
     void reportsUnexpectedResponseBodyAsBadGateway() {
-        when(userClient.getRecipient(USER_ID))
+        when(userFeignApi.getActiveUser(USER_ID))
                 .thenReturn(new ApiResponse<>(false, null, ErrorResponse.of(CommonErrorCode.INTERNAL_SERVER_ERROR)))
                 .thenReturn(ApiResponse.success(null))
-                .thenReturn(ApiResponse.success(new UserRecipientResponse(USER_ID, null)))
-                .thenReturn(ApiResponse.success(new UserRecipientResponse(USER_ID, "  ")))
-                .thenReturn(ApiResponse.success(new UserRecipientResponse(null, "홍길동")))
-                .thenReturn(ApiResponse.success(new UserRecipientResponse(OTHER_USER_ID, "홍길동")));
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(USER_ID, null)))
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(USER_ID, "  ")))
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(null, "홍길동")))
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(OTHER_USER_ID, "홍길동")));
 
         for (int i = 0; i < 6; i++) {
             var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
@@ -174,6 +175,7 @@ class TransferUserReaderTest {
     @Test
     void doesNotExposeRealNameInStringRepresentation() {
         assertFalse(new UserRecipientResponse(USER_ID, "홍길동").toString().contains("홍길동"));
+        assertFalse(new UserFeignApi.UserResponse(USER_ID, "홍길동").toString().contains("홍길동"));
     }
 
     private static Request request() {
@@ -190,6 +192,6 @@ class TransferUserReaderTest {
         if (body != null) {
             builder.body(body, UTF_8);
         }
-        return FeignException.errorStatus("UserClient#getRecipient(UUID)", builder.build());
+        return FeignException.errorStatus("UserFeignApi#getActiveUser(UUID)", builder.build());
     }
 }

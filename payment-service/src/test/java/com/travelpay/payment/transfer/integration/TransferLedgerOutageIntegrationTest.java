@@ -91,7 +91,7 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
         mvc.perform(asUser(post("/api/v1/transfers/{id}/cancel", transferId), senderId))
                 .andExpect(status().isConflict());
 
-        verify(ledgerFeignClient, times(1)).register(any());
+        verify(ledgerFeignApi, times(1)).register(any());
         assertEquals(1, ((Number) row(transferId).get("attempt_count")).intValue());
         assertEquals(1L, countTransfersOf(senderId));
     }
@@ -101,7 +101,7 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
     void recoversToCompletedAfterLedgerComesBack() throws Exception {
         givenLedgerOutage("NO_INSTANCE_503");
         UUID transferId = transferIdOf(requestTransfer("tc08-back").andExpect(status().isAccepted()));
-        doReturn(posted(UUID.randomUUID())).when(ledgerFeignClient).register(any());
+        doReturn(posted(UUID.randomUUID())).when(ledgerFeignApi).register(any());
 
         int settled = transferService.recoverDue(updatedAt(transferId).plusSeconds(31), 10);
 
@@ -113,7 +113,7 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
         requestTransfer("tc08-back")
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.data.status").value("COMPLETED"));
-        verify(ledgerFeignClient, times(2)).register(any());
+        verify(ledgerFeignApi, times(2)).register(any());
     }
 
     /** TC-08-I9: 장애가 이어지면 다음 대기 시간(60초)까지 기다렸다가 다시 시도하고, 그 사이 시도 횟수만 늘어납니다. */
@@ -126,10 +126,10 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
         assertEquals(2, ((Number) row(transferId).get("attempt_count")).intValue());
         Instant secondTriedAt = updatedAt(transferId);
         transferService.recoverDue(secondTriedAt.plusSeconds(59), 10);
-        verify(ledgerFeignClient, times(2)).register(any());
+        verify(ledgerFeignApi, times(2)).register(any());
 
         transferService.recoverDue(secondTriedAt.plusSeconds(61), 10);
-        verify(ledgerFeignClient, times(3)).register(any());
+        verify(ledgerFeignApi, times(3)).register(any());
         assertEquals(3, ((Number) row(transferId).get("attempt_count")).intValue());
         assertEquals("PROCESSING", row(transferId).get("status"));
     }
@@ -139,25 +139,25 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
         switch (outage) {
             case "CONNECT_REFUSED" -> doThrow(new RetryableException(-1, "Connection refused", Request.HttpMethod.POST,
                     new ConnectException("Connection refused"), (Long) null, request))
-                    .when(ledgerFeignClient).register(any());
+                    .when(ledgerFeignApi).register(any());
             case "READ_TIMEOUT" -> doThrow(new RetryableException(-1, "Read timed out", Request.HttpMethod.POST,
                     new SocketTimeoutException("Read timed out"), (Long) null, request))
-                    .when(ledgerFeignClient).register(any());
+                    .when(ledgerFeignApi).register(any());
             case "NO_INSTANCE_503" -> doThrow(error(503,
                     "Load balancer does not contain an instance for the service ledger-service"))
-                    .when(ledgerFeignClient).register(any());
+                    .when(ledgerFeignApi).register(any());
             case "HTTP_500" -> doThrow(ledgerError(500, "COMMON_INTERNAL_SERVER_ERROR"))
-                    .when(ledgerFeignClient).register(any());
-            case "HTTP_502" -> doThrow(ledgerError(502, "COMMON_BAD_GATEWAY")).when(ledgerFeignClient).register(any());
+                    .when(ledgerFeignApi).register(any());
+            case "HTTP_502" -> doThrow(ledgerError(502, "COMMON_BAD_GATEWAY")).when(ledgerFeignApi).register(any());
             case "HTTP_504" -> doThrow(ledgerError(504, "COMMON_GATEWAY_TIMEOUT"))
-                    .when(ledgerFeignClient).register(any());
-            case "UNREADABLE_2XX" -> doReturn(ApiResponse.success(null)).when(ledgerFeignClient).register(any());
+                    .when(ledgerFeignApi).register(any());
+            case "UNREADABLE_2XX" -> doReturn(ApiResponse.success(null)).when(ledgerFeignApi).register(any());
             default -> throw new IllegalArgumentException(outage);
         }
     }
 
     private static FeignException error(int status, String body) {
-        return feignError("TransferLedgerFeignClient#register(LedgerTransactionRequest)", Request.HttpMethod.POST,
+        return feignError("LedgerFeignApi#register(RegisterRequest)", Request.HttpMethod.POST,
                 LEDGER_URL, status, body);
     }
 }

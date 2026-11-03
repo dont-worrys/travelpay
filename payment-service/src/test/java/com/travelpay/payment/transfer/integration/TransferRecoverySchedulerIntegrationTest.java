@@ -9,7 +9,7 @@ import java.util.UUID;
 
 import com.travelpay.payment.transfer.application.TransferRecoveryScheduler;
 import com.travelpay.payment.transfer.application.TransferService;
-import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
 import com.travelpay.payment.transfer.support.TransferApiIntegrationSupport;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
@@ -64,7 +64,7 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
         UUID transferId = processingTransfer("tc10-complete");
         makeDue(transferId);
         UUID ledgerTransactionId = UUID.randomUUID();
-        doReturn(posted(ledgerTransactionId)).when(ledgerFeignClient).register(any());
+        doReturn(posted(ledgerTransactionId)).when(ledgerFeignApi).register(any());
 
         scheduler.recover();
 
@@ -73,8 +73,8 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
         assertEquals(1, ((Number) row.get("attempt_count")).intValue());
         assertNull(row.get("failure_reason"));
         assertNull(row.get("review_reason"));
-        ArgumentCaptor<LedgerTransactionRequest> sent = ArgumentCaptor.forClass(LedgerTransactionRequest.class);
-        verify(ledgerFeignClient, times(2)).register(sent.capture());
+        ArgumentCaptor<LedgerFeignApi.RegisterRequest> sent = ArgumentCaptor.forClass(LedgerFeignApi.RegisterRequest.class);
+        verify(ledgerFeignApi, times(2)).register(sent.capture());
         assertEquals(sent.getAllValues().get(0), sent.getAllValues().get(1));
         assertEquals(transferId, sent.getValue().referenceId());
         assertEquals("TRANSFER", sent.getValue().referenceType());
@@ -82,18 +82,18 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
         requestTransfer("tc10-complete")
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.data.status").value("COMPLETED"));
-        verify(ledgerFeignClient, times(2)).register(any());
+        verify(ledgerFeignApi, times(2)).register(any());
     }
 
     /** TC-10-I2: 재시도 대기 시간(30초)이 지나지 않은 송금은 다루지 않습니다. */
     @Test
     void skipsTransferBeforeRetryWait() throws Exception {
         UUID transferId = processingTransfer("tc10-not-due");
-        clearInvocations(ledgerFeignClient);
+        clearInvocations(ledgerFeignApi);
 
         scheduler.recover();
 
-        verify(ledgerFeignClient, never()).register(any());
+        verify(ledgerFeignApi, never()).register(any());
         assertEquals("PROCESSING", row(transferId).get("status"));
     }
 
@@ -107,7 +107,7 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
             setTimes(id, base, base.plusSeconds(i));
             ids.add(id);
         }
-        doReturn(posted(UUID.randomUUID())).when(ledgerFeignClient).register(any());
+        doReturn(posted(UUID.randomUUID())).when(ledgerFeignApi).register(any());
 
         scheduler.recover();
 
@@ -128,11 +128,11 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
             setTimes(id, base, base.plusSeconds(i));
             ids.add(id);
         }
-        clearInvocations(ledgerFeignClient);
+        clearInvocations(ledgerFeignApi);
 
         assertDoesNotThrow(scheduler::recover);
 
-        verify(ledgerFeignClient, times(3)).register(any());
+        verify(ledgerFeignApi, times(3)).register(any());
         for (int i = 0; i < 5; i++) {
             assertEquals("PROCESSING", row(ids.get(i)).get("status"));
             assertEquals(i < 3 ? 2 : 1, ((Number) row(ids.get(i)).get("attempt_count")).intValue(), "index " + i);
@@ -172,7 +172,7 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
 
     /** 원장 503으로 결과 모름(PROCESSING, 시도 1)인 송금을 API로 만듭니다. */
     private UUID processingTransfer(String key) throws Exception {
-        doThrow(ledgerError(503, "COMMON_SERVICE_UNAVAILABLE")).when(ledgerFeignClient).register(any());
+        doThrow(ledgerError(503, "COMMON_SERVICE_UNAVAILABLE")).when(ledgerFeignApi).register(any());
         UUID id = transferIdOf(requestTransfer(key)
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.data.status").value("PROCESSING")));
