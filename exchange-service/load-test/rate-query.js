@@ -1,15 +1,21 @@
 // 환율 조회 부하 측정 스크립트입니다. 사용자 수 단계(50/100/300명)마다 한 번씩 실행합니다.
 // 실행 방법과 단계별 순서는 README.md를 봅니다.
 //
-// 흐름: 예열(WARMUP) 동안 같은 사용자 수로 요청만 보내고 집계에서 뺀 뒤, 측정(DURATION) 구간만 집계합니다.
-// 각 가상 사용자는 쉬지 않고 환율 조회를 반복합니다(요청 사이 대기 없음). 서버가 받아낼 수 있는 최대 처리량을 봅니다.
+// 흐름: 같은 가상 사용자 VUS명이 예열(WARMUP) + 측정(DURATION) 내내 쉬지 않고 환율 조회를 반복합니다.
+// 요청마다 테스트 경과 시간으로 예열/측정을 표시하고(phase 태그), 측정 구간에 시작한 요청만 집계합니다.
+// 예열과 측정을 시나리오 두 개로 나누면 k6가 시나리오마다 다른 가상 사용자를 써서, 경계에서
+// 예열 요청이 측정 구간으로 넘어와 부하가 겹치거나 새 사용자들이 한꺼번에 연결을 맺어 일부가 거부됐습니다.
+// 한 시나리오로 두면 예열 때 맺은 연결을 이어 쓰고, 측정 1분 내내 동시 요청 수가 정확히 VUS개로 유지됩니다.
+//
+// VUS는 "쉬는 시간 없는 동시 요청 수"입니다. 실제 사용자는 조회 사이에 쉬므로 실제 사용자 수로는 훨씬 많습니다.
+// (리틀의 법칙: 동시 사용자 ≈ 처리량 × (응답 시간 + 쉬는 시간). 예: 300 TPS, 쉬는 시간 10초 가정 → 약 3,000명 이상)
 //
 // 환경 변수
-//   VUS      동시 사용자 수 (기본 50)
+//   VUS      동시 요청 수 = 쉬는 시간 없이 반복하는 가상 사용자 수 (기본 50)
 //   DURATION 측정 구간 길이 (기본 1m)
 //   WARMUP   예열 구간 길이 (기본 15s)
 //   LABEL    결과 파일 이름에 붙일 구분 (예: db, redis)
-//   BASE_URL 환전 서비스 주소 (compose에서 http://host.docker.internal:18084)
+//   BASE_URL 환전 서비스 주소 (compose에서 같은 Docker 네트워크의 http://app:18084)
 //   STALE_AFTER_SECONDS 이보다 오래된 환율 응답을 "오래된 응답"으로 셈 (기본 6 = 수집 간격 5초 + 여유 1초)
 
 import http from 'k6/http';
@@ -22,6 +28,7 @@ const WARMUP = __ENV.WARMUP || '15s';
 const LABEL = __ENV.LABEL || 'run';
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:18084';
 const STALE_AFTER_MS = Number(__ENV.STALE_AFTER_SECONDS || 6) * 1000;
+const WARMUP_MS = parseSeconds(WARMUP) * 1000;
 
 // 측정 구간에서만 올리는 카운터들
 const okResponses = new Counter('ok_responses');          // 200 응답
@@ -33,18 +40,11 @@ const staleResponses = new Counter('stale_rate_responses'); // 수집 시각이 
 
 export const options = {
     scenarios: {
-        warmup: {
+        // 예열과 측정을 한 시나리오로. 같은 가상 사용자가 끝까지 이어서 요청한다(위 설명)
+        rateQuery: {
             executor: 'constant-vus',
             vus: VUS,
-            duration: WARMUP,
-            tags: { phase: 'warmup' },
-        },
-        measure: {
-            executor: 'constant-vus',
-            vus: VUS,
-            duration: DURATION,
-            startTime: WARMUP,
-            tags: { phase: 'measure' },
+            duration: `${parseSeconds(WARMUP) + parseSeconds(DURATION)}s`,
         },
     },
     // 측정 구간만 따로 집계하려고 phase:measure 하위 지표를 만든다. 기준(>=0)은 항상 통과하는 값이라 측정을 멈추지 않는다.
@@ -57,8 +57,10 @@ export const options = {
 };
 
 export default function () {
-    const response = http.get(`${BASE_URL}/api/v1/exchange-rates`);
-    if (exec.scenario.name !== 'measure') {
+    // 요청을 "시작한" 시각으로 예열/측정을 정한다. 기준은 k6 엔진의 테스트 경과 시간 하나라 모든 가상 사용자가 같다
+    const phase = exec.instance.currentTestRunDuration < WARMUP_MS ? 'warmup' : 'measure';
+    const response = http.get(`${BASE_URL}/api/v1/exchange-rates`, { tags: { phase } });
+    if (phase !== 'measure') {
         return;
     }
     count(response);
@@ -108,6 +110,8 @@ export function handleSummary(data) {
         requests: total,
         // 예열 포함 전체 요청 수. pg_stat_statements(예열 포함) 검산에 씀
         requestsAll: metric('http_reqs').count || 0,
+        // k6가 실제로 테스트를 돈 시간. measure.sh가 컨테이너 시작 지연과 상관없이 측정 구간을 계산하는 데 씀
+        testRunDurationMs: Math.round(data.state.testRunDurationMs),
         latencyMs: {
             avg: round(duration.avg),
             p50: round(duration.med),
@@ -137,7 +141,7 @@ export function handleSummary(data) {
 function table(r) {
     return [
         '',
-        `[${r.label}] 동시 사용자 ${r.vus}명, 측정 ${r.measureSeconds}초 (예열 ${r.warmup} 제외)`,
+        `[${r.label}] 동시 요청 ${r.vus}개, 측정 ${r.measureSeconds}초 (예열 ${r.warmup} 제외)`,
         `  요청 ${r.requests}건 | 성공 TPS ${r.successTps} | 실패율 ${r.failureRate}%`,
         `  응답(ms) 평균 ${r.latencyMs.avg} | P50 ${r.latencyMs.p50} | P95 ${r.latencyMs.p95} | P99 ${r.latencyMs.p99} | 최대 ${r.latencyMs.max}`,
         `  상태 200 ${r.statusCounts.ok} | 4xx ${r.statusCounts['4xx']} | 5xx ${r.statusCounts['5xx']} | 응답 없음 ${r.statusCounts.noResponse}`,
