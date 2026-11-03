@@ -11,7 +11,8 @@ public enum WalletErrorCode implements ErrorCode {
     CHARGE_INVALID_IDEMPOTENCY_KEY("CHARGE_INVALID_IDEMPOTENCY_KEY", "Idempotency-Key 헤더를 확인해 주세요.", 400),
     CHARGE_IDEMPOTENCY_CONFLICT("CHARGE_IDEMPOTENCY_CONFLICT", "같은 Idempotency-Key로 다른 충전을 요청할 수 없습니다.", 409),
     CHARGE_CURRENCY_NOT_SUPPORTED("CHARGE_CURRENCY_NOT_SUPPORTED", "원화(KRW)만 충전할 수 있습니다.", 400),
-    CHARGE_USER_NOT_ACTIVE("CHARGE_USER_NOT_ACTIVE", "충전할 수 없는 회원 상태입니다.", 409);
+    CHARGE_USER_NOT_ACTIVE("CHARGE_USER_NOT_ACTIVE", "충전할 수 없는 회원 상태입니다.", 409),
+    WALLET_LEDGER_UNAVAILABLE("WALLET_LEDGER_UNAVAILABLE", "잔액 정보를 일시적으로 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503);
 
     private final String code;
     private final String message;
