@@ -14,8 +14,12 @@ public interface PaymentRepository {
     Optional<Payment> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     Page<Payment> findPageByUserId(UUID userId, PaymentStatus status, Pageable pageable);
     Page<Payment> findPageByMerchantId(UUID merchantId, PaymentStatus status, Pageable pageable);
-    List<Payment> findStalePending(Instant before, int limit);
-    void deferPendingRetry(UUID paymentId, Instant retriedAt);
+    List<Payment> findRecoveryTargets(Instant now, int limit);
+    int claimForRecovery(UUID paymentId, Instant seenUpdatedAt, Instant now);
+    int recordUnknownAttempt(UUID paymentId, int expectedAttempts, PaymentStatus status,
+                             SettlementReviewReason reviewReason, Instant now);
+    int markManualReview(UUID paymentId, SettlementReviewReason reviewReason, Instant now);
+    long countByStatus(PaymentStatus status);
     long countPendingCreatedBefore(Instant before);
     List<UUID> findPendingIdsCreatedBefore(Instant before, int limit);
 }

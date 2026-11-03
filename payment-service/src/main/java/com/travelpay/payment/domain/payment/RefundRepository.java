@@ -11,8 +11,12 @@ public interface RefundRepository {
     Optional<Refund> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     List<Refund> findAllByPaymentId(UUID paymentId);
     List<Refund> findAllByPaymentIdIn(Collection<UUID> paymentIds);
-    List<Refund> findStaleRequested(Instant before, int limit);
-    void deferRequestedRetry(UUID refundId, Instant retriedAt);
+    List<Refund> findRecoveryTargets(Instant now, int limit);
+    int claimForRecovery(UUID refundId, Instant seenUpdatedAt, Instant now);
+    int recordUnknownAttempt(UUID refundId, int expectedAttempts, RefundStatus status,
+                             SettlementReviewReason reviewReason, Instant now);
+    int markManualReview(UUID refundId, SettlementReviewReason reviewReason, Instant now);
+    long countByStatus(RefundStatus status);
     long countRequestedCreatedBefore(Instant before);
     List<UUID> findRequestedIdsCreatedBefore(Instant before, int limit);
 }

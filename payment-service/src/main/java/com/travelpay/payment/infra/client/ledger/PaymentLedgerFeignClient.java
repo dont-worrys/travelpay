@@ -2,10 +2,10 @@ package com.travelpay.payment.infra.client.ledger;
 
 import com.travelpay.common.feign.FeignErrors;
 import com.travelpay.common.response.ApiResponse;
-import com.travelpay.payment.application.payment.client.ledger.LedgerClient;
-import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
-import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
-import com.travelpay.payment.application.payment.client.ledger.LedgerTransactionCommand;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerClient;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.Entry;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.RegisterRequest;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResponse;
@@ -21,7 +21,7 @@ import java.util.Optional;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class LedgerFeignClient implements LedgerClient {
+public class PaymentLedgerFeignClient implements PaymentLedgerClient {
 
     private static final String REJECTED_CODE_PREFIX = "LEDGER_REJECTED_";
 
@@ -41,7 +41,7 @@ public class LedgerFeignClient implements LedgerClient {
     private final LedgerFeignApi ledgerFeignApi;
 
     @Override
-    public LedgerResult createTransaction(LedgerTransactionCommand command) {
+    public PaymentLedgerResult createTransaction(PaymentLedgerTransactionCommand command) {
         String currency = command.currency().name();
         return register(new RegisterRequest("PAYMENT", command.referenceId(), command.userId(), null, List.of(
                 Entry.user(command.userWalletId(), currency, "DEBIT", command.amount(), "PAYMENT_OUT"),
@@ -50,7 +50,7 @@ public class LedgerFeignClient implements LedgerClient {
     }
 
     @Override
-    public LedgerResult refundTransaction(LedgerRefundCommand command) {
+    public PaymentLedgerResult refundTransaction(PaymentLedgerRefundCommand command) {
         String currency = command.currency().name();
         return register(new RegisterRequest("PAYMENT_REFUND", command.referenceId(), command.userId(),
                 command.originalTransactionId(), List.of(
@@ -59,7 +59,7 @@ public class LedgerFeignClient implements LedgerClient {
                 REFUND_DECLINE_REASONS);
     }
 
-    private LedgerResult register(RegisterRequest request, DeclineReasons declineReasons) {
+    private PaymentLedgerResult register(RegisterRequest request, DeclineReasons declineReasons) {
         ApiResponse<TransactionResponse> response;
         try {
             response = ledgerFeignApi.register(request);
@@ -68,18 +68,19 @@ public class LedgerFeignClient implements LedgerClient {
             if (!FeignErrors.isRejected(exception)) {
                 log.warn("원장 거래 결과 모름 referenceType={} referenceId={} status={}",
                         request.referenceType(), request.referenceId(), exception.status());
-                return LedgerResult.unknown();
+                return PaymentLedgerResult.unknown();
             }
             // 원장 코드는 응답에 그대로 내보내지 않고 결제 서비스의 거절 사유로 바꾼다 (원장 코드는 로그에만 남김)
             Optional<String> rejectedCode = rejectedCode(exception);
             if (rejectedCode.isPresent()) {
                 log.info("원장 거래 거절 referenceType={} referenceId={} code={}",
                         request.referenceType(), request.referenceId(), rejectedCode.get());
-                return LedgerResult.declined(declineReasons.of(rejectedCode.get()));
+                return PaymentLedgerResult.declined(declineReasons.of(rejectedCode.get()));
             }
-            log.error("원장 거래 응답 처리 불가 referenceType={} referenceId={} status={}",
-                    request.referenceType(), request.referenceId(), exception.status());
-            throw FeignErrors.toCommonException(exception);
+            log.error("원장이 거래 요청을 받아들이지 않음 referenceType={} referenceId={} status={} code={}",
+                    request.referenceType(), request.referenceId(), exception.status(),
+                    FeignErrors.errorCode(exception).orElse("-"));
+            return PaymentLedgerResult.notAccepted();
         }
 
         // 2xx를 받았으니 원장이 처리했을 수 있다. 내용이 이상해도 실패로 단정하지 않고 결과 모름으로 둔다
@@ -87,9 +88,9 @@ public class LedgerFeignClient implements LedgerClient {
                 || response.data().transactionId() == null) {
             log.error("원장 거래 응답 형식 이상, 결과 모름으로 처리 referenceType={} referenceId={}",
                     request.referenceType(), request.referenceId());
-            return LedgerResult.unknown();
+            return PaymentLedgerResult.unknown();
         }
-        return LedgerResult.approved(response.data().transactionId());
+        return PaymentLedgerResult.approved(response.data().transactionId());
     }
 
     /** 422이고 오류 코드가 LEDGER_REJECTED_로 시작할 때만 확정 거절로 본다 */

@@ -13,6 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -29,6 +30,47 @@ class PendingSettlementSchedulerTest {
         paymentService = mock(PaymentService.class);
         meterRegistry = new SimpleMeterRegistry();
         scheduler = new PendingSettlementScheduler(paymentService, meterRegistry);
+        when(paymentService.findStuckSettlements(any(), anyInt()))
+                .thenReturn(new StuckSettlementResult(0, List.of(), 0, List.of()));
+    }
+
+    @Test
+    void recoversPaymentsAndRefundsWithBatchSize() {
+        scheduler.recover();
+
+        verify(paymentService).recoverPayments(any(), eq(10));
+        verify(paymentService).recoverRefunds(any(), eq(10));
+    }
+
+    @Test
+    void continuesWhenPaymentRecoveryThrows() {
+        doThrow(new IllegalStateException("DB 연결 실패")).when(paymentService).recoverPayments(any(), anyInt());
+        when(paymentService.countManualReviewPayments()).thenReturn(2L);
+
+        scheduler.recover();
+
+        // 결제 복구가 실패해도 환불 복구와 집계는 돈다
+        verify(paymentService).recoverRefunds(any(), eq(10));
+        verify(paymentService).findStuckSettlements(any(), eq(10));
+        assertEquals(2.0, gauge("payment.settlement.manual_review", "payment"));
+    }
+
+    @Test
+    void continuesWhenRefundRecoveryThrows() {
+        doThrow(new IllegalStateException("DB 연결 실패")).when(paymentService).recoverRefunds(any(), anyInt());
+
+        scheduler.recover();
+
+        verify(paymentService).findStuckSettlements(any(), eq(10));
+    }
+
+    @Test
+    void doesNotThrowWhenCountingFails() {
+        when(paymentService.findStuckSettlements(any(), anyInt())).thenThrow(new IllegalStateException("DB 연결 실패"));
+
+        scheduler.recover();
+
+        verify(paymentService).recoverPayments(any(), eq(10));
     }
 
     @Test
@@ -36,10 +78,10 @@ class PendingSettlementSchedulerTest {
         when(paymentService.findStuckSettlements(any(), anyInt()))
                 .thenReturn(new StuckSettlementResult(3, List.of(UUID.randomUUID()), 1, List.of(UUID.randomUUID())));
 
-        scheduler.settleStale();
+        scheduler.recover();
 
-        assertEquals(3.0, gauge("payment"));
-        assertEquals(1.0, gauge("refund"));
+        assertEquals(3.0, gauge("payment.settlement.stuck", "payment"));
+        assertEquals(1.0, gauge("payment.settlement.stuck", "refund"));
 
         verify(paymentService).findStuckSettlements(any(), eq(10));
     }
@@ -50,14 +92,25 @@ class PendingSettlementSchedulerTest {
                 .thenReturn(new StuckSettlementResult(3, List.of(), 1, List.of()))
                 .thenReturn(new StuckSettlementResult(0, List.of(), 0, List.of()));
 
-        scheduler.settleStale();
-        scheduler.settleStale();
+        scheduler.recover();
+        scheduler.recover();
 
-        assertEquals(0.0, gauge("payment"));
-        assertEquals(0.0, gauge("refund"));
+        assertEquals(0.0, gauge("payment.settlement.stuck", "payment"));
+        assertEquals(0.0, gauge("payment.settlement.stuck", "refund"));
     }
 
-    private double gauge(String type) {
-        return meterRegistry.get("payment.settlement.stuck").tag("type", type).gauge().value();
+    @Test
+    void publishesManualReviewCountsAsGauges() {
+        when(paymentService.countManualReviewPayments()).thenReturn(2L);
+        when(paymentService.countManualReviewRefunds()).thenReturn(1L);
+
+        scheduler.recover();
+
+        assertEquals(2.0, gauge("payment.settlement.manual_review", "payment"));
+        assertEquals(1.0, gauge("payment.settlement.manual_review", "refund"));
+    }
+
+    private double gauge(String name, String type) {
+        return meterRegistry.get(name).tag("type", type).gauge().value();
     }
 }

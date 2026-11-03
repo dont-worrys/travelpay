@@ -23,17 +23,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class UserFeignClientTest {
+class MerchantUserFeignClientTest {
 
     private static final UUID USER_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
 
     private UserFeignApi userFeignApi;
-    private UserFeignClient userClient;
+    private MerchantUserFeignClient userClient;
 
     @BeforeEach
     void setUp() {
         userFeignApi = mock(UserFeignApi.class);
-        userClient = new UserFeignClient(userFeignApi);
+        userClient = new MerchantUserFeignClient(userFeignApi);
     }
 
     @Test

@@ -1,5 +1,5 @@
 package com.travelpay.payment.domain.payment;
 
 public enum RefundStatus {
-    REQUESTED, COMPLETED, DECLINED
+    REQUESTED, COMPLETED, DECLINED, MANUAL_REVIEW
 }

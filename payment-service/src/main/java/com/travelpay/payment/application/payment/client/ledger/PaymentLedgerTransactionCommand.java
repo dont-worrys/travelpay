@@ -4,7 +4,7 @@ import com.travelpay.payment.domain.payment.CurrencyCode;
 
 import java.util.UUID;
 
-public record LedgerTransactionCommand(
+public record PaymentLedgerTransactionCommand(
         UUID referenceId,        // payment.id → ledger 멱등키
         UUID userId,
         UUID userWalletId,       // 차감할 사용자 지갑

@@ -4,7 +4,7 @@ import com.travelpay.payment.domain.payment.CurrencyCode;
 
 import java.util.UUID;
 
-public record LedgerRefundCommand(
+public record PaymentLedgerRefundCommand(
         UUID referenceId,            // refund.id → ledger 환불 멱등키
         UUID originalTransactionId,  // 되돌릴 결제 거래 (payment.ledgerId)
         UUID userId,
