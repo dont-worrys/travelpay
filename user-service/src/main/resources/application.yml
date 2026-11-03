@@ -46,6 +46,10 @@ travelpay:
       account-limit: 20
       window: 10m
       block: 20m
+    recipient-lookup:
+      # I02 수취인 조회 제한의 요청자별 허용 횟수와 집계 기간입니다.
+      limit: ${USER_RECIPIENT_LOOKUP_LIMIT:60}
+      period: ${USER_RECIPIENT_LOOKUP_PERIOD:60s}
 
 server:
   port: 8081

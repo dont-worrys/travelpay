@@ -75,7 +75,7 @@ public class SecurityConfiguration {
                                 "/actuator/prometheus").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/users", "/api/v1/auth/login").permitAll()
                         // 팀 결정(2026-10-31): 서비스 간 호출은 서비스 인증 없이 내부망 격리로 보호하므로 세션 없이 엽니다.
-                        // 외부 차단은 Gateway·배포 망이 맡고, I03 본인 확인·I02 호출 횟수 제한은 요청자 헤더 계약 후 추가합니다.
+                        // 외부 차단은 Gateway·배포 망이 맡고, 회원 헤더 검사·I03 본인 확인·I02 호출 제한은 컨트롤러와 응용 서비스가 맡습니다.
                         .requestMatchers(HttpMethod.GET, "/internal/v1/users/{userId}/real-name",
                                 "/internal/v1/users/{userId}/funding-identity").permitAll()
                         .requestMatchers(HttpMethod.POST, LOGOUT_PATH)
