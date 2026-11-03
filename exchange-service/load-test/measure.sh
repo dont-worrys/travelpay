@@ -6,7 +6,7 @@
 #   예: ./measure.sh db 50      → results/db-vus50.json(k6) + results/db-vus50-db.json(DB 지표)
 #
 # DB 지표는 측정 구간(k6가 실제로 시작한 시각 + 예열 ~ 그로부터 측정 시간)의 1초 간격 표본으로 계산합니다.
-# 표본이 하나도 없으면(지표를 못 읽음) 0으로 채우지 않고 실패로 끝냅니다.
+# 표본이 없거나 측정 구간 전체를 덮지 못하면(지표를 못 읽음, 수집기가 먼저 끝남) 0이나 일부 구간으로 채우지 않고 실패로 끝냅니다.
 #   연결 대기·사용 중 연결: Actuator hikaricp_connections_pending / _active의 평균·최대
 #   연결 얻는 시간: hikaricp_connections_acquire_seconds 합계·횟수의 구간 차이로 평균 (_max는 앞 실행 값을 들고 있어 쓰지 않음)
 #   DB 활성 세션: pg_stat_activity에서 state=active인 세션 수(이 조회 자신은 제외)의 평균·최대
@@ -86,6 +86,8 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
     FNR == 1 { file++ }
     $1 < from || $1 > to || $2 == "" { next }
     file == 1 {
+        if (n == 0) h0 = $1
+        h1 = $1
         n++; pend += $2; act += $3; sys += $6; proc += $7
         if ($6 > sysMax) sysMax = $6
         if ($2 > pendMax) pendMax = $2
@@ -94,6 +96,8 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         c1 = $4; s1 = $5
     }
     file == 2 {
+        if (m == 0) d0 = $1
+        d1 = $1
         m++; ses += $2
         if ($2 > sesMax) sesMax = $2
     }
@@ -102,6 +106,13 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         if (n == 0 || m == 0) {
             if (n == 0) print "커넥션 풀 표본이 없습니다: 앱 컨테이너 안에서 Actuator 지표를 읽지 못함" > "/dev/stderr"
             if (m == 0) print "DB 세션 표본이 없습니다: pg_stat_activity 조회 실패" > "/dev/stderr"
+            exit 1
+        }
+        # 표본이 측정 구간의 처음부터 끝까지 있어야 한다. k6 컨테이너가 늦게 떠 수집기가 먼저 끝나면
+        # 구간 일부만으로 평균을 내게 되므로 실패한다 (부하가 높으면 표본 간격이 1~3초라 3초까지 허용)
+        gap = 3
+        if (h0 > from + gap || h1 < to - gap || d0 > from + gap || d1 < to - gap) {
+            printf "표본이 측정 구간(%d~%d)을 다 덮지 못했습니다: 커넥션 풀 %d~%d, DB 세션 %d~%d\n", from, to, h0, h1, d0, d1 > "/dev/stderr"
             exit 1
         }
         acqAvgMs = (c1 > c0) ? (s1 - s0) / (c1 - c0) * 1000 : 0
