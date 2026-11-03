@@ -12,7 +12,7 @@ import org.springframework.stereotype.Component;
 
 /**
  * 수취인이 송금 받을 수 있는 회원(ACTIVE)인지 user-service에서 확인합니다.
- * USER_RECIPIENT_NOT_FOUND만 수취인 없음으로 보고, 그 밖의 실패는 common 규칙({@link FeignErrors#toCommonException})을 따릅니다.
+ * 404 + USER_RECIPIENT_NOT_FOUND만 수취인 없음으로 보고, 그 밖의 실패는 common 규칙({@link FeignErrors#toCommonException})을 따릅니다.
  */
 @Component
 public class TransferUserReader {
@@ -27,7 +27,7 @@ public class TransferUserReader {
 
     /**
      * ACTIVE 회원이면 회원 정보를, 없는 회원이거나 정지·종료 회원이면 empty를 반환합니다(user-service가 둘을 구분하지 않음).
-     * 경로 오류·배포 문제로 생기는 404는 수취인 없음이 아니므로 USER_RECIPIENT_NOT_FOUND일 때만 empty로 봅니다.
+     * 경로 오류·배포 문제로 생기는 404는 수취인 없음이 아니므로 404와 USER_RECIPIENT_NOT_FOUND가 모두 맞을 때만 empty로 봅니다.
      * 다른 회원의 이름이 노출되지 않도록 응답의 회원 ID가 요청한 ID와 같은지 확인합니다.
      */
     public Optional<UserRecipientResponse> findRecipient(UUID userId) {
@@ -35,7 +35,8 @@ public class TransferUserReader {
         try {
             response = userClient.getRecipient(userId);
         } catch (FeignException exception) {
-            if (FeignErrors.hasErrorCode(exception, RECIPIENT_NOT_FOUND)) {
+            if (exception.status() == 404
+                    && FeignErrors.hasErrorCode(exception, RECIPIENT_NOT_FOUND)) {
                 return Optional.empty();
             }
             throw FeignErrors.toCommonException(exception);
