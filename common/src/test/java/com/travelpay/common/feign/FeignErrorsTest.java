@@ -24,6 +24,7 @@ import feign.codec.ErrorDecoder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -43,6 +44,9 @@ class FeignErrorsTest {
     private static final String USER_NOT_FOUND_BODY = """
             {"success":false,"data":null,"error":{"code":"USER_NOT_FOUND","message":"회원을 찾을 수 없습니다.","details":[]}}
             """;
+    private static final String TOO_MANY_REQUESTS_BODY = """
+            {"success":false,"data":null,"error":{"code":"COMMON_TOO_MANY_REQUESTS","message":"","details":[]}}
+            """;
 
     @Test
     void readsTheErrorCodeOfTheCommonFailureResponse() {
@@ -55,17 +59,54 @@ class FeignErrorsTest {
 
     @Test
     void readsTheErrorCodeWhenARetryAfterHeaderMadeFeignWrapTheResponse() {
-        String body = """
-                {"success":false,"data":null,"error":{"code":"COMMON_TOO_MANY_REQUESTS","message":"","details":[]}}
-                """;
-        Response response = response(429, body, Map.of("Retry-After", List.of("1")));
+        Response response = response(429, TOO_MANY_REQUESTS_BODY, Map.of("Retry-After", List.of("1")));
 
         Exception decoded = new ErrorDecoder.Default().decode("UserClient#find(UUID)", response);
 
         var wrapped = assertInstanceOf(RetryableException.class, decoded);
         assertEquals(Optional.of("COMMON_TOO_MANY_REQUESTS"), FeignErrors.errorCode(wrapped));
         assertTrue(FeignErrors.isRejected(wrapped));
-        assertEquals(CommonErrorCode.BAD_GATEWAY, FeignErrors.toCommonException(wrapped).getErrorCode());
+        var translated = FeignErrors.toCommonException(wrapped);
+        assertEquals(CommonErrorCode.TOO_MANY_REQUESTS, translated.getErrorCode());
+        assertSame(wrapped, translated.getCause());
+    }
+
+    @Test
+    void aKnownRateLimitResponseKeepsItsStatusAndCause() {
+        var exception = responseFailure(429, TOO_MANY_REQUESTS_BODY, Map.of());
+
+        var translated = FeignErrors.toCommonException(exception);
+
+        assertEquals(CommonErrorCode.TOO_MANY_REQUESTS, translated.getErrorCode());
+        assertSame(exception, translated.getCause());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "400, BAD_GATEWAY",
+            "404, BAD_GATEWAY",
+            "500, BAD_GATEWAY",
+            "503, SERVICE_UNAVAILABLE",
+            "504, GATEWAY_TIMEOUT"
+    })
+    void aRateLimitCodeWithAnotherStatusKeepsTheExistingClassification(int status, CommonErrorCode expected) {
+        var exception = responseFailure(status, TOO_MANY_REQUESTS_BODY, Map.of());
+
+        assertEquals(expected, FeignErrors.toCommonException(exception).getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "",
+            "<html><body>Too Many Requests</body></html>",
+            "{\"success\":false,\"data\":null,\"error\":{\"message\":\"호출 제한\"}}",
+            "{\"success\":false,\"data\":null,\"error\":{\"code\":\"OTHER_RATE_LIMIT\"}}",
+            "{\"success\":false,\"data\":null,\"error\":{\"code\":429}}"
+    })
+    void anUnknownRateLimitResponseRemainsBadGateway(String body) {
+        var exception = responseFailure(429, body, Map.of());
+
+        assertEquals(CommonErrorCode.BAD_GATEWAY, FeignErrors.toCommonException(exception).getErrorCode());
     }
 
     @ParameterizedTest
