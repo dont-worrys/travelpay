@@ -27,7 +27,7 @@ import java.util.UUID;
  * 원장 응답 해석. 원장 응답 내용은 예외 메시지·응답·로그에 싣지 않는다.
  * - 2xx: 지원 통화가 하나씩 모두 있는 올바른 data만 사용 (아니면 LedgerResponseException 500)
  * - 404 + LEDGER_ACCOUNT_NOT_FOUND (조회만): 계정 없음
- * - 원장 장애(5xx 응답, 연결 실패, 시간 초과): WALLET_LEDGER_UNAVAILABLE 503, WARN
+ * - 원장 장애(시간 초과(2xx 본문 읽기 포함), 5xx 응답, 연결 실패): WALLET_LEDGER_UNAVAILABLE 503, WARN
  * - 그 밖의 실패: FeignErrors.toCommonException (4xx·2xx 본문 해석 실패·요청 인코딩 실패 → 502 등).
  *   처리하지 않은 4xx와 2xx 본문 해석 실패는 ERROR로 남긴다
  */
@@ -81,21 +81,30 @@ public class LedgerAccountClientAdapter implements LedgerAccountClient {
     }
 
     /**
-     * 원장 장애 유형. 원장 5xx 응답, 응답을 받지 못한 연결 실패(상태 -1인 RetryableException),
-     * 시간 초과(원인에 SocketTimeoutException)만 장애로 본다. 장애가 아니면 null
+     * 원장 장애 유형. 장애가 아니면 null. 판정 순서:
+     * 1. 원인에 SocketTimeoutException이 있으면 상태 코드와 관계없이 시간 초과 (2xx 본문을 읽다 난 시간 초과 포함)
+     * 2. 원장 5xx 응답
+     * 3. 응답을 받지 못한 연결 실패 (상태 -1인 RetryableException)
      */
     private static String outageType(FeignException e) {
-        if (e.status() >= 500) {
+        if (findCause(e, SocketTimeoutException.class) != null) {
+            return "TIMEOUT";
+        }
+        if (e.status() >= 500 && e.status() < 600) {
             return "HTTP_" + e.status();
         }
         if (e.status() < 0 && e instanceof RetryableException) {
-            return findCause(e, SocketTimeoutException.class) != null ? "TIMEOUT" : "CONNECTION_FAILURE";
+            return "CONNECTION_FAILURE";
         }
         return null;
     }
 
-    /** 연결 실패·시간 초과는 원인 예외 클래스, 응답을 받았으면 Feign 예외 클래스 */
+    /** 시간 초과는 SocketTimeoutException, 연결 실패는 원인 예외 클래스, 응답을 받았으면 Feign 예외 클래스 */
     private static String failureClassName(FeignException e) {
+        SocketTimeoutException timeout = findCause(e, SocketTimeoutException.class);
+        if (timeout != null) {
+            return timeout.getClass().getName();
+        }
         if (e.status() < 0 && e.getCause() != null) {
             return e.getCause().getClass().getName();
         }
