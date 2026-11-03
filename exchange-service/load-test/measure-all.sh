@@ -14,6 +14,8 @@ STAGES=${STAGES:-"50 100 300"}
 
 cd "$(dirname "$0")"
 summary="results/${LABEL}-summary.md"
+# 앞 실행의 요약이 남아 이번 실행 결과로 오인되지 않게 먼저 지운다 (모든 회차가 성공해야 새로 생김)
+rm -f "$summary"
 
 # JSON에서 숫자 하나 꺼내기: value <파일> <키>  (키가 여러 번 나오면 첫 번째. avg는 객체 이름과 함께 찾음)
 value() {

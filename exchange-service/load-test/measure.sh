@@ -25,6 +25,8 @@ mkdir -p results
 hikari_samples="results/${LABEL}-vus${VUS}-hikari.tsv"
 session_samples="results/${LABEL}-vus${VUS}-sessions.tsv"
 summary="results/${LABEL}-vus${VUS}-db.json"
+# 앞 실행의 결과가 남아 이번 실행 결과로 오인되지 않게 먼저 지운다 (이번 실행이 성공해야 다시 생김)
+rm -f "$summary" "results/${LABEL}-vus${VUS}.json"
 
 psql_q() {
     docker compose exec -T measure-postgres psql -U exchange_app -d travelpay -qAt "$@"
@@ -87,6 +89,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
     $1 < from || $1 > to || $2 == "" { next }
     file == 1 {
         if (n == 0) h0 = $1
+        else if ($1 - h1 > hGap) hGap = $1 - h1   # 연속된 표본 사이 가장 긴 틈
         h1 = $1
         n++; pend += $2; act += $3; sys += $6; proc += $7
         if ($6 > sysMax) sysMax = $6
@@ -97,6 +100,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
     }
     file == 2 {
         if (m == 0) d0 = $1
+        else if ($1 - d1 > dGap) dGap = $1 - d1
         d1 = $1
         m++; ses += $2
         if ($2 > sesMax) sesMax = $2
@@ -108,11 +112,16 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
             if (m == 0) print "DB 세션 표본이 없습니다: pg_stat_activity 조회 실패" > "/dev/stderr"
             exit 1
         }
-        # 표본이 측정 구간의 처음부터 끝까지 있어야 한다. k6 컨테이너가 늦게 떠 수집기가 먼저 끝나면
-        # 구간 일부만으로 평균을 내게 되므로 실패한다 (부하가 높으면 표본 간격이 1~3초라 3초까지 허용)
+        # 표본이 측정 구간의 처음부터 끝까지 빈틈없이 있어야 한다. k6 컨테이너가 늦게 떠 수집기가 먼저 끝나거나
+        # 중간에 지표 읽기가 실패하면, 구간 일부만으로 평균을 내게 되므로 실패한다.
+        # 허용 3초: 정상 측정(2026-11-03, 9회)의 표본 간격은 최대 2초. 읽기를 한 번 놓치면 약 4초가 된다
         gap = 3
         if (h0 > from + gap || h1 < to - gap || d0 > from + gap || d1 < to - gap) {
             printf "표본이 측정 구간(%d~%d)을 다 덮지 못했습니다: 커넥션 풀 %d~%d, DB 세션 %d~%d\n", from, to, h0, h1, d0, d1 > "/dev/stderr"
+            exit 1
+        }
+        if (hGap > gap || dGap > gap) {
+            printf "측정 구간 중간에 표본이 빠졌습니다: 가장 긴 틈 커넥션 풀 %d초, DB 세션 %d초 (허용 %d초)\n", hGap, dGap, gap > "/dev/stderr"
             exit 1
         }
         acqAvgMs = (c1 > c0) ? (s1 - s0) / (c1 - c0) * 1000 : 0
@@ -127,6 +136,8 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         printf "  \"dbActiveSessions\": {\"avg\": %.2f, \"max\": %d},\n", (m ? ses / m : 0), sesMax
         printf "  \"rateSelectCalls\": %d\n", selects
         printf "}\n"
-    }' "$hikari_samples" "$session_samples" >"$summary"
+    }' "$hikari_samples" "$session_samples" >"$summary.tmp" || { rm -f "$summary.tmp"; exit 1; }
+# 검사를 모두 통과했을 때만 결과 파일을 만든다 (실패하면 빈 결과 파일도 남기지 않음)
+mv "$summary.tmp" "$summary"
 
 cat "$summary"
