@@ -66,8 +66,10 @@ class TransferApiDocsIntegrationTest {
         mvc.perform(get(DOCS))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath(CREATE + ".responses.keys()",
-                        hasItems("201", "202", "400", "409", "422", "503")))
+                        hasItems("201", "202", "400", "409", "422", "429", "503")))
                 .andExpect(jsonPath(CREATE + ".responses.keys()", not(hasItem("200"))))
+                .andExpect(jsonPath("$.paths['/api/v1/transfers/recipients/{receiverId}'].get.responses.keys()",
+                        hasItems("200", "404", "429", "503")))
                 .andExpect(jsonPath("$.paths['/api/v1/transfers/{transferId}/cancel'].post.responses.keys()",
                         hasItems("200", "404", "409")));
     }

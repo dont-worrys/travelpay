@@ -74,6 +74,36 @@ class TransferUserReaderTest {
         assertSame(CommonErrorCode.BAD_GATEWAY, exception.getErrorCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {400, 409, 500})
+    void doesNotTreatRecipientNotFoundCodeWithOtherStatusAsEmpty(int status) {
+        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(status, RECIPIENT_NOT_FOUND_BODY));
+
+        var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
+
+        assertSame(CommonErrorCode.BAD_GATEWAY, exception.getErrorCode());
+    }
+
+    @Test
+    void reportsRecipientNotFoundCodeWithServiceUnavailableStatusAsServiceUnavailable() {
+        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(503, RECIPIENT_NOT_FOUND_BODY));
+
+        var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
+
+        assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
+    }
+
+    @Test
+    void keepsUserServiceRateLimitAsTooManyRequests() {
+        when(userClient.getRecipient(USER_ID)).thenThrow(feignError(429, """
+                {"success":false,"data":null,"error":{"code":"COMMON_TOO_MANY_REQUESTS","message":"요청이 너무 많습니다.","details":[]}}
+                """));
+
+        var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
+
+        assertSame(CommonErrorCode.TOO_MANY_REQUESTS, exception.getErrorCode());
+    }
+
     @Test
     void reportsConnectionProblemsAsServiceUnavailable() {
         when(userClient.getRecipient(USER_ID)).thenThrow(new RetryableException(-1, "Connection refused",

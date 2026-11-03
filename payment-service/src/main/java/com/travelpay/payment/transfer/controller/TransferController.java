@@ -75,6 +75,8 @@ public class TransferController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "422",
                     description = "`TRANSFER_SENDER_WALLET_UNAVAILABLE`, `TRANSFER_RECEIVER_UNAVAILABLE`, "
                             + "`TRANSFER_INSUFFICIENT_BALANCE`·`TRANSFER_ACCOUNT_UNAVAILABLE`(원장 거절, 송금은 `FAILED`로 기록)"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "429",
+                    description = "`COMMON_TOO_MANY_REQUESTS` 회원 서비스 수취인 조회 호출 제한 초과(송금은 기록되지 않음)"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "502",
                     description = "`COMMON_BAD_GATEWAY` 지갑·회원 서비스 응답 해석 불가"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503",
@@ -128,6 +130,8 @@ public class TransferController {
                     description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
                     description = "`TRANSFER_RECEIVER_NOT_FOUND` 활성 회원이 아니거나 지갑 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "429",
+                    description = "`COMMON_TOO_MANY_REQUESTS` 회원 서비스 수취인 조회 호출 제한 초과"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "502",
                     description = "`COMMON_BAD_GATEWAY` 지갑·회원 서비스 응답 해석 불가"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503",
