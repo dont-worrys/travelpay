@@ -418,7 +418,7 @@ class TransferServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"PROCESSING", "COMPLETED", "FAILED"})
+    @ValueSource(strings = {"PROCESSING", "COMPLETED", "FAILED", "MANUAL_REVIEW"})
     void rejectsCancellingTransferThatIsNoLongerRequested(TransferStatus status) {
         Transfer existing = persisted(transfer(10_000L, "KRW", null));
         ReflectionTestUtils.setField(existing, "status", status);
