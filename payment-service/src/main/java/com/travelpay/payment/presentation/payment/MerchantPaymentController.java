@@ -21,7 +21,7 @@ import java.util.UUID;
 
 // 가맹점이 자기 결제를 조회하는 API. 경로는 가맹점 아래지만 결제 데이터라 결제 쪽에서 처리
 @RestController
-@RequestMapping("/api/v1/merchants/{merchantId}/payments")
+@RequestMapping("/api/v1/payments/merchants/{merchantId}/payments")
 @RequiredArgsConstructor
 public class MerchantPaymentController {
 
