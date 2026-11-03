@@ -39,7 +39,7 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
     @ParameterizedTest
     @ValueSource(strings = {"LEDGER_REJECTED_WALLET_SUSPENDED", "LEDGER_REJECTED_ACCOUNT_NOT_FOUND"})
     void recordsFailedWithAccountUnavailableWhenLedgerRejectsAccount(String ledgerCode) throws Exception {
-        when(ledgerFeignClient.register(any())).thenThrow(ledgerError(422, ledgerCode));
+        when(ledgerFeignApi.register(any())).thenThrow(ledgerError(422, ledgerCode));
 
         requestTransfer("tc22-" + ledgerCode)
                 .andExpect(status().isUnprocessableEntity())
@@ -55,14 +55,14 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
         assertNull(row.get("review_reason"));
         assertEquals(sourceWalletId, row.get("source_wallet_id"));
         assertEquals(targetWalletId, row.get("target_wallet_id"));
-        verify(ledgerFeignClient, times(1)).register(any());
+        verify(ledgerFeignApi, times(1)).register(any());
     }
 
     /** TC-22-I3·I4·I5·I6: 거절된 송금은 같은 키 재요청에 같은 422(원장 미호출), 복구 대상 아님, 상세는 FAILED, 취소는 409입니다. */
     @Test
     void failedTransferIsFinalForRetryRecoveryDetailAndCancel() throws Exception {
         assumeTrue(countByStatus("PROCESSING") == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다.");
-        when(ledgerFeignClient.register(any())).thenThrow(ledgerError(422, "LEDGER_REJECTED_WALLET_SUSPENDED"));
+        when(ledgerFeignApi.register(any())).thenThrow(ledgerError(422, "LEDGER_REJECTED_WALLET_SUSPENDED"));
         requestTransfer("tc22-final").andExpect(status().isUnprocessableEntity());
         UUID transferId = onlyTransferIdOf(senderId);
 
@@ -70,7 +70,7 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.error.code").value("TRANSFER_ACCOUNT_UNAVAILABLE"));
         transferService.recoverDue(Instant.now().plusSeconds(86_400), 10);
-        verify(ledgerFeignClient, times(1)).register(any());
+        verify(ledgerFeignApi, times(1)).register(any());
 
         mvc.perform(asUser(get("/api/v1/transfers/{id}", transferId), senderId))
                 .andExpect(status().isOk())
@@ -92,7 +92,7 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
                 .andExpect(jsonPath("$.error.code").value("TRANSFER_SENDER_WALLET_UNAVAILABLE"));
 
         assertEquals(0L, countTransfersOf(senderId));
-        verify(ledgerFeignClient, never()).register(any());
+        verify(ledgerFeignApi, never()).register(any());
     }
 
     /** TC-22-I8: 수취인 지갑이 SUSPENDED면 422 TRANSFER_RECEIVER_UNAVAILABLE, 수취인 조회 API는 transferable=false입니다. */
@@ -109,13 +109,13 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
                 .andExpect(jsonPath("$.data.receiverName").value("홍*동"));
 
         assertEquals(0L, countTransfersOf(senderId));
-        verify(ledgerFeignClient, never()).register(any());
+        verify(ledgerFeignApi, never()).register(any());
     }
 
     /** TC-22-I9: 원장이 모르는 422 코드는 계정 거절로 단정하지 않고 MANUAL_REVIEW(LEDGER_REQUEST_NOT_ACCEPTED)로 둡니다. */
     @Test
     void doesNotTreatUnknownLedgerRejectionAsAccountSuspension() throws Exception {
-        when(ledgerFeignClient.register(any())).thenThrow(ledgerError(422, "LEDGER_REJECTED_SOMETHING_NEW"));
+        when(ledgerFeignApi.register(any())).thenThrow(ledgerError(422, "LEDGER_REJECTED_SOMETHING_NEW"));
 
         requestTransfer("tc22-unknown-422")
                 .andExpect(status().isAccepted())
@@ -131,7 +131,7 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
     @Test
     void recoveryMarksProcessingTransferFailedWhenLedgerRejectsAccount() throws Exception {
         assumeTrue(countByStatus("PROCESSING") == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다.");
-        when(ledgerFeignClient.register(any()))
+        when(ledgerFeignApi.register(any()))
                 .thenThrow(ledgerError(503, "COMMON_SERVICE_UNAVAILABLE"))
                 .thenThrow(ledgerError(422, "LEDGER_REJECTED_WALLET_SUSPENDED"));
         UUID transferId = transferIdOf(requestTransfer("tc22-recovery").andExpect(status().isAccepted()));

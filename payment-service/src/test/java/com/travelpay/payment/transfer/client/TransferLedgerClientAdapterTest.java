@@ -2,10 +2,13 @@ package com.travelpay.payment.transfer.client;
 
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignConfig;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse.RejectReason;
 import com.travelpay.payment.transfer.client.TransferLedgerException.Kind;
 import com.travelpay.payment.transfer.domain.Transfer;
@@ -35,27 +38,36 @@ import static org.mockito.Mockito.when;
 class TransferLedgerClientAdapterTest {
 
     private static final UUID TRANSACTION_ID = UUID.fromString("7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d");
+    private static final UUID TRANSFER_ID = UUID.fromString("2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e");
+    private static final UUID SENDER_ID = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
+    private static final UUID SOURCE_WALLET_ID = UUID.fromString("0f8e6d4c-2b1a-4f9e-8d7c-6b5a4f3e2d1c");
+    private static final UUID TARGET_WALLET_ID = UUID.fromString("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d");
     private static final LedgerTransactionRequest REQUEST = LedgerTransactionRequest.of(processingTransfer());
+    /** 결제 원장 클라이언트(LedgerFeignApi)로 보내는 본문. 송금은 원거래가 없어 originalTransactionId는 null입니다. */
+    private static final LedgerFeignApi.RegisterRequest REGISTER_REQUEST = new LedgerFeignApi.RegisterRequest(
+            "TRANSFER", TRANSFER_ID, SENDER_ID, null, List.of(
+                    new LedgerFeignApi.Entry("USER", SOURCE_WALLET_ID, "KRW", "DEBIT", 3_000L, "TRANSFER_OUT"),
+                    new LedgerFeignApi.Entry("USER", TARGET_WALLET_ID, "KRW", "CREDIT", 3_000L, "TRANSFER_IN")));
 
-    private TransferLedgerFeignClient feignClient;
+    private LedgerFeignApi feignClient;
     private TransferLedgerClientAdapter adapter;
 
     @BeforeEach
     void setUp() {
-        feignClient = mock(TransferLedgerFeignClient.class);
+        feignClient = mock(LedgerFeignApi.class);
         adapter = new TransferLedgerClientAdapter(feignClient);
     }
 
     /** 새로 기록(201)과 같은 reference 재요청(200) 모두 본문이 같아 POSTED로 해석합니다. */
     @Test
     void returnsPostedForSuccessResponse() {
-        when(feignClient.register(REQUEST))
-                .thenReturn(ApiResponse.success(new LedgerRegisterResponse(TRANSACTION_ID, "POSTED")));
+        when(feignClient.register(REGISTER_REQUEST))
+                .thenReturn(ApiResponse.success(new LedgerFeignApi.TransactionResponse(TRANSACTION_ID, "POSTED")));
 
         LedgerTransactionResponse result = adapter.register(REQUEST);
 
         assertEquals(LedgerTransactionResponse.posted(TRANSACTION_ID), result);
-        verify(feignClient, times(1)).register(REQUEST);
+        verify(feignClient, times(1)).register(REGISTER_REQUEST);
     }
 
     @ParameterizedTest
@@ -65,7 +77,7 @@ class TransferLedgerClientAdapterTest {
             "LEDGER_REJECTED_ACCOUNT_NOT_FOUND, ACCOUNT_NOT_FOUND"
     })
     void returnsRejectedForLedgerRejection(String code, RejectReason reason) {
-        when(feignClient.register(REQUEST)).thenThrow(feignError(422, errorBody(code)));
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(feignError(422, errorBody(code)));
 
         LedgerTransactionResponse result = adapter.register(REQUEST);
 
@@ -76,18 +88,18 @@ class TransferLedgerClientAdapterTest {
 
     @Test
     void reportsReadTimeoutAsResultUnknownWithoutRetry() {
-        when(feignClient.register(REQUEST)).thenThrow(new RetryableException(-1, "Read timed out",
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(new RetryableException(-1, "Read timed out",
                 Request.HttpMethod.POST, new SocketTimeoutException("Read timed out"), (Long) null, request()));
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
 
         assertSame(Kind.RESULT_UNKNOWN, exception.getKind());
-        verify(feignClient, times(1)).register(REQUEST);
+        verify(feignClient, times(1)).register(REGISTER_REQUEST);
     }
 
     @Test
     void reportsConnectionFailureAsResultUnknown() {
-        when(feignClient.register(REQUEST)).thenThrow(new RetryableException(-1, "Connection refused",
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(new RetryableException(-1, "Connection refused",
                 Request.HttpMethod.POST, new ConnectException("Connection refused"), (Long) null, request()));
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
@@ -99,7 +111,7 @@ class TransferLedgerClientAdapterTest {
     @ParameterizedTest
     @ValueSource(ints = {500, 502, 503, 504})
     void reportsServerErrorsAsResultUnknown(int status) {
-        when(feignClient.register(REQUEST)).thenThrow(feignError(status, errorBody("COMMON_SERVICE_UNAVAILABLE")));
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(feignError(status, errorBody("COMMON_SERVICE_UNAVAILABLE")));
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
 
@@ -108,7 +120,7 @@ class TransferLedgerClientAdapterTest {
 
     @Test
     void reportsLoadBalancerWithoutInstanceAsResultUnknown() {
-        when(feignClient.register(REQUEST)).thenThrow(feignError(503,
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(feignError(503,
                 "Load balancer does not contain an instance for the service ledger-service"));
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
@@ -126,7 +138,7 @@ class TransferLedgerClientAdapterTest {
             "404, COMMON_NOT_FOUND"
     })
     void reportsOtherClientErrorsAsRequestNotAccepted(int status, String code) {
-        when(feignClient.register(REQUEST)).thenThrow(feignError(status, errorBody(code)));
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(feignError(status, errorBody(code)));
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
 
@@ -135,7 +147,7 @@ class TransferLedgerClientAdapterTest {
 
     @Test
     void reportsRejectionWithoutReadableBodyAsRequestNotAccepted() {
-        when(feignClient.register(REQUEST)).thenThrow(feignError(422, "<html>error</html>"));
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(feignError(422, "<html>error</html>"));
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
 
@@ -147,13 +159,13 @@ class TransferLedgerClientAdapterTest {
     void reportsUnreadableSuccessResponseAsResultUnknown() {
         assertResultUnknownFor(null);
         assertResultUnknownFor(new ApiResponse<>(true, null, null));
-        assertResultUnknownFor(ApiResponse.success(new LedgerRegisterResponse(null, "POSTED")));
-        assertResultUnknownFor(ApiResponse.success(new LedgerRegisterResponse(TRANSACTION_ID, "REJECTED")));
+        assertResultUnknownFor(ApiResponse.success(new LedgerFeignApi.TransactionResponse(null, "POSTED")));
+        assertResultUnknownFor(ApiResponse.success(new LedgerFeignApi.TransactionResponse(TRANSACTION_ID, "REJECTED")));
     }
 
     @Test
     void doesNotPutResponseBodyInExceptionMessage() {
-        when(feignClient.register(REQUEST)).thenThrow(feignError(409,
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(feignError(409,
                 errorBody("LEDGER_REFERENCE_CONFLICT").replace("오류 메시지", "secret-detail")));
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
@@ -164,11 +176,11 @@ class TransferLedgerClientAdapterTest {
 
     @Test
     void disablesAutomaticRetry() {
-        assertSame(Retryer.NEVER_RETRY, new TransferLedgerFeignConfig().transferLedgerRetryer());
+        assertSame(Retryer.NEVER_RETRY, new LedgerFeignConfig().ledgerRetryer());
     }
 
-    private void assertResultUnknownFor(ApiResponse<LedgerRegisterResponse> response) {
-        when(feignClient.register(REQUEST)).thenReturn(response);
+    private void assertResultUnknownFor(ApiResponse<LedgerFeignApi.TransactionResponse> response) {
+        when(feignClient.register(REGISTER_REQUEST)).thenReturn(response);
 
         var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
 
@@ -177,12 +189,12 @@ class TransferLedgerClientAdapterTest {
 
     private static Transfer processingTransfer() {
         Transfer transfer = Transfer.process(
-                UUID.fromString("550e8400-e29b-41d4-a716-446655440000"),
+                SENDER_ID,
                 UUID.fromString("4c6a0178-266b-4f1e-b811-a2767026be70"),
-                UUID.fromString("0f8e6d4c-2b1a-4f9e-8d7c-6b5a4f3e2d1c"),
-                UUID.fromString("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"),
+                SOURCE_WALLET_ID,
+                TARGET_WALLET_ID,
                 3_000L, "KRW", null, "key", "hash");
-        ReflectionTestUtils.setField(transfer, "id", UUID.fromString("2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e"));
+        ReflectionTestUtils.setField(transfer, "id", TRANSFER_ID);
         return transfer;
     }
 
@@ -205,6 +217,6 @@ class TransferLedgerClientAdapterTest {
                 .headers(Map.of())
                 .body(body, UTF_8)
                 .build();
-        return FeignException.errorStatus("TransferLedgerFeignClient#register(LedgerTransactionRequest)", response);
+        return FeignException.errorStatus("LedgerFeignApi#register(RegisterRequest)", response);
     }
 }

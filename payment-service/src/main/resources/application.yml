@@ -20,20 +20,11 @@ spring:
     openfeign:
       client:
         config:
-          wallet-service:
-            connect-timeout: 2000
-            read-timeout: 3000
-          user-service:
-            connect-timeout: 2000
-            read-timeout: 3000
-          # 송금 원장 거래 등록 (contextId로 설정 키가 나뉨). 원장 최대 응답(약 5초)보다 길게 기다리고, 넘으면 결과 모름으로 PROCESSING
-          transfer-ledger:
-            connect-timeout: 1000
-            read-timeout: 6000
-          # 송금 쪽 Wallet 클라이언트와 중복이라 공통화 리팩토링 때 정리할 예정입니다.
+          # 결제·송금이 함께 쓰는 Feign 클라이언트(contextId 기준)
           paymentWalletApi:
             connect-timeout: 2000
             read-timeout: 3000
+          # 원장 최대 응답(약 5초)보다 길게 기다리고, 넘으면 결과 모름(송금은 PROCESSING)
           paymentLedgerApi:
             connect-timeout: 1000
             read-timeout: 6000

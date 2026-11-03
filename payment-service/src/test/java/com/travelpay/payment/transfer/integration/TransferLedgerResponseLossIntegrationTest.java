@@ -8,7 +8,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import com.travelpay.payment.transfer.application.TransferService;
-import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
 import com.travelpay.payment.transfer.support.TransferApiIntegrationSupport;
 import feign.Request;
 import feign.RetryableException;
@@ -38,7 +38,7 @@ class TransferLedgerResponseLossIntegrationTest extends TransferApiIntegrationSu
     private TransferService transferService;
 
     private final Map<UUID, Object> processed = new HashMap<>();
-    private final List<LedgerTransactionRequest> received = new ArrayList<>();
+    private final List<LedgerFeignApi.RegisterRequest> received = new ArrayList<>();
     private int applied;
 
     @BeforeEach
@@ -118,7 +118,7 @@ class TransferLedgerResponseLossIntegrationTest extends TransferApiIntegrationSu
         UUID transferId = transferIdOf(requestTransfer("tc09-conflict").andExpect(status().isAccepted()));
         doAnswer(invocation -> {
             throw ledgerError(409, "LEDGER_REFERENCE_CONFLICT");
-        }).when(ledgerFeignClient).register(any());
+        }).when(ledgerFeignApi).register(any());
 
         transferService.recoverDue(updatedAt(transferId).plusSeconds(31), 10);
 
@@ -137,7 +137,7 @@ class TransferLedgerResponseLossIntegrationTest extends TransferApiIntegrationSu
      */
     private void givenLedgerThatLosesFirstResponse(String rejectCode) {
         doAnswer(invocation -> {
-            LedgerTransactionRequest request = invocation.getArgument(0);
+            LedgerFeignApi.RegisterRequest request = invocation.getArgument(0);
             received.add(request);
             UUID reference = request.referenceId();
             if (!processed.containsKey(reference)) {
@@ -156,6 +156,6 @@ class TransferLedgerResponseLossIntegrationTest extends TransferApiIntegrationSu
                 return posted(transactionId);
             }
             throw ledgerError(422, (String) first);
-        }).when(ledgerFeignClient).register(any());
+        }).when(ledgerFeignApi).register(any());
     }
 }

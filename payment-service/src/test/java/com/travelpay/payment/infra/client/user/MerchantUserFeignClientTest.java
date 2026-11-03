@@ -39,7 +39,7 @@ class MerchantUserFeignClientTest {
     @Test
     void returnsTrueForActiveUser() {
         when(userFeignApi.getActiveUser(USER_ID))
-                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(USER_ID)));
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(USER_ID, "홍길동")));
 
         assertTrue(userClient.isActiveUser(USER_ID));
     }
@@ -62,7 +62,7 @@ class MerchantUserFeignClientTest {
     @Test
     void reportsResponseForOtherUserAsBadGateway() {
         when(userFeignApi.getActiveUser(USER_ID))
-                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(UUID.randomUUID())));
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(UUID.randomUUID(), "홍길동")));
 
         assertErrorCode(CommonErrorCode.BAD_GATEWAY);
     }

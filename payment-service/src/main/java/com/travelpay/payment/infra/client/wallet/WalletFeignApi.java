@@ -9,8 +9,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import java.util.UUID;
 
 /**
- * 송금 쪽 클라이언트와 같은 서비스를 부르므로 contextId로 구분합니다.
- * 추후 리펙토링 예정입니다.
+ * 결제와 송금이 함께 사용합니다.
  */
 @FeignClient(name = "wallet-service", contextId = "paymentWalletApi", path = "/internal/v1/wallets")
 public interface WalletFeignApi {

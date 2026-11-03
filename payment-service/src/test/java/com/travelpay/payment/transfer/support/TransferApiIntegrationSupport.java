@@ -9,12 +9,9 @@ import java.util.UUID;
 import com.jayway.jsonpath.JsonPath;
 import com.travelpay.common.auth.AuthHeaders;
 import com.travelpay.common.response.ApiResponse;
-import com.travelpay.payment.transfer.client.LedgerRegisterResponse;
-import com.travelpay.payment.transfer.client.TransferLedgerFeignClient;
-import com.travelpay.payment.transfer.client.UserClient;
-import com.travelpay.payment.transfer.client.UserRecipientResponse;
-import com.travelpay.payment.transfer.client.WalletClient;
-import com.travelpay.payment.transfer.client.WalletResponse;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
+import com.travelpay.payment.infra.client.user.UserFeignApi;
+import com.travelpay.payment.infra.client.wallet.WalletFeignApi;
 import com.travelpay.payment.transfer.controller.TransferController;
 import jakarta.persistence.EntityManager;
 import feign.FeignException;
@@ -67,13 +64,13 @@ public abstract class TransferApiIntegrationSupport {
     protected EntityManager entityManager;
 
     @MockitoBean
-    protected TransferLedgerFeignClient ledgerFeignClient;
+    protected LedgerFeignApi ledgerFeignApi;
 
     @MockitoBean
-    protected WalletClient walletClient;
+    protected WalletFeignApi walletFeignApi;
 
     @MockitoBean
-    protected UserClient userClient;
+    protected UserFeignApi userFeignApi;
 
     protected MockMvc mvc;
     protected UUID senderId;
@@ -90,16 +87,16 @@ public abstract class TransferApiIntegrationSupport {
         targetWalletId = UUID.randomUUID();
         givenWallet(senderId, sourceWalletId, "ACTIVE");
         givenWallet(receiverId, targetWalletId, "ACTIVE");
-        when(userClient.getRecipient(receiverId))
-                .thenReturn(ApiResponse.success(new UserRecipientResponse(receiverId, "홍길동")));
+        when(userFeignApi.getActiveUser(receiverId))
+                .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(receiverId, "홍길동")));
     }
 
     protected void givenWallet(UUID userId, UUID walletId, String status) {
-        when(walletClient.getWallet(userId)).thenReturn(ApiResponse.success(new WalletResponse(walletId, status)));
+        when(walletFeignApi.getWallet(userId)).thenReturn(ApiResponse.success(new WalletFeignApi.WalletResponse(walletId, status)));
     }
 
-    protected static ApiResponse<LedgerRegisterResponse> posted(UUID transactionId) {
-        return ApiResponse.success(new LedgerRegisterResponse(transactionId, "POSTED"));
+    protected static ApiResponse<LedgerFeignApi.TransactionResponse> posted(UUID transactionId) {
+        return ApiResponse.success(new LedgerFeignApi.TransactionResponse(transactionId, "POSTED"));
     }
 
     protected MockHttpServletRequestBuilder asUser(MockHttpServletRequestBuilder builder, UUID userId) {
@@ -164,7 +161,7 @@ public abstract class TransferApiIntegrationSupport {
     }
 
     protected static FeignException ledgerError(int status, String code) {
-        return feignError("TransferLedgerFeignClient#register(LedgerTransactionRequest)", Request.HttpMethod.POST,
+        return feignError("LedgerFeignApi#register(RegisterRequest)", Request.HttpMethod.POST,
                 "http://ledger-service/internal/v1/ledger/transactions", status, errorBody(code));
     }
 
