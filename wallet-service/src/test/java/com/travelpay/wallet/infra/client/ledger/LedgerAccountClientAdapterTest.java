@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import static com.travelpay.wallet.infra.client.FeignFailures.bodyReadTimeout;
 import static com.travelpay.wallet.infra.client.FeignFailures.connectionRefused;
 import static com.travelpay.wallet.infra.client.FeignFailures.error;
 import static com.travelpay.wallet.infra.client.FeignFailures.response;
@@ -141,6 +142,20 @@ class LedgerAccountClientAdapterTest {
         assertOpenFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
 
         assertOutageLogged(output, "TIMEOUT");
+        assertTrue(output.getOut().contains("exception=java.net.SocketTimeoutException"));
+        assertFalse(output.getOut().contains("Read timed out"));
+    }
+
+    @Test
+    void 본문을_읽다_시간_초과는_원장_장애_503과_WARN(CapturedOutput output) {
+        givenFindFails(bodyReadTimeout());
+        assertFindFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
+
+        when(feignClient.openWalletAccounts(any())).thenThrow(bodyReadTimeout());
+        assertOpenFails(WalletErrorCode.WALLET_LEDGER_UNAVAILABLE);
+
+        assertOutageLogged(output, "TIMEOUT");
+        assertTrue(output.getOut().contains("status=200"));
         assertTrue(output.getOut().contains("exception=java.net.SocketTimeoutException"));
         assertFalse(output.getOut().contains("Read timed out"));
     }

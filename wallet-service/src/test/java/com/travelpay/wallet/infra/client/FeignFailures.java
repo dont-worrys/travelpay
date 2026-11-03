@@ -51,6 +51,11 @@ public final class FeignFailures {
         return new DecodeException(200, "본문을 해석할 수 없습니다.", request());
     }
 
+    /** 2xx 응답 본문을 읽다 시간 초과 */
+    public static FeignException bodyReadTimeout() {
+        return new DecodeException(200, "Read timed out", request(), new SocketTimeoutException("Read timed out"));
+    }
+
     private static Request request() {
         return Request.create(Request.HttpMethod.POST, "/internal/test", Map.of(), null,
                 StandardCharsets.UTF_8, null);
