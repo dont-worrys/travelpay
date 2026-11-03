@@ -8,14 +8,15 @@ DB만 조회할 때와 Redis 캐시를 쓸 때를 같은 방법으로 재서 비
 
 | 파일 | 하는 일 |
 | --- | --- |
-| `compose.yaml` | 측정 전용 Postgres(5439, pg_stat_statements 켬)와 k6(부하 생성기)를 Docker로 띄움 |
+| `compose.yaml` | 측정 전용 Postgres(5439, pg_stat_statements 켬), 환전 서비스(app, mock 모드), k6(부하 생성기)를 같은 Docker 네트워크에 띄움 |
 | `init/01-extensions.sql` | 측정 DB를 처음 만들 때 pg_stat_statements 확장 생성 |
 | `seed-rate-history.sql` | 측정 전에 환율 테이블을 표준 상태로 맞춤 (공식 30일 + 가짜 이력, 쿼리 통계 초기화) |
 | `rate-query.js` | k6 스크립트. 예열 후 측정 구간만 집계해 화면에 표로, `results/`에 JSON으로 남김 |
-| `measure.sh` | 한 단계 측정: 이력 적재 → k6 실행(그동안 DB·커넥션 지표 1초 간격 기록) → 지표 정리 |
+| `measure.sh` | 한 단계 측정: 앱 재시작 → 이력 적재 → k6 실행(그동안 DB·커넥션 지표 1초 간격 기록) → 지표 정리 |
+| `measure-all.sh` | 50 / 100 / 300 단계를 3번씩 측정하고 단계별 중앙값 표를 만듦 |
 | `results/` | 측정 결과 JSON (커밋하지 않음. 비교에 쓴 값은 측정 기록 문서에 옮겨 적음) |
 
-필요한 것은 Docker뿐입니다. k6는 설치하지 않고 `grafana/k6` 이미지로 실행합니다.
+필요한 것은 Docker와 jar를 빌드할 JDK뿐입니다. 앱·DB·k6 모두 컨테이너로 실행합니다(k6는 `grafana/k6` 이미지).
 
 ## 측정 DB 띄우기·끄기
 
@@ -30,25 +31,38 @@ docker compose down                      # 끄기 (데이터 사라짐)
 
 ## 환전 서비스를 mock 모드로 띄우기
 
-측정 DB에 연결해 띄웁니다. 처음 뜰 때 Flyway가 테이블을 만들고, 5초마다 가짜 환율을 수집합니다.
+환전 서비스도 측정 DB·k6와 **같은 Docker 네트워크의 컨테이너**(`app`)로 띄웁니다. 저장소 루트에서 빌드한 jar를 그대로 실행합니다.
+처음 뜰 때 Flyway가 테이블을 만들고, 5초마다 가짜 환율을 수집합니다.
 
 ```bash
-./gradlew :exchange-service:bootJar
-EXCHANGE_DB_URL="jdbc:postgresql://127.0.0.1:5439/travelpay?currentSchema=exchange_service" \
-EXCHANGE_DB_USERNAME=exchange_app EXCHANGE_DB_PASSWORD=load-test-only \
-EXCHANGE_RATE_MODE=mock \
-java -jar exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar \
-  --eureka.client.enabled=false --server.port=18084 \
-  --management.server.port=18085 \
-  --server.tomcat.max-keep-alive-requests=-1
+cd ../..                                  # exchange-service/load-test에서 저장소 루트로
+./gradlew :exchange-service:bootJar        # jar 빌드 (코드를 바꿨다면 다시)
+cd exchange-service/load-test
+docker compose --profile app up -d --wait app   # 측정 DB도 함께 뜸. 준비(health UP)될 때까지 기다림
 ```
 
-측정용으로 붙이는 옵션 두 개 (DB 측정과 Redis 측정 모두 같게):
+- PC에서 확인할 때는 `http://localhost:18084/api/v1/exchange-rates`로 요청할 수 있습니다. 측정은 Docker 네트워크 안에서 `app:18084`로 합니다.
+- 이미지는 JRE가 아니라 JDK(`eclipse-temurin:21.0.13_9-jdk`)입니다. Temurin JRE 이미지에는 `jdk.random` 모듈이 없어 가짜 환율 공급자(`RandomGenerator.getDefault()`)가 시작하다 실패합니다.
+
+측정용으로 붙이는 옵션 (`compose.yaml`의 `app.command`, DB 측정과 Redis 측정 모두 같게):
 
 | 옵션 | 이유 |
 | --- | --- |
 | `--management.server.port=18085` | Actuator(지표)를 별도 포트로 띄움. 같은 포트면 지표 요청이 부하 요청 뒤에 줄 서서, 바쁠 때 지표를 못 읽음 |
 | `--server.tomcat.max-keep-alive-requests=-1` | 톰캣은 기본으로 연결 하나에 요청 100번을 받으면 끊음. 초당 수백 번 새 연결이 생기며 Docker 네트워크에서 가끔 연결 시간 초과(`dial: i/o timeout`)가 남. 측정 중 연결을 계속 재사용하게 함 |
+
+### 측정 환경을 Docker 안에 두는 이유
+
+처음에는 앱을 PC에서 띄웠습니다. 그러면 앱 → DB, k6 → 앱 요청이 모두 Docker Desktop의 포트 전달(`com.docker.backend.exe`, PC ↔ Docker 경계)을 지납니다. 같은 조건에서 동시 요청 300개의 처리량이 실행마다 250~950 TPS로 흔들려, 원인을 찾으려고 연결 하나로 `SELECT 1`을 수천 번 보내 왕복 시간을 쟀습니다 (2026-11-03, ms).
+
+| 경로 | 부하 없을 때 P50 / P99 | 동시 요청 300개 중 P50 / P99 |
+| --- | --- | --- |
+| PC → Docker DB (포트 전달) | 0.47 / 1.2~1.8 | 2.7 / 6.8~7.4 |
+| Docker 안 → Docker DB | 0.044 / 0.25~0.35 | 0.049 / 1.9 |
+
+- DB가 쿼리를 처리하는 시간은 0.025ms(pg_stat_statements)라, 앱 쪽에서 보이는 시간은 대부분 포트 전달 시간이었습니다. 부하 요청과 DB 요청이 같은 포트 전달에 몰려, 부하 중 6배 느려지고 실행마다 달라졌습니다.
+- k6·앱·DB를 모두 Docker 네트워크에 둔 뒤 같은 300단계를 3번 재자 처리량이 5,749~6,059 TPS(±3%)로 일정해졌습니다.
+- 그래서 앱을 PC에 띄우고 잰 결과는 앱 성능이 아니라 포트 전달을 잰 것이라 기준값으로 쓰지 않습니다.
 
 ## 환율 이력 적재 (측정 직전마다)
 
@@ -69,9 +83,30 @@ docker compose exec -T measure-postgres psql -U exchange_app -d travelpay -v hou
 - Windows Git Bash에서는 `/load-test/...` 경로가 바뀌어 실패하므로 앞에 `MSYS_NO_PATHCONV=1`을 붙입니다.
 - 한 트랜잭션이라 중간에 실패하면 아무것도 바뀌지 않습니다.
 
+## 인덱스 확인 (측정 전 한 번)
+
+앱이 최신 환율을 읽는 쿼리(`findFirstBySourceAndCurrencyOrderByRateDateDescCollectedAtDesc`)와 같은 모양을 EXPLAIN해, 이력을 적재한 상태에서 인덱스를 쓰는지 확인합니다. DB만 조회할 때의 기준값이 공정하려면 인덱스를 써야 합니다.
+
+```bash
+cd exchange-service/load-test
+docker compose exec -T measure-postgres psql -U exchange_app -d travelpay -c "
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM exchange_service.exchange_rates
+WHERE source = 'MOCK' AND target_currency = 'JPY'
+ORDER BY rate_date DESC, collected_at DESC
+LIMIT 1;"
+```
+
+- 계획에 **`Index Scan using ix_exchange_rates_latest`**가 있으면 됩니다. `Seq Scan`이나 `Sort`가 보이면 인덱스를 쓰지 않는 것이니 측정하지 않습니다.
+- 측정 결과 기록에 이 확인 결과(계획과 실행 시간)도 함께 남깁니다.
+
 ## 부하 측정 (k6)
 
-사용자 수 단계마다 한 번씩 실행합니다. 각 실행은 예열 15초 동안 요청만 보내고 집계에서 뺀 뒤, 측정 1분만 집계합니다.
+동시 요청 수 단계마다 한 번씩 실행합니다. 같은 가상 사용자들이 예열 15초 + 측정 1분 내내 쉬지 않고 요청하고, 요청을 **시작한 시각**(k6 테스트 경과 시간)이 15초 이후인 요청만 집계합니다.
+
+- **`VUS`는 "동시 요청 수"입니다.** 가상 사용자가 쉬는 시간 없이 반복하므로, 서버에는 항상 VUS개의 요청이 들어와 있습니다. 실제 사용자는 조회 사이에 쉬므로 실제 사용자 수로는 훨씬 많습니다. 리틀의 법칙(동시 사용자 ≈ 처리량 × (응답 시간 + 쉬는 시간))으로, 300 TPS에서 쉬는 시간을 10초로 가정하면 약 3,000명 이상입니다.
+- **예열과 측정을 한 시나리오로 둔 이유:** 시나리오 두 개로 나누면 k6가 시나리오마다 다른 가상 사용자를 써서, 경계에서 (1) 예열 요청이 측정 구간으로 넘어와 부하가 겹치거나 (2) 새 사용자들이 한꺼번에 연결을 맺어 일부가 거부(`connect: connection refused`)됐습니다. 한 시나리오면 예열 때 맺은 연결을 이어 쓰고 측정 1분 내내 동시 요청 수가 정확히 유지됩니다.
+- 테스트를 시작하는 순간에는 모든 가상 사용자가 처음 연결을 맺어서 300개에서 연결 거부가 한두 건 날 수 있습니다. 예열 구간이라 집계에서 빠집니다.
 
 ```bash
 cd exchange-service/load-test
@@ -80,15 +115,15 @@ docker compose run --rm -e VUS=50 -e LABEL=db k6 run --quiet /scripts/rate-query
 
 | 환경 변수 | 기본 | 뜻 |
 | --- | --- | --- |
-| `VUS` | 50 | 동시 사용자 수. 50 / 100 / 300으로 각각 실행 |
+| `VUS` | 50 | 동시 요청 수(쉬는 시간 없는 가상 사용자 수). 50 / 100 / 300으로 각각 실행 |
 | `LABEL` | run | 결과 파일 이름 구분 (`db`, `redis`) → `results/db-vus50.json` |
 | `DURATION` / `WARMUP` | 1m / 15s | 측정·예열 길이. 비교할 측정끼리는 같게 둠 |
 | `STALE_AFTER_SECONDS` | 6 | 수집 시각이 이보다 오래된 환율이 있으면 "오래된 응답"으로 셈 (수집 간격 5초 + 여유 1초) |
 
-출력 예 (2026-11-02, 동시 사용자 5명 · 10초 시험 실행):
+출력 예 (2026-11-02, 동시 요청 5개 · 10초 시험 실행):
 
 ```
-[trial] 동시 사용자 5명, 측정 10초 (예열 5s 제외)
+[trial] 동시 요청 5개, 측정 10초 (예열 5s 제외)
   요청 4986건 | 성공 TPS 498.6 | 실패율 0%
   응답(ms) 평균 9.8 | P50 8.39 | P95 18.23 | P99 27.65 | 최대 67.74
   상태 200 4986 | 4xx 0 | 5xx 0 | 응답 없음 0
@@ -97,12 +132,15 @@ docker compose run --rm -e VUS=50 -e LABEL=db k6 run --quiet /scripts/rate-query
 
 ### 한 단계 측정: `measure.sh`
 
-이력 적재 → k6 실행 → DB·커넥션 지표 정리를 한 번에 합니다. 단계마다 이력을 다시 적재하므로(쿼리 통계도 0으로) 같은 조건에서 시작합니다.
+앱 재시작 → 이력 적재 → k6 실행 → DB·커넥션 지표 정리를 한 번에 합니다. jar를 먼저 빌드해 둡니다(앱은 스크립트가 띄움).
 
 ```bash
 cd exchange-service/load-test
-./measure.sh db 50      # LABEL=db, 동시 사용자 50명
+./measure.sh db 50      # LABEL=db, 동시 요청 50개
 ```
+
+- **측정마다 앱을 새로 띄웁니다**(`docker compose up --force-recreate --wait app`). 앞 측정에서 데워진 JIT·커넥션·메모리 상태가 다음 측정에 넘어가지 않게 해, 측정 순서와 상관없이 같은 출발점에서 시작합니다.
+- 이력을 다시 적재하므로 쿼리 통계도 매번 0에서 시작합니다.
 
 결과: `results/db-vus50.json`(k6 응답·처리량) + `results/db-vus50-db.json`(DB·커넥션 지표)
 
@@ -110,13 +148,23 @@ cd exchange-service/load-test
 | --- | --- | --- |
 | `hikariPending` | Actuator `hikaricp_connections_pending` | 연결을 기다리는 요청 수, 측정 구간 표본의 평균·최대 |
 | `hikariActive` | `hikaricp_connections_active` | 사용 중 연결 수(최대 10), 평균·최대 |
-| `acquireMs` | `hikaricp_connections_acquire_seconds` | 연결을 얻는 데 걸린 시간. 평균은 구간의 합계·횟수 차이, 최대는 `_max`의 최댓값 |
+| `acquireMsAvg` | `hikaricp_connections_acquire_seconds` | 연결을 얻는 데 걸린 평균 시간 (구간의 합계·횟수 차이). `_max`는 일정 시간 동안의 최대를 들고 있어 앞 실행 값이 남으므로 쓰지 않음 |
+| `cpuPercent` | `system_cpu_usage`, `process_cpu_usage` | Docker가 쓰는 CPU 전체(k6·앱·DB 합)와 앱 JVM의 사용률. 평균(전체는 최대도) |
 | `dbActiveSessions` | `pg_stat_activity` (state=active) | DB에서 실제로 실행 중인 쿼리 수, 평균·최대 |
 | `rateSelectCalls` | `pg_stat_statements` | 환율 SELECT 호출 수. 예열·수집기 포함이라 검산용 (≈ 전체 요청 × 2 + 수집기) |
 
-- 표본은 1초 간격이 목표지만, 부하가 높으면 지표 요청이 늦어 1~3초 간격이 됩니다. `samples`에 실제 표본 수가 남습니다.
-- 한 PC에서 k6·Docker·앱·DB가 CPU를 나눠 써서 실행마다 수치가 흔들립니다. **단계마다 3번 실행하고 중앙값**을 씁니다.
+- 측정 구간은 k6가 **실제로 테스트를 시작한 시각**(끝난 시각 − k6 결과의 `testRunDurationMs`)에서 예열을 뺀 1분입니다. 컨테이너를 띄우는 데 걸린 시간과 상관없이 k6 집계 구간과 같습니다.
+- 커넥션·CPU 지표는 **앱 컨테이너 안에서** 1초마다 읽습니다. PC에서 읽으면 포트 전달을 지나 바쁠 때 표본이 빠집니다(60초에 44개 → 안에서 읽으면 약 60개). `samples`에 실제 표본 수가 남습니다.
+- 표본이 하나도 없으면(지표를 못 읽음) 결과를 쓰지 않고 실패로 끝납니다.
+
+### 전체 측정: `measure-all.sh`
+
+같은 환경에서도 실행마다 수치가 조금씩 다릅니다. **단계마다 3번 실행하고 중앙값**을 씁니다(튀는 값 하나에 휘둘리지 않게).
 
 ```bash
-for vus in 50 100 300; do for rep in 1 2 3; do ./measure.sh "db-r$rep" "$vus"; done; done
+cd exchange-service/load-test
+./measure-all.sh db      # 50 / 100 / 300 × 3번 = 9번 측정 (한 번에 약 2분 20초, 전체 약 21분)
 ```
+
+- 결과: 회차별 `results/db-r1-vus50.json` … 과 중앙값 표 `results/db-summary.md`(마크다운, 회차별 TPS도 함께 적어 흔들림을 확인)
+- 단계·횟수는 `STAGES="50 100 300"`, 두 번째 인자(`./measure-all.sh db 5`)로 바꿀 수 있습니다. 비교할 측정끼리는 같게 둡니다.
