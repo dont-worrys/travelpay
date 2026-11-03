@@ -11,6 +11,11 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  task:
+    scheduling:
+      pool:
+        # 기본 1스레드면 주문 복구가 길어질 때 환율 수집이 멈춘다. 수집과 복구가 서로 기다리지 않게 둘로 나눈다
+        size: 2
   cloud:
     openfeign:
       client:
@@ -19,6 +24,12 @@ spring:
           wallet-service:
             connect-timeout: 2000
             read-timeout: 3000
+          # 원장 최대 응답(약 5초)까지 기다린다. 넘으면 결과 모름으로 두고 복구 스케줄러가 같은 요청을 다시 보낸다.
+          # 배포는 이 파일만 읽으므로(SPRING_CONFIG_NAME=application-prod) 빠지면 OpenFeign 기본값(연결 10초, 읽기 60초)이 되어
+          # 선점 유효 기간(10초)의 전제(원장 호출 최대 약 7초)가 깨진다
+          ledger-service:
+            connect-timeout: 2000
+            read-timeout: 5000
 
 travelpay:
   auth:
