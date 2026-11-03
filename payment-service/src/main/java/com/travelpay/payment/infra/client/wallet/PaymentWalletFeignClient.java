@@ -4,8 +4,8 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.feign.FeignErrors;
 import com.travelpay.common.response.ApiResponse;
-import com.travelpay.payment.application.payment.client.wallet.Wallet;
-import com.travelpay.payment.application.payment.client.wallet.WalletClient;
+import com.travelpay.payment.application.payment.client.wallet.PaymentWallet;
+import com.travelpay.payment.application.payment.client.wallet.PaymentWalletClient;
 import feign.FeignException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -15,14 +15,14 @@ import java.util.UUID;
 
 @Component
 @RequiredArgsConstructor
-public class WalletFeignClient implements WalletClient {
+public class PaymentWalletFeignClient implements PaymentWalletClient {
 
     private static final String WALLET_NOT_FOUND = "WALLET_NOT_FOUND";
 
     private final WalletFeignApi walletFeignApi;
 
     @Override
-    public Optional<Wallet> findWallet(UUID userId) {
+    public Optional<PaymentWallet> findWallet(UUID userId) {
         ApiResponse<WalletFeignApi.WalletResponse> response;
         try {
             response = walletFeignApi.getWallet(userId);
@@ -38,6 +38,6 @@ public class WalletFeignClient implements WalletClient {
                 || response.data().walletId() == null) {
             throw new BusinessException(CommonErrorCode.BAD_GATEWAY);
         }
-        return Optional.of(new Wallet(response.data().walletId(), response.data().status()));
+        return Optional.of(new PaymentWallet(response.data().walletId(), response.data().status()));
     }
 }

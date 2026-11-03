@@ -15,7 +15,7 @@ import java.util.UUID;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class UserFeignClient implements MerchantOwnerClient {
+public class MerchantUserFeignClient implements MerchantOwnerClient {
 
     private static final String USER_NOT_FOUND = "USER_RECIPIENT_NOT_FOUND";
 

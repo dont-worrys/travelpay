@@ -11,12 +11,12 @@ import com.travelpay.common.auth.AuthRole;
 import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
-import com.travelpay.payment.application.payment.client.ledger.LedgerClient;
-import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
-import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
-import com.travelpay.payment.application.payment.client.ledger.LedgerTransactionCommand;
-import com.travelpay.payment.application.payment.client.wallet.Wallet;
-import com.travelpay.payment.application.payment.client.wallet.WalletClient;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerClient;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
+import com.travelpay.payment.application.payment.client.wallet.PaymentWallet;
+import com.travelpay.payment.application.payment.client.wallet.PaymentWalletClient;
 import com.travelpay.payment.application.payment.dto.MerchantPaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
@@ -87,8 +87,8 @@ class PaymentServiceTest {
     private PaymentRepository paymentRepository;
     private PaymentHistoryRepository paymentHistoryRepository;
     private MerchantRepository merchantRepository;
-    private WalletClient walletClient;
-    private LedgerClient ledgerClient;
+    private PaymentWalletClient paymentWalletClient;
+    private PaymentLedgerClient ledgerClient;
     private RefundRepository refundRepository;
     private PaymentService paymentService;
     private List<Refund> savedRefunds;
@@ -98,11 +98,11 @@ class PaymentServiceTest {
         paymentRepository = mock(PaymentRepository.class);
         paymentHistoryRepository = mock(PaymentHistoryRepository.class);
         merchantRepository = mock(MerchantRepository.class);
-        walletClient = mock(WalletClient.class);
-        ledgerClient = mock(LedgerClient.class);
+        paymentWalletClient = mock(PaymentWalletClient.class);
+        ledgerClient = mock(PaymentLedgerClient.class);
         refundRepository = mock(RefundRepository.class);
         paymentService = new PaymentService(paymentRepository, paymentHistoryRepository, merchantRepository,
-                walletClient, ledgerClient, refundRepository, TransactionOperations.withoutTransaction());
+                paymentWalletClient, ledgerClient, refundRepository, TransactionOperations.withoutTransaction());
 
         when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.empty());
         when(paymentRepository.save(any(Payment.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -134,7 +134,7 @@ class PaymentServiceTest {
     void approvesPaymentWhenLedgerApproves() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
 
         PaymentResult result = paymentService.paymentRequest(command(10_000L));
 
@@ -155,13 +155,13 @@ class PaymentServiceTest {
     void sendsStoredWalletAndPaymentReferenceToLedger() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
 
         paymentService.paymentRequest(command(10_000L));
 
-        ArgumentCaptor<LedgerTransactionCommand> captor = ArgumentCaptor.forClass(LedgerTransactionCommand.class);
+        ArgumentCaptor<PaymentLedgerTransactionCommand> captor = ArgumentCaptor.forClass(PaymentLedgerTransactionCommand.class);
         verify(ledgerClient).createTransaction(captor.capture());
-        LedgerTransactionCommand sent = captor.getValue();
+        PaymentLedgerTransactionCommand sent = captor.getValue();
         // 재시도해도 같은 요청이 되도록 지갑 조회 결과가 아닌 결제에 저장된 지갑 ID를 보냅니다.
         assertEquals(WALLET_ID, sent.userWalletId());
         assertEquals(MERCHANT_WALLET_ID, sent.merchantWalletId());
@@ -180,14 +180,14 @@ class PaymentServiceTest {
 
         assertEquals(PaymentErrorCode.MERCHANT_NOT_ACTIVE, exception.getErrorCode());
         verify(paymentRepository, never()).save(any(Payment.class));
-        verifyNoInteractions(walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
     void throwsDeclinedButKeepsDeclinedRecordWhenLedgerDeclines() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.declined("잔액이 부족합니다."));
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.declined("잔액이 부족합니다."));
 
         PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.paymentRequest(command(2_000_000L)));
@@ -210,7 +210,7 @@ class PaymentServiceTest {
     void keepsPendingWhenLedgerResultIsUnknown() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
         PaymentResult result = paymentService.paymentRequest(command(10_000L));
 
@@ -226,7 +226,7 @@ class PaymentServiceTest {
     void keepsPendingWhenRecordingUnknownFails() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(paymentRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("DB 연결 실패"));
 
@@ -239,7 +239,7 @@ class PaymentServiceTest {
     void marksManualReviewWhenLedgerDoesNotAcceptPayment() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.notAccepted());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.notAccepted());
         when(paymentRepository.markManualReview(any(), eq(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED), any()))
                 .thenReturn(1);
         Payment manualReview = paymentWithId(existingPayment(10_000L));
@@ -262,7 +262,7 @@ class PaymentServiceTest {
     void doesNotSaveHistoryWhenManualReviewUpdateMissed() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.notAccepted());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.notAccepted());
         when(paymentRepository.markManualReview(any(), any(), any())).thenReturn(0);
 
         paymentService.paymentRequest(command(10_000L));
@@ -280,7 +280,7 @@ class PaymentServiceTest {
 
         assertEquals(PaymentErrorCode.MERCHANT_NOT_FOUND, exception.getErrorCode());
         verify(paymentRepository, never()).save(any(Payment.class));
-        verifyNoInteractions(walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
@@ -292,7 +292,7 @@ class PaymentServiceTest {
 
         assertEquals(PaymentErrorCode.MERCHANT_NOT_ACTIVE, exception.getErrorCode());
         verify(paymentRepository, never()).save(any(Payment.class));
-        verifyNoInteractions(walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
@@ -304,13 +304,13 @@ class PaymentServiceTest {
 
         assertEquals(PaymentErrorCode.CURRENCY_MISMATCH, exception.getErrorCode());
         verify(paymentRepository, never()).save(any(Payment.class));
-        verifyNoInteractions(walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
     void throwsWhenWalletNotFound() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
-        when(walletClient.findWallet(USER_ID)).thenReturn(Optional.empty());
+        when(paymentWalletClient.findWallet(USER_ID)).thenReturn(Optional.empty());
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> paymentService.paymentRequest(command(10_000L)));
@@ -323,8 +323,8 @@ class PaymentServiceTest {
     @Test
     void throwsWhenWalletIsNotActive() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
-        when(walletClient.findWallet(USER_ID))
-                .thenReturn(Optional.of(new Wallet(WALLET_ID, "SUSPENDED")));
+        when(paymentWalletClient.findWallet(USER_ID))
+                .thenReturn(Optional.of(new PaymentWallet(WALLET_ID, "SUSPENDED")));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> paymentService.paymentRequest(command(10_000L)));
@@ -345,7 +345,7 @@ class PaymentServiceTest {
         assertEquals(PaymentStatus.APPROVED, result.status());
         assertEquals(10_000L, result.amount());
         verify(paymentRepository, never()).save(any(Payment.class));
-        verifyNoInteractions(merchantRepository, walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(merchantRepository, paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
@@ -358,7 +358,7 @@ class PaymentServiceTest {
 
         assertEquals(PaymentErrorCode.IDEMPOTENCY_KEY_REUSED, exception.getErrorCode());
         verify(paymentRepository, never()).save(any(Payment.class));
-        verifyNoInteractions(merchantRepository, walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(merchantRepository, paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
@@ -372,7 +372,7 @@ class PaymentServiceTest {
 
         assertEquals(PaymentErrorCode.DECLINED, exception.getErrorCode());
         assertEquals("잔액이 부족합니다.", exception.getDeclineReason());
-        verifyNoInteractions(merchantRepository, walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(merchantRepository, paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     @Test
@@ -402,7 +402,7 @@ class PaymentServiceTest {
 
         assertEquals(PaymentStatus.PENDING, result.status());
         verify(paymentRepository, never()).save(any(Payment.class));
-        verifyNoInteractions(ledgerClient, walletClient, paymentHistoryRepository);
+        verifyNoInteractions(ledgerClient, paymentWalletClient, paymentHistoryRepository);
     }
 
     @Test
@@ -415,7 +415,7 @@ class PaymentServiceTest {
         PaymentResult result = paymentService.paymentRequest(command(10_000L));
 
         assertEquals(PaymentStatus.MANUAL_REVIEW, result.status());
-        verifyNoInteractions(ledgerClient, walletClient, paymentHistoryRepository);
+        verifyNoInteractions(ledgerClient, paymentWalletClient, paymentHistoryRepository);
     }
 
     @Test
@@ -449,7 +449,7 @@ class PaymentServiceTest {
         assertEquals(1, result.refunds().size());
         assertEquals(REFUND_ID, result.refunds().get(0).refundId());
         assertEquals(RefundStatus.COMPLETED, result.refunds().get(0).status());
-        verifyNoInteractions(merchantRepository, walletClient, ledgerClient, paymentHistoryRepository);
+        verifyNoInteractions(merchantRepository, paymentWalletClient, ledgerClient, paymentHistoryRepository);
     }
 
     private PaymentCommand command(long amount) {
@@ -474,8 +474,8 @@ class PaymentServiceTest {
     }
 
     private void givenWallet() {
-        when(walletClient.findWallet(USER_ID))
-                .thenReturn(Optional.of(new Wallet(WALLET_ID, "ACTIVE")));
+        when(paymentWalletClient.findWallet(USER_ID))
+                .thenReturn(Optional.of(new PaymentWallet(WALLET_ID, "ACTIVE")));
     }
 
     private List<PaymentHistory> savedHistories(int expectedCount) {
@@ -540,7 +540,7 @@ class PaymentServiceTest {
     void refundsPaymentWhenLedgerApproves() {
         Payment payment = approvedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
 
@@ -563,7 +563,7 @@ class PaymentServiceTest {
     @Test
     void recordsRefundLedgerIdWhenLedgerApproves() {
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
 
@@ -573,13 +573,13 @@ class PaymentServiceTest {
     @Test
     void sendsOriginalTransactionAndRefundIdToLedger() {
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
 
-        ArgumentCaptor<LedgerRefundCommand> captor = ArgumentCaptor.forClass(LedgerRefundCommand.class);
+        ArgumentCaptor<PaymentLedgerRefundCommand> captor = ArgumentCaptor.forClass(PaymentLedgerRefundCommand.class);
         verify(ledgerClient).refundTransaction(captor.capture());
-        LedgerRefundCommand command = captor.getValue();
+        PaymentLedgerRefundCommand command = captor.getValue();
         assertEquals(LEDGER_TRANSACTION_ID, command.originalTransactionId());
         assertEquals(REFUND_ID, command.referenceId());
         assertEquals(USER_ID, command.userId());
@@ -593,7 +593,7 @@ class PaymentServiceTest {
     void keepsRefundPendingWhenLedgerResultIsUnknown() {
         Payment payment = approvedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
         PaymentResult result = paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
 
@@ -607,7 +607,7 @@ class PaymentServiceTest {
     void marksRefundManualReviewWhenLedgerDoesNotAcceptRefund() {
         Payment payment = approvedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.notAccepted());
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.notAccepted());
         when(refundRepository.markManualReview(eq(REFUND_ID), eq(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED), any()))
                 .thenAnswer(invocation -> {
                     ReflectionTestUtils.setField(savedRefunds.get(0), "status", RefundStatus.MANUAL_REVIEW);
@@ -626,7 +626,7 @@ class PaymentServiceTest {
     void returnsToApprovedAndThrowsDeclinedWhenLedgerDeclines() {
         Payment payment = approvedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.declined("원거래를 찾을 수 없습니다."));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.declined("원거래를 찾을 수 없습니다."));
 
         PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID)));
@@ -739,7 +739,7 @@ class PaymentServiceTest {
         when(paymentHistoryRepository.findApprovedAt(PAYMENT_ID))
                 .thenReturn(Optional.of(Instant.now().minus(Duration.ofDays(3)).plus(Duration.ofMinutes(1))));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
 
@@ -901,7 +901,7 @@ class PaymentServiceTest {
     @Test
     void masterCanRefundPaymentOfAnyMerchant() {
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(
                 refundCommand(OTHER_USER_ID, AuthRole.MASTER, PAYMENT_ID, 10_000L));
@@ -927,7 +927,7 @@ class PaymentServiceTest {
     @Test
     void partialRefundReturnsPaymentToApproved() {
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(
                 refundCommand(OWNER_ID, AuthRole.USER, PAYMENT_ID, 3_000L));
@@ -935,7 +935,7 @@ class PaymentServiceTest {
         assertEquals(PaymentStatus.APPROVED, result.status());
         assertEquals(3_000L, result.refunds().get(0).amount());
         assertEquals(RefundStatus.COMPLETED, result.refunds().get(0).status());
-        ArgumentCaptor<LedgerRefundCommand> captor = ArgumentCaptor.forClass(LedgerRefundCommand.class);
+        ArgumentCaptor<PaymentLedgerRefundCommand> captor = ArgumentCaptor.forClass(PaymentLedgerRefundCommand.class);
         verify(ledgerClient).refundTransaction(captor.capture());
         assertEquals(3_000L, captor.getValue().amount());
         List<PaymentHistory> histories = savedHistories(2);
@@ -948,7 +948,7 @@ class PaymentServiceTest {
     void refundsRemainingAmountAfterPartialRefund() {
         savedRefunds.add(earlierRefund(3_000L, RefundStatus.COMPLETED));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(
                 refundCommand(OWNER_ID, AuthRole.USER, PAYMENT_ID, 7_000L));
@@ -976,7 +976,7 @@ class PaymentServiceTest {
     void declinedRefundDoesNotReduceRemainingAmount() {
         savedRefunds.add(earlierRefund(3_000L, RefundStatus.DECLINED));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(
                 refundCommand(OWNER_ID, AuthRole.USER, PAYMENT_ID, 10_000L));
@@ -1269,7 +1269,7 @@ class PaymentServiceTest {
         Payment first = savedPayment(PAYMENT_ID, CREATED_AT);
         Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(first, second));
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
 
         paymentService.recoverPayments(NOW, 100);
 
@@ -1299,7 +1299,7 @@ class PaymentServiceTest {
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(first, second));
         when(ledgerClient.createTransaction(any()))
                 .thenThrow(new IllegalStateException("원장 연결 실패"))
-                .thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+                .thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
 
         paymentService.recoverPayments(NOW, 100);
 
@@ -1314,7 +1314,7 @@ class PaymentServiceTest {
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT),
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT));
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(pendings);
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
         paymentService.recoverPayments(NOW, 100);
 
@@ -1333,8 +1333,8 @@ class PaymentServiceTest {
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT));
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(pendings);
         when(ledgerClient.createTransaction(any()))
-                .thenReturn(LedgerResult.unknown(), LedgerResult.unknown(), LedgerResult.notAccepted(),
-                        LedgerResult.unknown(), LedgerResult.unknown());
+                .thenReturn(PaymentLedgerResult.unknown(), PaymentLedgerResult.unknown(), PaymentLedgerResult.notAccepted(),
+                        PaymentLedgerResult.unknown(), PaymentLedgerResult.unknown());
         Payment manualReview = savedPayment(notAcceptedId, CREATED_AT);
         ReflectionTestUtils.setField(manualReview, "status", PaymentStatus.MANUAL_REVIEW);
         ReflectionTestUtils.setField(manualReview, "reviewReason", SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED);
@@ -1352,7 +1352,7 @@ class PaymentServiceTest {
         givenClaimable();
         Payment payment = pendingWithAttempts(PAYMENT_ID, 3);
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(paymentRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(1);
 
         paymentService.recoverPayments(NOW, 100);
@@ -1366,7 +1366,7 @@ class PaymentServiceTest {
         givenClaimable();
         Payment payment = pendingWithAttempts(PAYMENT_ID, 4);
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(paymentRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(1);
 
         paymentService.recoverPayments(NOW, 100);
@@ -1385,7 +1385,7 @@ class PaymentServiceTest {
         givenClaimable();
         Payment payment = pendingWithAttempts(PAYMENT_ID, 4);
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(paymentRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(0);
 
         paymentService.recoverPayments(NOW, 100);
@@ -1401,8 +1401,8 @@ class PaymentServiceTest {
         Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(first, second));
         when(ledgerClient.createTransaction(any()))
-                .thenReturn(LedgerResult.unknown())
-                .thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+                .thenReturn(PaymentLedgerResult.unknown())
+                .thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
         when(paymentRepository.recordUnknownAttempt(eq(PAYMENT_ID), anyInt(), any(), any(), any()))
                 .thenThrow(new IllegalStateException("DB 연결 실패"));
 
@@ -1417,7 +1417,7 @@ class PaymentServiceTest {
         givenClaimable();
         Payment payment = savedPayment(PAYMENT_ID, CREATED_AT);
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
-        when(ledgerClient.createTransaction(any())).thenReturn(LedgerResult.approved(LEDGER_TRANSACTION_ID));
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
         when(paymentRepository.save(any(Payment.class)))
                 .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
@@ -1435,7 +1435,7 @@ class PaymentServiceTest {
         Payment payment = refundPendingPayment();
         when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         paymentService.recoverRefunds(NOW, 100);
 
@@ -1450,7 +1450,7 @@ class PaymentServiceTest {
         Payment payment = refundPendingPayment();
         when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.declined("원거래를 찾을 수 없습니다."));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.declined("원거래를 찾을 수 없습니다."));
 
         paymentService.recoverRefunds(NOW, 100);
 
@@ -1476,7 +1476,7 @@ class PaymentServiceTest {
         List<Refund> requested = List.of(existingRefund(), existingRefund(), existingRefund(), existingRefund());
         when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(requested);
         when(paymentRepository.findById(PAYMENT_ID)).thenAnswer(invocation -> Optional.of(refundPendingPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
         paymentService.recoverRefunds(NOW, 100);
 
@@ -1491,7 +1491,7 @@ class PaymentServiceTest {
         Refund refund = requestedWithAttempts(4);
         when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundPendingPayment()));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.unknown());
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(refundRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(1);
 
         paymentService.recoverRefunds(NOW, 100);
@@ -1529,7 +1529,7 @@ class PaymentServiceTest {
                 .thenReturn(Optional.of(refundPendingPayment()), Optional.of(refundedByOther));
         when(refundRepository.findByUserIdAndIdempotencyKey(OWNER_ID, REFUND_KEY))
                 .thenReturn(Optional.of(completedByOther));
-        when(ledgerClient.refundTransaction(any())).thenReturn(LedgerResult.approved(REFUND_TRANSACTION_ID));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
         when(paymentRepository.save(any(Payment.class)))
                 .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
 

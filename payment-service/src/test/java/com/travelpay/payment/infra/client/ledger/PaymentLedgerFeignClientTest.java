@@ -6,9 +6,9 @@ import java.util.UUID;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
-import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
-import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
-import com.travelpay.payment.application.payment.client.ledger.LedgerTransactionCommand;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.Entry;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.RegisterRequest;
@@ -33,7 +33,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class LedgerFeignClientTest {
+class PaymentLedgerFeignClientTest {
 
     private static final UUID PAYMENT_ID = UUID.fromString("88888888-8888-8888-8888-888888888888");
     private static final UUID REFUND_ID = UUID.fromString("cccccccc-cccc-cccc-cccc-cccccccccccc");
@@ -42,27 +42,27 @@ class LedgerFeignClientTest {
     private static final UUID MERCHANT_WALLET_ID = UUID.fromString("77777777-7777-7777-7777-777777777777");
     private static final UUID TRANSACTION_ID = UUID.fromString("66666666-6666-6666-6666-666666666666");
     private static final UUID REFUND_TRANSACTION_ID = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
-    private static final LedgerTransactionCommand PAYMENT = new LedgerTransactionCommand(
+    private static final PaymentLedgerTransactionCommand PAYMENT = new PaymentLedgerTransactionCommand(
             PAYMENT_ID, USER_ID, USER_WALLET_ID, MERCHANT_WALLET_ID, CurrencyCode.KRW, 10_000L);
-    private static final LedgerRefundCommand REFUND = new LedgerRefundCommand(
+    private static final PaymentLedgerRefundCommand REFUND = new PaymentLedgerRefundCommand(
             REFUND_ID, TRANSACTION_ID, USER_ID, USER_WALLET_ID, MERCHANT_WALLET_ID, CurrencyCode.KRW, 10_000L);
 
     private LedgerFeignApi feignApi;
-    private LedgerFeignClient ledgerClient;
+    private PaymentLedgerFeignClient ledgerClient;
 
     @BeforeEach
     void setUp() {
         feignApi = mock(LedgerFeignApi.class);
-        ledgerClient = new LedgerFeignClient(feignApi);
+        ledgerClient = new PaymentLedgerFeignClient(feignApi);
     }
 
     @Test
     void sendsPaymentAsUserDebitAndMerchantCredit() {
         when(feignApi.register(any())).thenReturn(posted(TRANSACTION_ID));
 
-        LedgerResult result = ledgerClient.createTransaction(PAYMENT);
+        PaymentLedgerResult result = ledgerClient.createTransaction(PAYMENT);
 
-        assertEquals(LedgerResult.approved(TRANSACTION_ID), result);
+        assertEquals(PaymentLedgerResult.approved(TRANSACTION_ID), result);
         RegisterRequest sent = captureRequest();
         assertEquals("PAYMENT", sent.referenceType());
         assertEquals(PAYMENT_ID, sent.referenceId());
@@ -76,9 +76,9 @@ class LedgerFeignClientTest {
     void sendsRefundAsMerchantDebitAndUserCreditWithOriginalTransaction() {
         when(feignApi.register(any())).thenReturn(posted(REFUND_TRANSACTION_ID));
 
-        LedgerResult result = ledgerClient.refundTransaction(REFUND);
+        PaymentLedgerResult result = ledgerClient.refundTransaction(REFUND);
 
-        assertEquals(LedgerResult.approved(REFUND_TRANSACTION_ID), result);
+        assertEquals(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID), result);
         RegisterRequest sent = captureRequest();
         assertEquals("PAYMENT_REFUND", sent.referenceType());
         assertEquals(REFUND_ID, sent.referenceId());
@@ -99,7 +99,7 @@ class LedgerFeignClientTest {
     void returnsDeclinedWithPaymentReasonInsteadOfLedgerCode(String ledgerCode, String expectedReason) {
         when(feignApi.register(any())).thenThrow(feignError(422, rejectedBody(ledgerCode)));
 
-        assertEquals(LedgerResult.declined(expectedReason), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerResult.declined(expectedReason), ledgerClient.createTransaction(PAYMENT));
     }
 
     @ParameterizedTest
@@ -112,21 +112,21 @@ class LedgerFeignClientTest {
     void returnsDeclinedWithRefundReasonInsteadOfLedgerCode(String ledgerCode, String expectedReason) {
         when(feignApi.register(any())).thenThrow(feignError(422, rejectedBody(ledgerCode)));
 
-        assertEquals(LedgerResult.declined(expectedReason), ledgerClient.refundTransaction(REFUND));
+        assertEquals(PaymentLedgerResult.declined(expectedReason), ledgerClient.refundTransaction(REFUND));
     }
 
     @Test
     void returnsUnknownWhenConnectionFails() {
         when(feignApi.register(any())).thenThrow(FeignFailures.connectionRefused());
 
-        assertEquals(LedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
     }
 
     @Test
     void returnsUnknownWhenLedgerTimesOut() {
         when(feignApi.register(any())).thenThrow(FeignFailures.readTimeout());
 
-        assertEquals(LedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
     }
 
     @ParameterizedTest
@@ -134,7 +134,7 @@ class LedgerFeignClientTest {
     void returnsUnknownWhenLedgerFailsWithServerError(int status) {
         when(feignApi.register(any())).thenThrow(feignError(status, ""));
 
-        assertEquals(LedgerResult.unknown(), ledgerClient.refundTransaction(REFUND));
+        assertEquals(PaymentLedgerResult.unknown(), ledgerClient.refundTransaction(REFUND));
     }
 
     @ParameterizedTest
@@ -146,7 +146,7 @@ class LedgerFeignClientTest {
     void returnsNotAcceptedForUnexpected422(String body) {
         when(feignApi.register(any())).thenThrow(feignError(422, body));
 
-        assertEquals(LedgerResult.notAccepted(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerResult.notAccepted(), ledgerClient.createTransaction(PAYMENT));
     }
 
     @ParameterizedTest
@@ -154,15 +154,15 @@ class LedgerFeignClientTest {
     void returnsNotAcceptedForOtherClientErrors(int status) {
         when(feignApi.register(any())).thenThrow(feignError(status, ""));
 
-        assertEquals(LedgerResult.notAccepted(), ledgerClient.createTransaction(PAYMENT));
-        assertEquals(LedgerResult.notAccepted(), ledgerClient.refundTransaction(REFUND));
+        assertEquals(PaymentLedgerResult.notAccepted(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerResult.notAccepted(), ledgerClient.refundTransaction(REFUND));
     }
 
     @Test
     void returnsUnknownWhenSuccessBodyCannotBeRead() {
         when(feignApi.register(any())).thenThrow(new DecodeException(200, "본문 해석 실패", successRequest()));
 
-        assertEquals(LedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
     }
 
     @Test
@@ -174,7 +174,7 @@ class LedgerFeignClientTest {
                 .thenReturn(null);
 
         for (int i = 0; i < 4; i++) {
-            assertEquals(LedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
+            assertEquals(PaymentLedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
         }
     }
 

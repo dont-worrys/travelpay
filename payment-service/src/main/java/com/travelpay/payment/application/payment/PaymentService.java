@@ -5,12 +5,12 @@ import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.util.PageableUtils;
-import com.travelpay.payment.application.payment.client.ledger.LedgerClient;
-import com.travelpay.payment.application.payment.client.ledger.LedgerRefundCommand;
-import com.travelpay.payment.application.payment.client.ledger.LedgerResult;
-import com.travelpay.payment.application.payment.client.ledger.LedgerTransactionCommand;
-import com.travelpay.payment.application.payment.client.wallet.Wallet;
-import com.travelpay.payment.application.payment.client.wallet.WalletClient;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerClient;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
+import com.travelpay.payment.application.payment.client.wallet.PaymentWallet;
+import com.travelpay.payment.application.payment.client.wallet.PaymentWalletClient;
 import com.travelpay.payment.application.payment.dto.MerchantPaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
@@ -54,8 +54,8 @@ public class PaymentService {
     private final PaymentRepository paymentRepository;
     private final PaymentHistoryRepository paymentHistoryRepository;
     private final MerchantRepository merchantRepository;
-    private final WalletClient walletClient;
-    private final LedgerClient ledgerClient;
+    private final PaymentWalletClient walletClient;
+    private final PaymentLedgerClient ledgerClient;
     private final RefundRepository refundRepository;
     private final TransactionOperations transactionOperations;
 
@@ -81,7 +81,7 @@ public class PaymentService {
         }
 
         // 유저의 지갑 정보, 상태 확인
-        Wallet wallet = walletClient.findWallet(command.userId())
+        PaymentWallet wallet = walletClient.findWallet(command.userId())
                 .orElseThrow(() -> new BusinessException(PaymentErrorCode.WALLET_NOT_FOUND));
 
         if (!wallet.isActive()) {
@@ -289,7 +289,7 @@ public class PaymentService {
 
     // PENDING 결제를 원장 결과로 확정. 결과를 모르면 시도 횟수를 기록하고(한도면 MANUAL_REVIEW), 받아들이지 않으면 MANUAL_REVIEW
     private Payment settlePayment(Payment payment) {
-        LedgerResult ledgerResult = ledgerClient.createTransaction(new LedgerTransactionCommand(
+        PaymentLedgerResult paymentLedgerResult = ledgerClient.createTransaction(new PaymentLedgerTransactionCommand(
                 payment.getId(),
                 payment.getUserId(),
                 payment.getUserWalletId(),
@@ -297,7 +297,7 @@ public class PaymentService {
                 payment.getCurrency(),
                 payment.getAmount()));
 
-        switch (ledgerResult.status()) {
+        switch (paymentLedgerResult.status()) {
             case UNKNOWN -> {
                 return recordPaymentUnknown(payment);
             }
@@ -310,9 +310,9 @@ public class PaymentService {
 
         try {
             return transactionOperations.execute(status -> {
-                PaymentHistory history = ledgerResult.status() == LedgerResult.Status.APPROVED
-                        ? payment.approvedHistory(ledgerResult.transactionId())
-                        : payment.declinedHistory(ledgerResult.declineReason());
+                PaymentHistory history = paymentLedgerResult.status() == PaymentLedgerResult.Status.APPROVED
+                        ? payment.approvedHistory(paymentLedgerResult.transactionId())
+                        : payment.declinedHistory(paymentLedgerResult.declineReason());
                 Payment completed = paymentRepository.save(payment);
                 paymentHistoryRepository.save(history);
                 return completed;
@@ -371,7 +371,7 @@ public class PaymentService {
     // 환불 요청(REQUESTED)을 원장 결과로 확정.
     // 환불이 MANUAL_REVIEW가 되어도 결제는 REFUND_PENDING 유지
     private RefundProgress settleRefund(Payment payment, Refund refund) {
-        LedgerResult ledgerResult = ledgerClient.refundTransaction(new LedgerRefundCommand(
+        PaymentLedgerResult paymentLedgerResult = ledgerClient.refundTransaction(new PaymentLedgerRefundCommand(
                 refund.getId(),
                 payment.getLedgerId(),
                 payment.getUserId(),
@@ -380,7 +380,7 @@ public class PaymentService {
                 refund.getCurrency(),
                 refund.getAmount()));
 
-        switch (ledgerResult.status()) {
+        switch (paymentLedgerResult.status()) {
             case UNKNOWN -> {
                 return new RefundProgress(payment, recordRefundUnknown(refund));
             }
@@ -393,7 +393,7 @@ public class PaymentService {
 
         try {
             Payment completedPayment = transactionOperations.execute(
-                    status -> completeRefund(payment, refund, ledgerResult));
+                    status -> completeRefund(payment, refund, paymentLedgerResult));
             return new RefundProgress(completedPayment, refund);
         } catch (OptimisticLockingFailureException e) {
             // 같은 환불을 다른 요청이 먼저 확정, 확정된 결제와 환불을 다시 읽어 반환
@@ -495,18 +495,18 @@ public class PaymentService {
         return new RefundProgress(savedPayment, refund);
     }
 
-    private Payment completeRefund(Payment payment, Refund refund, LedgerResult ledgerResult) {
+    private Payment completeRefund(Payment payment, Refund refund, PaymentLedgerResult paymentLedgerResult) {
         PaymentHistory history;
-        if (ledgerResult.status() == LedgerResult.Status.APPROVED) {
-            refund.complete(ledgerResult.transactionId());
+        if (paymentLedgerResult.status() == PaymentLedgerResult.Status.APPROVED) {
+            refund.complete(paymentLedgerResult.transactionId());
             long completed = refundRepository.findAllByPaymentId(payment.getId()).stream()
                     .filter(r -> r.getStatus() == RefundStatus.COMPLETED && !r.getId().equals(refund.getId()))
                     .mapToLong(Refund::getAmount)
                     .sum() + refund.getAmount();
             history = payment.refundCompletedHistory(refund.getAmount(), payment.getAmount() - completed);
         } else {
-            refund.decline(ledgerResult.declineReason());
-            history = payment.refundDeclinedHistory(ledgerResult.declineReason());
+            refund.decline(paymentLedgerResult.declineReason());
+            history = payment.refundDeclinedHistory(paymentLedgerResult.declineReason());
         }
         Payment savedPayment = paymentRepository.save(payment);
         refundRepository.save(refund);

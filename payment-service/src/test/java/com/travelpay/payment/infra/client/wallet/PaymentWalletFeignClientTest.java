@@ -8,7 +8,7 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
-import com.travelpay.payment.application.payment.client.wallet.Wallet;
+import com.travelpay.payment.application.payment.client.wallet.PaymentWallet;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
@@ -25,7 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class WalletFeignClientTest {
+class PaymentWalletFeignClientTest {
 
     private static final UUID USER_ID = UUID.fromString("550e8400-e29b-41d4-a716-446655440000");
     private static final UUID WALLET_ID = UUID.fromString("0f8e6d4c-2b1a-4f9e-8d7c-6b5a4f3e2d1c");
@@ -34,12 +34,12 @@ class WalletFeignClientTest {
             """;
 
     private WalletFeignApi walletFeignApi;
-    private WalletFeignClient walletClient;
+    private PaymentWalletFeignClient walletClient;
 
     @BeforeEach
     void setUp() {
         walletFeignApi = mock(WalletFeignApi.class);
-        walletClient = new WalletFeignClient(walletFeignApi);
+        walletClient = new PaymentWalletFeignClient(walletFeignApi);
     }
 
     @ParameterizedTest
@@ -48,7 +48,7 @@ class WalletFeignClientTest {
         when(walletFeignApi.getWallet(USER_ID))
                 .thenReturn(ApiResponse.success(new WalletFeignApi.WalletResponse(WALLET_ID, status)));
 
-        assertEquals(Optional.of(new Wallet(WALLET_ID, status)),
+        assertEquals(Optional.of(new PaymentWallet(WALLET_ID, status)),
                 walletClient.findWallet(USER_ID));
     }
 
