@@ -28,7 +28,8 @@ public class UserFeignClient implements MerchantOwnerClient {
             response = userFeignApi.getActiveUser(userId);
         } catch (FeignException exception) {
             // 경로 오류 등으로 생기는 다른 404는 회원 없음이 아니므로 USER_RECIPIENT_NOT_FOUND일 때만 없는 회원으로 본다
-            if (FeignErrors.hasErrorCode(exception, USER_NOT_FOUND)) {
+            if (exception.status() == 404
+                    && FeignErrors.hasErrorCode(exception, USER_NOT_FOUND)) {
                 return false;
             }
             log.error("회원 조회 실패 userId={} status={}", userId, exception.status());

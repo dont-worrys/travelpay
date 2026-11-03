@@ -77,9 +77,10 @@ public class LedgerFeignClient implements LedgerClient {
                         request.referenceType(), request.referenceId(), rejectedCode.get());
                 return LedgerResult.declined(declineReasons.of(rejectedCode.get()));
             }
-            log.error("원장 거래 응답 처리 불가 referenceType={} referenceId={} status={}",
-                    request.referenceType(), request.referenceId(), exception.status());
-            throw FeignErrors.toCommonException(exception);
+            log.error("원장이 거래 요청을 받아들이지 않음 referenceType={} referenceId={} status={} code={}",
+                    request.referenceType(), request.referenceId(), exception.status(),
+                    FeignErrors.errorCode(exception).orElse("-"));
+            return LedgerResult.notAccepted();
         }
 
         // 2xx를 받았으니 원장이 처리했을 수 있다. 내용이 이상해도 실패로 단정하지 않고 결과 모름으로 둔다

@@ -3,9 +3,9 @@ package com.travelpay.payment.infra.persistence.payment;
 import com.travelpay.payment.domain.payment.Refund;
 import com.travelpay.payment.domain.payment.RefundRepository;
 import com.travelpay.payment.domain.payment.RefundStatus;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
@@ -44,14 +44,29 @@ public class RefundRepositoryImpl implements RefundRepository {
     }
 
     @Override
-    public List<Refund> findStaleRequested(Instant before, int limit) {
-        return refundJpaRepository.findByStatusAndUpdatedAtBefore(
-                RefundStatus.REQUESTED, before, PageRequest.of(0, limit, Sort.by("updatedAt")));
+    public List<Refund> findRecoveryTargets(Instant now, int limit) {
+        return refundJpaRepository.findRecoveryTargets(now, limit);
     }
 
     @Override
-    public void deferRequestedRetry(UUID refundId, Instant retriedAt) {
-        refundJpaRepository.touchUpdatedAt(refundId, RefundStatus.REQUESTED, retriedAt);
+    public int claimForRecovery(UUID refundId, Instant seenUpdatedAt, Instant now) {
+        return refundJpaRepository.claimForRecovery(refundId, seenUpdatedAt, now);
+    }
+
+    @Override
+    public int recordUnknownAttempt(UUID refundId, int expectedAttempts, RefundStatus status,
+                                    SettlementReviewReason reviewReason, Instant now) {
+        return refundJpaRepository.recordUnknownAttempt(refundId, expectedAttempts, status, reviewReason, now);
+    }
+
+    @Override
+    public int markManualReview(UUID refundId, SettlementReviewReason reviewReason, Instant now) {
+        return refundJpaRepository.markManualReview(refundId, reviewReason, now);
+    }
+
+    @Override
+    public long countByStatus(RefundStatus status) {
+        return refundJpaRepository.countByStatus(status);
     }
 
     @Override

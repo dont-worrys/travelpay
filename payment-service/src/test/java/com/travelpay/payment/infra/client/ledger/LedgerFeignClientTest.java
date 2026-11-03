@@ -3,7 +3,6 @@ package com.travelpay.payment.infra.client.ledger;
 import java.util.Map;
 import java.util.UUID;
 
-import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
@@ -29,8 +28,6 @@ import org.mockito.ArgumentCaptor;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -146,18 +143,19 @@ class LedgerFeignClientTest {
             "<html>error</html>",
             ""
     })
-    void reportsUnexpected422AsBadGateway(String body) {
+    void returnsNotAcceptedForUnexpected422(String body) {
         when(feignApi.register(any())).thenThrow(feignError(422, body));
 
-        assertBadGateway();
+        assertEquals(LedgerResult.notAccepted(), ledgerClient.createTransaction(PAYMENT));
     }
 
     @ParameterizedTest
     @ValueSource(ints = {400, 404, 409})
-    void reportsOtherClientErrorsAsBadGateway(int status) {
+    void returnsNotAcceptedForOtherClientErrors(int status) {
         when(feignApi.register(any())).thenThrow(feignError(status, ""));
 
-        assertBadGateway();
+        assertEquals(LedgerResult.notAccepted(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(LedgerResult.notAccepted(), ledgerClient.refundTransaction(REFUND));
     }
 
     @Test
@@ -178,11 +176,6 @@ class LedgerFeignClientTest {
         for (int i = 0; i < 4; i++) {
             assertEquals(LedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
         }
-    }
-
-    private void assertBadGateway() {
-        var exception = assertThrows(BusinessException.class, () -> ledgerClient.createTransaction(PAYMENT));
-        assertSame(CommonErrorCode.BAD_GATEWAY, exception.getErrorCode());
     }
 
     private RegisterRequest captureRequest() {

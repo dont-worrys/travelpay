@@ -43,6 +43,11 @@ public class Payment {
 
     private String declineReason;
 
+    private int attemptCount;
+
+    @Enumerated(EnumType.STRING)
+    private SettlementReviewReason reviewReason;
+
     @CreationTimestamp
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
