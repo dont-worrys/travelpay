@@ -6,15 +6,18 @@ import com.travelpay.common.auth.web.CurrentUser;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.common.response.PageResponse;
 import com.travelpay.wallet.application.charge.ChargeService;
 import com.travelpay.wallet.application.charge.dto.ChargeAcceptedResult;
 import com.travelpay.wallet.application.charge.dto.RequestChargeCommand;
 import com.travelpay.wallet.presentation.charge.dto.ChargeAcceptedResponse;
 import com.travelpay.wallet.presentation.charge.dto.ChargeCreateRequest;
+import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.presentation.charge.dto.ChargeResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,8 +26,10 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.Instant;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -57,6 +62,21 @@ public class ChargeController {
         UUID userId = requireChargeUser(user);
         return ApiResponse.success(ChargeResponse.from(
                 callLogging(userId, chargeId, () -> chargeService.getCharge(userId, chargeId))));
+    }
+
+    /** 본인 충전 목록. 최신순 고정, 기간은 createdAt 기준 [from, to) */
+    @GetMapping
+    public ApiResponse<PageResponse<ChargeResponse>> listMyCharges(
+            @CurrentUser AuthenticatedUser user,
+            @RequestParam(required = false) ChargeStatus status,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        UUID userId = requireChargeUser(user);
+        return ApiResponse.success(PageResponse.from(
+                callLogging(userId, null, () -> chargeService.listMyCharges(userId, status, from, to, page, size)),
+                ChargeResponse::from));
     }
 
     /** 충전은 회원(USER)만 사용한다 */

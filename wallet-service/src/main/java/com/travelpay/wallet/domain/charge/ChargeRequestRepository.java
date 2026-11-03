@@ -1,5 +1,8 @@
 package com.travelpay.wallet.domain.charge;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -47,4 +50,13 @@ public interface ChargeRequestRepository {
      * updatedAt은 findRecoveryTargets가 돌려준 값을 그대로 넘긴다. 반환값은 바뀐 행 수(0 또는 1). 트랜잭션 안에서만 사용
      */
     int claimForRecovery(UUID chargeId, ChargeStatus status, Instant updatedAt);
+
+    /**
+     * 한 회원의 충전 목록. userId 조건은 항상 걸려 (user_id, created_at) 인덱스를 쓴다.
+     * status·from·to는 null이면 조건 없음. 기간은 createdAt 기준 [from, to). 정렬은 pageable을 따른다
+     */
+    Page<ChargeRequest> findByUser(UUID userId, ChargeStatus status, Instant from, Instant to, Pageable pageable);
+
+    /** 전체 충전 목록(관리자). 모든 조건이 null이면 조건 없음. 기간은 createdAt 기준 [from, to) */
+    Page<ChargeRequest> search(UUID userId, ChargeStatus status, Instant from, Instant to, Pageable pageable);
 }

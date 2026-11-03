@@ -1,6 +1,9 @@
 package com.travelpay.wallet.application.charge;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.util.PageableUtils;
+import com.travelpay.wallet.application.charge.dto.AdminChargeResult;
 import com.travelpay.wallet.application.charge.dto.ChargeAcceptedResult;
 import com.travelpay.wallet.application.charge.dto.ChargeResult;
 import com.travelpay.wallet.application.charge.dto.RequestChargeCommand;
@@ -11,13 +14,22 @@ import com.travelpay.wallet.domain.charge.AccountNumberCipher;
 import com.travelpay.wallet.domain.charge.AccountNumberCipherException;
 import com.travelpay.wallet.domain.charge.BankAccount;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
+import com.travelpay.wallet.domain.charge.ChargeRequestRepository;
+import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.domain.charge.DuplicateChargeRequestException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -33,6 +45,11 @@ public class ChargeService {
     private final WalletTransactionSteps walletSteps;
     private final UserFundingIdentityClient userFundingIdentityClient;
     private final AccountNumberCipher cipher;
+    private final ChargeRequestRepository chargeRequestRepository;
+
+    public static final int MAX_PAGE_SIZE = 100;
+    private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
+    private static final Set<String> LIST_SORT_FIELDS = Set.of("createdAt", "id");
 
     /**
      * 충전 접수. 회원 실명 조회는 트랜잭션 밖에서 하고, 실패하면 아무것도 저장하지 않는다.
@@ -73,6 +90,42 @@ public class ChargeService {
         ChargeRequest charge = steps.findById(chargeId)
                 .filter(found -> found.isOwnedBy(userId))
                 .orElseThrow(() -> new BusinessException(WalletErrorCode.CHARGE_NOT_FOUND));
+        return toResult(charge);
+    }
+
+    /**
+     * 본인 충전 목록. createdAt 내림차순, 같으면 id 내림차순. 기간은 createdAt 기준 [from, to).
+     * page는 0부터, size는 1 이상이며 최대 크기를 넘으면 최대 크기로 조회한다
+     */
+    @Transactional(readOnly = true, timeout = ChargeTransactionSteps.TX_TIMEOUT_SECONDS)
+    public Page<ChargeResult> listMyCharges(UUID userId, ChargeStatus status, Instant from, Instant to,
+                                            int page, int size) {
+        Objects.requireNonNull(userId, "userId");
+        Pageable pageable = toListPageable(from, to, page, size);
+        return chargeRequestRepository.findByUser(userId, status, from, to, pageable).map(this::toResult);
+    }
+
+    /** 전체 충전 목록(관리자). 정렬·기간·페이지 규칙은 listMyCharges와 같다 */
+    @Transactional(readOnly = true, timeout = ChargeTransactionSteps.TX_TIMEOUT_SECONDS)
+    public Page<AdminChargeResult> listCharges(UUID userId, ChargeStatus status, Instant from, Instant to,
+                                               int page, int size) {
+        Pageable pageable = toListPageable(from, to, page, size);
+        return chargeRequestRepository.search(userId, status, from, to, pageable)
+                .map(charge -> new AdminChargeResult(toResult(charge), charge.getUserId(),
+                        charge.getAttemptCount()));
+    }
+
+    private static Pageable toListPageable(Instant from, Instant to, int page, int size) {
+        if (page < 0 || size < 1 || (from != null && to != null && from.isAfter(to))) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        // 정렬은 고정이며, 생성 시각이 같은 항목은 ID로 순서를 정한다
+        return PageableUtils.toStablePageable(
+                PageRequest.of(page, size, LIST_SORT), LIST_SORT_FIELDS, "id", MAX_PAGE_SIZE);
+    }
+
+    /** 계좌번호는 마스킹 값만 담는다. 원문·실명은 결과에 넣지 않는다 */
+    private ChargeResult toResult(ChargeRequest charge) {
         String accountNumberMask = decrypting(charge.getId(),
                 () -> charge.getBankAccount().maskedAccountNumber(cipher));
         return new ChargeResult(charge.getId(), charge.getStatus(), charge.getAmount(), charge.getCurrency(),

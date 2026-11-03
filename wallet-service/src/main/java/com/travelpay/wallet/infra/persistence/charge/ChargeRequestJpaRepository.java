@@ -3,6 +3,8 @@ package com.travelpay.wallet.infra.persistence.charge;
 import com.travelpay.wallet.domain.charge.ChargeFailureCode;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -109,4 +111,49 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
     int claimForRecovery(@Param("id") UUID id,
                          @Param("status") String status,
                          @Param("updatedAt") Instant updatedAt);
+
+    /**
+     * 회원 충전 목록. userId는 OR 없이 항상 걸어 ix_charge_requests_user_created를 쓴다.
+     * 정렬은 Pageable이 붙이고, countQuery는 같은 조건에 ORDER BY 없이 센다
+     */
+    @Query(value = """
+            select c from ChargeRequest c
+             where c.userId = :userId
+               and (:status is null or c.status = :status)
+               and (cast(:from as Instant) is null or c.createdAt >= :from)
+               and (cast(:to as Instant) is null or c.createdAt < :to)
+            """,
+            countQuery = """
+            select count(c) from ChargeRequest c
+             where c.userId = :userId
+               and (:status is null or c.status = :status)
+               and (cast(:from as Instant) is null or c.createdAt >= :from)
+               and (cast(:to as Instant) is null or c.createdAt < :to)
+            """)
+    Page<ChargeRequest> findByUser(@Param("userId") UUID userId,
+                                   @Param("status") ChargeStatus status,
+                                   @Param("from") Instant from,
+                                   @Param("to") Instant to,
+                                   Pageable pageable);
+
+    /** 전체 충전 목록(관리자). 정렬은 Pageable이 붙이고, countQuery는 같은 조건에 ORDER BY 없이 센다 */
+    @Query(value = """
+            select c from ChargeRequest c
+             where (:userId is null or c.userId = :userId)
+               and (:status is null or c.status = :status)
+               and (cast(:from as Instant) is null or c.createdAt >= :from)
+               and (cast(:to as Instant) is null or c.createdAt < :to)
+            """,
+            countQuery = """
+            select count(c) from ChargeRequest c
+             where (:userId is null or c.userId = :userId)
+               and (:status is null or c.status = :status)
+               and (cast(:from as Instant) is null or c.createdAt >= :from)
+               and (cast(:to as Instant) is null or c.createdAt < :to)
+            """)
+    Page<ChargeRequest> search(@Param("userId") UUID userId,
+                               @Param("status") ChargeStatus status,
+                               @Param("from") Instant from,
+                               @Param("to") Instant to,
+                               Pageable pageable);
 }
