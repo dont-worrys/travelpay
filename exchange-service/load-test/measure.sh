@@ -87,6 +87,9 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
     -v label="$LABEL" -v vus="$VUS" '
     FNR == 1 { file++ }
     $1 < from || $1 > to || $2 == "" { next }
+    # 커넥션 풀 표본은 지표 6개가 모두 있어야 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 더해져
+    # 평균이 틀어지므로 그 행은 버린다 (버린 만큼 틈이 생겨 아래 틈 검사에 걸림)
+    file == 1 && ($3 == "" || $4 == "" || $5 == "" || $6 == "" || $7 == "") { next }
     file == 1 {
         if (n == 0) h0 = $1
         else if ($1 - h1 > hGap) hGap = $1 - h1   # 연속된 표본 사이 가장 긴 틈
@@ -136,7 +139,11 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         printf "  \"dbActiveSessions\": {\"avg\": %.2f, \"max\": %d},\n", (m ? ses / m : 0), sesMax
         printf "  \"rateSelectCalls\": %d\n", selects
         printf "}\n"
-    }' "$hikari_samples" "$session_samples" >"$summary.tmp" || { rm -f "$summary.tmp"; exit 1; }
+    }' "$hikari_samples" "$session_samples" >"$summary.tmp" || {
+        # 검사에 실패한 측정은 k6 결과도 지운다. 남겨 두면 실패한 측정의 응답 결과를 유효한 결과로 오인할 수 있음
+        rm -f "$summary.tmp" "results/${LABEL}-vus${VUS}.json"
+        exit 1
+    }
 # 검사를 모두 통과했을 때만 결과 파일을 만든다 (실패하면 빈 결과 파일도 남기지 않음)
 mv "$summary.tmp" "$summary"
 
