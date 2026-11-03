@@ -32,6 +32,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -44,8 +45,10 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -440,6 +443,108 @@ class TransferLedgerFlowTest {
 
         assertEquals(5, ledger.requests.size());
         assertEquals(TransferStatus.MANUAL_REVIEW, retry.status());
+    }
+
+    /** TC-21-U1: 시도 1~4회차는 PROCESSING·사유 없음을 유지하고, 정확히 5회차에 MANUAL_REVIEW로 바뀝니다. */
+    @Test
+    void staysProcessingUntilFourthUnknownResultAndMovesToManualReviewOnFifth() {
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.resultUnknown("원장 거래 등록 실패 status=504 code=-", null);
+        };
+        transferService.request(SENDER_ID, KEY, REQUEST);
+
+        for (int attempt = 1; attempt <= 4; attempt++) {
+            Transfer transfer = onlyTransfer();
+            assertEquals(attempt, transfer.getAttemptCount());
+            assertEquals(TransferStatus.PROCESSING, transfer.getStatus());
+            assertNull(transfer.getReviewReason());
+            transferService.recoverDue(farFuture(), 10);
+        }
+
+        assertEquals(5, onlyTransfer().getAttemptCount());
+        assertEquals(TransferStatus.MANUAL_REVIEW, onlyTransfer().getStatus());
+        assertEquals(TransferReviewReason.RETRY_EXHAUSTED, onlyTransfer().getReviewReason());
+        assertEquals(5, ledger.requests.size());
+        // 모든 시도가 같은 reference·내용입니다.
+        assertEquals(1, ledger.requests.stream().distinct().count());
+    }
+
+    /**
+     * TC-21-U2: 결과 모름의 종류(일반 예외·RESULT_UNKNOWN·응답 없음·사유 없는 거절·원장 반영 후 기록 실패)가 섞여도 모두 한도에 셉니다.
+     * 마지막 시도는 원장이 실제로 반영(POSTED)했지만 송금 쪽 기록이 실패한 경우로, 잔액은 이미 이동했는데 MANUAL_REVIEW가 됩니다.
+     */
+    @Test
+    void countsEveryKindOfUnknownResultTowardRetryLimit() {
+        ledger.onRegister = request -> {
+            throw new IllegalStateException("read timeout");
+        };
+        transferService.request(SENDER_ID, KEY, REQUEST);
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.resultUnknown("원장 거래 등록 실패 status=503 code=-", null);
+        };
+        transferService.recoverDue(farFuture(), 10);
+        ledger.onRegister = request -> null;
+        transferService.recoverDue(farFuture(), 10);
+        ledger.onRegister = request -> LedgerTransactionResponse.rejected(UUID.randomUUID(), null);
+        transferService.recoverDue(farFuture(), 10);
+        assertEquals(4, onlyTransfer().getAttemptCount());
+        assertEquals(TransferStatus.PROCESSING, onlyTransfer().getStatus());
+
+        ledger.onRegister = ledger::apply;
+        doThrow(new DataAccessResourceFailureException("db down"))
+                .when(transferRepository).finishProcessing(any(UUID.class), any(TransferStatus.class), any(), any());
+        transferService.recoverDue(farFuture(), 10);
+
+        Transfer transfer = onlyTransfer();
+        assertEquals(5, transfer.getAttemptCount());
+        assertEquals(TransferStatus.MANUAL_REVIEW, transfer.getStatus());
+        assertEquals(TransferReviewReason.RETRY_EXHAUSTED, transfer.getReviewReason());
+        assertNull(transfer.getFailureReason());
+        assertEquals(7_000L, ledger.balance(SOURCE_WALLET_ID));
+        assertEquals(3_000L, ledger.balance(TARGET_WALLET_ID));
+    }
+
+    /** TC-21-U3: 한도에 이르는 시도 중 다른 곳에서 먼저 확정되면(조건부 UPDATE 0행) MANUAL_REVIEW로 덮어쓰지 않습니다. */
+    @Test
+    void doesNotOverwriteTransferSettledElsewhereWhenReachingRetryLimit() {
+        Transfer transfer = savedProcessingTransfer(KEY);
+        ReflectionTestUtils.setField(transfer, "attemptCount", 4);
+        ledger.onRegister = request -> {
+            ReflectionTestUtils.setField(transfer, "status", TransferStatus.COMPLETED);
+            throw TransferLedgerException.resultUnknown("원장 거래 등록 실패 status=-1 code=-", null);
+        };
+
+        transferService.recoverDue(farFuture(), 10);
+
+        assertEquals(TransferStatus.COMPLETED, transfer.getStatus());
+        assertEquals(4, transfer.getAttemptCount());
+        assertNull(transfer.getReviewReason());
+    }
+
+    /**
+     * TC-21-U4: 결과 모름 기록(시도 횟수 UPDATE)이 DB 오류로 실패하면 시도 횟수가 늘지 않고 PROCESSING(202)으로 응답하며,
+     * 복구가 대기 시간 뒤 다시 시도해 그때부터 횟수를 셉니다.
+     */
+    @Test
+    void keepsAttemptCountWhenUnknownResultCannotBeRecorded() {
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.resultUnknown("원장 거래 등록 실패 status=-1 code=-", null);
+        };
+        doThrow(new DataAccessResourceFailureException("db down")).when(transferRepository)
+                .recordUnknownAttempt(any(UUID.class), anyInt(), any(TransferStatus.class), any(), any(Instant.class));
+
+        TransferResponse response = transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.PROCESSING, response.status());
+        assertEquals(0, onlyTransfer().getAttemptCount());
+
+        reset(transferRepository);
+        givenInMemoryRepository();
+        transferService.recoverDue(farFuture(), 10);
+
+        assertEquals(1, onlyTransfer().getAttemptCount());
+        assertEquals(TransferStatus.PROCESSING, onlyTransfer().getStatus());
+        assertEquals(2, ledger.requests.size());
     }
 
     /** 다른 인스턴스가 먼저 선점한 송금(선점 UPDATE 0행)은 원장에 보내지 않습니다. */
