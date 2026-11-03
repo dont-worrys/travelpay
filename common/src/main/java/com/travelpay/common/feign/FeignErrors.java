@@ -62,13 +62,16 @@ public final class FeignErrors {
 
     /**
      * 서비스가 따로 처리하지 않은 실패를 공통 오류로 바꾸고 원래 예외는 원인으로 남깁니다.
+     * 429와 COMMON_TOO_MANY_REQUESTS가 함께 확인되면 호출 제한 오류인 429를 유지합니다.
      * 시간 초과와 상대의 504는 504, 응답을 받지 못한 실패와 상대의 503은 503, 나머지는 502입니다.
      */
     public static BusinessException toCommonException(FeignException exception) {
         Objects.requireNonNull(exception, "exception");
         int status = exception.status();
         CommonErrorCode errorCode;
-        if (status == 504 || findCause(exception, SocketTimeoutException.class, cause -> true).isPresent()) {
+        if (status == 429 && hasErrorCode(exception, CommonErrorCode.TOO_MANY_REQUESTS.getCode())) {
+            errorCode = CommonErrorCode.TOO_MANY_REQUESTS;
+        } else if (status == 504 || findCause(exception, SocketTimeoutException.class, cause -> true).isPresent()) {
             errorCode = CommonErrorCode.GATEWAY_TIMEOUT;
         } else if (status == 503 || (status < 0 && exception instanceof RetryableException)) {
             // 응답을 받지 못한 입출력 실패(연결 거부 등)는 Feign이 상태 -1인 RetryableException으로 알려 줍니다.

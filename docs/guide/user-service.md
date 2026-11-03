@@ -186,7 +186,9 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 
 로컬·배포 모두 같은 기본값을 사용합니다. 횟수는 1 이상, 기간은 1초 이상이며 Redis에서 안전하게 계산할 수 있는 범위여야 합니다. 잘못된 설정은 앱 시작 시 거절합니다. 환경변수 변경은 앱 재시작·배포 후 적용됩니다.
 
-호출 서비스는 `429 + COMMON_TOO_MANY_REQUESTS`를 일반 호출 장애(502)나 수취인 없음(404)으로 바꾸지 않도록 처리해야 합니다. 회원 없음도 `404 + USER_RECIPIENT_NOT_FOUND`가 함께 확인될 때만 판단합니다. Payment 등 호출 서비스의 반영은 해당 담당자와 별도로 맞춥니다.
+호출 서비스가 실패를 공통 `FeignErrors.toCommonException()`에 넘기면 `429 + COMMON_TOO_MANY_REQUESTS`를 429로 유지합니다. 따라서 Payment 등 호출부마다 같은 429 분기를 추가할 필요가 없습니다. 공통 변경을 포함해 다시 빌드·배포하면 적용됩니다.
+
+회원 없음은 호출부에서 `404 + USER_RECIPIENT_NOT_FOUND`가 함께 확인될 때만 판단합니다. 이 부분은 User 오류의 의미를 아는 호출 서비스가 담당하며, Payment 등의 판별 보완은 해당 담당자와 별도로 맞춥니다.
 
 ## 세션·보안 정책
 
