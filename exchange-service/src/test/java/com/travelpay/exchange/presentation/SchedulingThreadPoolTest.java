@@ -78,10 +78,12 @@ class SchedulingThreadPoolTest {
     private ApplicationContextRunner runner(int poolSize) {
         when(policy.trigger()).thenReturn(new PeriodicTrigger(Duration.ofMillis(50)));
         doAnswer(invocation -> collections.incrementAndGet()).when(collector).collectIfNeeded();
-        // 원장이 응답하지 않아 복구 한 번이 오래 걸리는 상황
+        // 원장이 응답하지 않아 복구 한 번이 오래 걸리는 상황. 검증이 끝날 때까지 풀리지 않게 시간 제한 없이 기다린다.
+        // (제한이 있으면 테스트 스레드가 늦게 깨어났을 때 복구가 먼저 풀려, 스레드 하나로도 수집이 돌아 거짓 통과할 수 있음)
+        // 테스트의 finally가 항상 풀어 준다
         doAnswer(invocation -> {
             recoveryStarted.countDown();
-            releaseRecovery.await(WAIT.toMillis(), TimeUnit.MILLISECONDS);
+            releaseRecovery.await();
             return new ExchangeOrderRecoveryService.RecoveryResult(1, 0, 1, 0);
         }).when(recoveryService).recover(anyInt());
 
