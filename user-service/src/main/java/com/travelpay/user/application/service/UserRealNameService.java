@@ -22,23 +22,50 @@ public class UserRealNameService {
 
     private final UserRepository userRepository;
     private final TransactionTemplate readTransactions;
+    private final RecipientLookupLimiter lookupLimiter;
 
-    public UserRealNameService(UserRepository userRepository, PlatformTransactionManager transactionManager) {
+    public UserRealNameService(UserRepository userRepository, PlatformTransactionManager transactionManager,
+            RecipientLookupLimiter lookupLimiter) {
         this.userRepository = userRepository;
+        this.lookupLimiter = lookupLimiter;
         this.readTransactions = new TransactionTemplate(transactionManager);
         this.readTransactions.setReadOnly(true);
     }
 
     /** 명세 I02 송금 수취인 확인: 다른 회원의 상태가 드러나지 않도록 없는 회원과 ACTIVE가 아닌 회원을 같은 404로 처리합니다. */
-    public UserRealNameResult getRecipient(UUID userId) {
-        return readInTransaction(status -> userRepository.findById(userId)
+    public UserRealNameResult getRecipient(UUID requesterId, UUID recipientId) {
+        if (requesterId == null) {
+            throw new BusinessException(CommonErrorCode.UNAUTHORIZED);
+        }
+        if (recipientId == null) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        // Redis 응답을 기다리는 동안 DB 연결을 점유하지 않도록 읽기 트랜잭션 전에 확인합니다.
+        try {
+            if (!lookupLimiter.tryAcquire(requesterId)) {
+                throw new BusinessException(CommonErrorCode.TOO_MANY_REQUESTS);
+            }
+        }
+        catch (DataAccessException exception) {
+            throw new BusinessException(CommonErrorCode.SERVICE_UNAVAILABLE, exception);
+        }
+        return readInTransaction(status -> userRepository.findById(recipientId)
                 .filter(user -> user.getStatus() == UserStatus.ACTIVE)
                 .map(UserRealNameResult::from)
                 .orElseThrow(() -> new BusinessException(UserErrorCode.RECIPIENT_NOT_FOUND)));
     }
 
-    /** 명세 I03 충전 예금주 확인: 충전 요청자 본인을 조회하므로 정지·종료 상태를 숨기지 않고 그 상태의 403으로 알립니다. */
-    public UserRealNameResult getFundingIdentity(UUID userId) {
+    /** 명세 I03: 본인만 조회하며, 정지·종료 상태는 해당 회원에게 403으로 알립니다. */
+    public UserRealNameResult getFundingIdentity(UUID requesterId, UUID userId) {
+        if (requesterId == null) {
+            throw new BusinessException(CommonErrorCode.UNAUTHORIZED);
+        }
+        if (userId == null) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        if (!requesterId.equals(userId)) {
+            throw new BusinessException(CommonErrorCode.FORBIDDEN);
+        }
         return readInTransaction(status -> {
             var user = userRepository.findById(userId)
                     .orElseThrow(() -> new BusinessException(UserErrorCode.NOT_FOUND));

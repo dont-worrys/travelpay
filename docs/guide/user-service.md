@@ -114,7 +114,14 @@ curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -X POST -o /dev/null -w '%{http_co
 
 ### I02·I03 · 회원 이름 조회
 
-세션 쿠키와 CSRF 헤더 없이 호출하며, 응답에서 세션을 만들지 않습니다.
+세션 쿠키와 CSRF 헤더 없이 호출하며, 응답에서 세션을 만들지 않습니다. 대신 아래 두 회원 헤더가 모두 필요합니다.
+
+| 헤더 | 값 |
+|---|---|
+| `User-Id` | Gateway가 검증한 요청자의 회원 UUID. 경로에 있는 조회 대상 ID와 구분합니다. |
+| `User-Role` | 요청자의 역할인 `USER` 또는 `MASTER` |
+
+헤더가 없거나 일부만 있거나, 값이 잘못됐거나 중복되면 `401 COMMON_UNAUTHORIZED`입니다. User 자신의 보호 API는 기존 세션 Provider를 사용하고, 이 두 내부 조회 API의 컨트롤러만 회원 헤더를 직접 검사합니다. `header-context.enabled`를 다시 켜지 않습니다.
 
 | API | 명세 | 용도 |
 |---|---|---|
@@ -136,23 +143,50 @@ curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -X POST -o /dev/null -w '%{http_co
 
 | 상황 | I02 `real-name` | I03 `funding-identity` |
 |---|---|---|
+| 회원 헤더 누락·잘못된 형식·중복 | 401 `COMMON_UNAUTHORIZED` | 401 `COMMON_UNAUTHORIZED` |
+| 요청자 ID와 조회 대상 ID가 다름 | 다른 수취인 조회 가능 | DB 조회 전 403 `COMMON_FORBIDDEN` |
 | ACTIVE 회원 | 200 | 200 |
 | 회원 없음 | 404 `USER_RECIPIENT_NOT_FOUND` | 404 `USER_NOT_FOUND` |
 | 정지·종료 회원 | 404 `USER_RECIPIENT_NOT_FOUND` | 403 `USER_ACCOUNT_SUSPENDED`, `USER_ACCOUNT_CLOSED` |
 | `userId`가 UUID 형식이 아님 | 400 `COMMON_INVALID_REQUEST` | 400 `COMMON_INVALID_REQUEST` |
+| 요청자의 조회 한도 소진 | 429 `COMMON_TOO_MANY_REQUESTS` | I02 한도를 적용하지 않음 |
+| 조회 횟수 저장소(Redis) 장애 | 503 `COMMON_SERVICE_UNAVAILABLE` | I02 횟수 저장소를 사용하지 않음 |
 | DB 장애 | 503 `COMMON_SERVICE_UNAVAILABLE` | 503 `COMMON_SERVICE_UNAVAILABLE` |
 
-I02는 다른 회원을 조회하므로 없는 회원과 정지·종료 회원을 같은 404로 응답해 상태를 알려 주지 않습니다. I03은 충전 요청자 본인을 조회하므로 상태를 그대로 알려 줍니다.
+대상 회원의 상태에 따른 200·404·403은 정상 회원 헤더를 받았고, I02는 호출 한도를 통과했으며, I03은 요청자와 대상이 같은 경우의 결과입니다.
+
+I02는 다른 회원을 조회하므로 없는 회원과 정지·종료 회원을 같은 404로 응답해 상태를 알려 주지 않습니다. I03은 요청자 본인만 조회하며 `MASTER`도 예외로 다른 회원을 조회할 수 없습니다. 본인 확인을 통과한 뒤에는 정지·종료 상태를 해당 회원에게 403으로 알려 줍니다.
 
 접근 보호는 팀 결정(2026-10-31)에 따라 내부망 격리만 사용하며, 서비스 인증 헤더는 없습니다. user-service는 위 두 경로의 GET만 세션 없이 허용하고, 그 밖의 `/internal/**` 요청은 다른 API와 같은 로그인·CSRF 규칙을 따릅니다. 외부에서 닿지 않게 막는 일은 Gateway 라우트와 배포 망 구성이 맡습니다. 로컬 실행에서는 `8081` 포트로 바로 호출할 수 있습니다.
 
 ```bash
-# USER_ID에는 회원가입 응답의 data.userId를 넣습니다.
-curl -s $BASE/internal/v1/users/$USER_ID/real-name
-curl -s $BASE/internal/v1/users/$USER_ID/funding-identity
+# REQUESTER_ID는 요청자의 UUID, RECIPIENT_ID는 조회할 수취인의 UUID입니다.
+curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
+  "$BASE/internal/v1/users/$RECIPIENT_ID/real-name"
+
+# I03은 요청자 UUID와 경로의 UUID가 같아야 합니다.
+curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
+  "$BASE/internal/v1/users/$REQUESTER_ID/funding-identity"
 ```
 
-아직 없는 것: I03의 요청자 본인 확인과 I02의 요청자별 호출 횟수 제한입니다. 호출 서비스가 요청자를 전달하는 헤더 계약(#1 Feign 공통 기능)과 Gateway의 회원 헤더 재구성(#13)이 갖춰진 뒤 추가합니다.
+#### I02 요청자별 호출 제한
+
+기본 한도는 **요청자 한 명당 최근 60초 동안 허용된 조회 60회**입니다. 조회 대상이 달라져도 같은 요청자의 한도를 사용합니다.
+
+- 세션 Redis의 별도 키에 조회 허용 시각을 기록합니다. 회원 DB 행이나 조회 응답을 저장·삭제하는 기능이 아닙니다.
+- 집계 기간이 지난 기록은 빼고 최근 기록만 셉니다. 허용한 호출은 대상 조회가 200·404 등 어떤 결과로 끝나든 한 번 집계합니다.
+- 한도를 소진한 요청은 DB 조회 전에 429로 종료합니다. 거절된 호출을 기록에 추가하거나 기록의 만료 시간을 연장하지 않습니다.
+- Redis를 사용할 수 없으면 제한 없이 진행하지 않고 DB 조회 전에 503으로 종료합니다. Redis 확인은 이 서비스가 시작하는 읽기 트랜잭션 밖에서 수행합니다.
+- I03 본인 조회에는 I02 호출 한도를 적용하지 않습니다.
+
+| 설정 | 환경변수 | 기본값 |
+|---|---|---|
+| `travelpay.user.recipient-lookup.limit` | `USER_RECIPIENT_LOOKUP_LIMIT` | `60` |
+| `travelpay.user.recipient-lookup.period` | `USER_RECIPIENT_LOOKUP_PERIOD` | `60s` |
+
+로컬·배포 모두 같은 기본값을 사용합니다. 횟수는 1 이상, 기간은 1초 이상이며 Redis에서 안전하게 계산할 수 있는 범위여야 합니다. 잘못된 설정은 앱 시작 시 거절합니다. 환경변수 변경은 앱 재시작·배포 후 적용됩니다.
+
+호출 서비스는 `429 + COMMON_TOO_MANY_REQUESTS`를 일반 호출 장애(502)나 수취인 없음(404)으로 바꾸지 않도록 처리해야 합니다. 회원 없음도 `404 + USER_RECIPIENT_NOT_FOUND`가 함께 확인될 때만 판단합니다. Payment 등 호출 서비스의 반영은 해당 담당자와 별도로 맞춥니다.
 
 ## 세션·보안 정책
 
@@ -196,12 +230,12 @@ curl -s $BASE/internal/v1/users/$USER_ID/funding-identity
 | 401 | `COMMON_UNAUTHORIZED` | 세션 없음·만료(유휴 60분·절대 24시간), 회원 정보 없음 |
 | 401 | `USER_INVALID_CREDENTIALS` | 이메일 없음 또는 비밀번호 불일치 |
 | 403 | `COMMON_CSRF_INVALID` | CSRF 토큰 없음·불일치 |
-| 403 | `COMMON_FORBIDDEN` | 권한 부족(관리자 전용 경로 등) |
+| 403 | `COMMON_FORBIDDEN` | 권한 부족, I03에서 요청자와 조회 대상 불일치 |
 | 403 | `USER_ACCOUNT_SUSPENDED`, `USER_ACCOUNT_CLOSED` | 정지·종료 회원. 올바른 비밀번호로 로그인하거나 기존 세션으로 요청할 때, 충전 예금주 조회(I03) |
 | 404 | `USER_RECIPIENT_NOT_FOUND`, `USER_NOT_FOUND` | 내부 이름 조회 대상 없음(I02·I03) |
 | 409 | `USER_EMAIL_ALREADY_EXISTS`, `USER_PHONE_ALREADY_EXISTS` | 이미 가입한 이메일·휴대폰 번호 |
 | 409 | `COMMON_CONFLICT` | 같은 세션의 다른 요청이 로그인·로그아웃으로 세션을 바꾼 경우 |
-| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인 시도 제한 |
+| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인 시도 제한 또는 I02 요청자별 조회 한도 초과 |
 | 503 | `COMMON_SERVICE_UNAVAILABLE` | DB·Redis 장애, 시행 중인 약관 없음 |
 
 503은 장애를 뜻하므로 기존 세션 쿠키를 지우지 않습니다. 잠시 후 같은 쿠키로 다시 시도할 수 있습니다.
@@ -232,5 +266,5 @@ curl -s $BASE/internal/v1/users/$USER_ID/funding-identity
 ## Gateway 연결과 배포 시 신뢰 경계
 
 - Gateway는 연결 상대와 신뢰 프록시 설정으로 Client-Ip를 작성합니다. User의 Tomcat은 신뢰하는 내부 연결에서 온 Client-Ip를 `request.getRemoteAddr()`에 반영하고, 로그인 제한은 이 값을 사용합니다. 실제 배포에서는 ALB 서브넷 설정과 User 앞단의 신뢰 프록시 범위를 확인해야 합니다.
-- Gateway는 외부 User-Id·User-Role을 지운 뒤 I01의 검증 결과로 다시 설정합니다. User는 회원 헤더를 사용하지 않고 자기 세션을 확인합니다(`travelpay.auth.header-context.enabled: false`).
-- `/internal/**`는 외부 Gateway 라우트에 없습니다. 배포에서는 User 포트를 외부에 열지 않고 허용된 내부 호출자만 접근시켜야 합니다. 내부 이름 조회 API는 세션 없이 열려 있어, 외부에서 닿으면 회원 ID만으로 성명을 조회할 수 있습니다.
+- Gateway는 외부 User-Id·User-Role을 지운 뒤 I01의 검증 결과로 다시 설정합니다. User 자신의 보호 API는 자기 세션을 확인하고(`travelpay.auth.header-context.enabled: false`), 내부 I02·I03은 컨트롤러에서 전달된 회원 헤더를 직접 검사합니다.
+- `/internal/**`는 외부 Gateway 라우트에 없습니다. 배포에서는 User 포트를 외부에 열지 않고 허용된 내부 호출자만 접근시켜야 합니다. 회원 헤더 형식·본인 확인·횟수 제한은 호출 서비스 인증을 대신하지 않습니다. 외부에서 직접 접근할 수 있으면 헤더를 위조할 수 있으므로 내부망 격리가 필요합니다.
