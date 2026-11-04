@@ -1,6 +1,8 @@
 package com.travelpay.user.common.security.access;
 
 import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.user.common.error.UserErrorCode;
+import com.travelpay.user.common.security.session.SessionPasswordChangeHandler;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.serializer.SerializationException;
@@ -109,5 +111,74 @@ class RedisSessionErrorResponseFilterTest {
                 new StackTraceElement(RedisSessionRepository.class.getName(), "save", "RedisSessionRepository.java", 81)
         });
         return failure;
+    }
+
+    @Test
+    void aLateRedisFailureAfterTheAccountUpdateUsesThePartialSuccessCode() throws Exception {
+        var request = new MockHttpServletRequest();
+        request.setAttribute(SessionPasswordChangeHandler.ACCOUNT_UPDATED_ATTRIBUTE, Boolean.TRUE);
+        var response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, (source, target) -> {
+            throw new RedisConnectionFailureException("late session save failure");
+        });
+
+        assertEquals(503, response.getStatus());
+        assertEquals(UserErrorCode.ACCOUNT_UPDATED_SESSION_UNAVAILABLE.getCode(),
+                mapper.readTree(response.getContentAsString(UTF_8)).get("error").get("code").asString());
+        assertNull(response.getHeader("Set-Cookie"));
+    }
+
+    @Test
+    void aLateSerializationFailureAlsoReportsTheCompletedAccountUpdate() throws Exception {
+        var request = new MockHttpServletRequest();
+        request.setAttribute(SessionPasswordChangeHandler.ACCOUNT_UPDATED_ATTRIBUTE, Boolean.TRUE);
+        var response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, (source, target) -> { throw new SerializationException("cannot save"); });
+
+        assertEquals(503, response.getStatus());
+        assertEquals("USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE", mapper.readTree(response.getContentAsString(UTF_8))
+                .get("error").get("code").asString());
+    }
+
+    @Test
+    void aSessionLostAfterTheAccountUpdateIsNotReportedAsAnOrdinaryConflict() throws Exception {
+        var request = new MockHttpServletRequest();
+        request.setAttribute(SessionPasswordChangeHandler.ACCOUNT_UPDATED_ATTRIBUTE, Boolean.TRUE);
+        var response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, (source, target) -> { throw invalidatedSession(); });
+
+        assertEquals(503, response.getStatus());
+        assertEquals("USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE", mapper.readTree(response.getContentAsString(UTF_8))
+                .get("error").get("code").asString());
+    }
+
+    @Test
+    void aClientHeaderCannotClaimThatTheDatabaseUpdateWasCommitted() throws Exception {
+        var request = new MockHttpServletRequest();
+        request.addHeader(SessionPasswordChangeHandler.ACCOUNT_UPDATED_ATTRIBUTE, "true");
+        var response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, (source, target) -> {
+            throw new RedisConnectionFailureException("session unavailable before update");
+        });
+
+        assertEquals(503, response.getStatus());
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", mapper.readTree(response.getContentAsString(UTF_8))
+                .get("error").get("code").asString());
+    }
+
+    @Test
+    void aCommittedResponseCannotBeReplacedEvenAfterTheAccountUpdate() throws Exception {
+        var request = new MockHttpServletRequest();
+        request.setAttribute(SessionPasswordChangeHandler.ACCOUNT_UPDATED_ATTRIBUTE, Boolean.TRUE);
+        var response = new MockHttpServletResponse();
+        response.flushBuffer();
+        var failure = new RedisConnectionFailureException("too late to replace response");
+
+        assertSame(failure, assertThrows(RedisConnectionFailureException.class,
+                () -> filter.doFilter(request, response, (source, target) -> { throw failure; })));
     }
 }

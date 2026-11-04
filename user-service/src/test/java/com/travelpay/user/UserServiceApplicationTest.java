@@ -7,7 +7,9 @@ import java.util.Map;
 import java.util.UUID;
 
 import com.travelpay.user.application.service.LoginAttemptLimiter;
+import com.travelpay.user.application.service.PasswordChangeService;
 import com.travelpay.user.common.config.LoginAttemptProperties;
+import com.travelpay.user.common.config.PasswordChangeProperties;
 import com.travelpay.user.infrastructure.redis.RedisLoginAttemptLimiter;
 import jakarta.persistence.EntityManagerFactory;
 import org.flywaydb.core.Flyway;
@@ -92,5 +94,11 @@ class UserServiceApplicationTest {
 
         assertEquals(List.of("1", "2"), applied);
         assertEquals("validate", context.getBean(EntityManagerFactory.class).getProperties().get("hibernate.hbm2ddl.auto"));
+    }
+
+    @Test
+    void wiresPasswordChangeWithTheConfiguredDatabaseTransactionTimeout() {
+        assertInstanceOf(PasswordChangeService.class, context.getBean(PasswordChangeService.class));
+        assertEquals(Duration.ofSeconds(5), context.getBean(PasswordChangeProperties.class).transactionTimeout());
     }
 }

@@ -1,7 +1,9 @@
 package com.travelpay.user.application.service;
 
 /**
- * 로그인 실패 횟수를 이메일+IP 단위와 이메일 단위로 세고, 한도에 닿은 단위를 일정 시간 막습니다.
+ * 로그인 실패와 비밀번호 변경 시 현재 비밀번호 확인 실패를 함께 셉니다.
+ * 같은 이메일+IP 조합 또는 같은 이메일의 실패 횟수가 한도에 도달하면,
+ * 해당 범위의 로그인과 현재 비밀번호 확인을 일정 시간 차단합니다.
  * 횟수 저장소에 접근할 수 없으면 DataAccessException을 던집니다.
  */
 public interface LoginAttemptLimiter {

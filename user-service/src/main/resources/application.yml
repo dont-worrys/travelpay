@@ -39,6 +39,9 @@ travelpay:
     session:
       # 로그인 시각부터 24시간이 지나면 사용 중이어도 다시 로그인해야 합니다.
       absolute-timeout: 24h
+    password-change:
+      # 해시 연산을 제외한 각 DB 작업·잠금 대기의 트랜잭션 제한 시간입니다.
+      transaction-timeout: ${USER_PASSWORD_CHANGE_TRANSACTION_TIMEOUT:5s}
     login-attempt:
       # 같은 이메일+IP로 window 안에 pair-limit번 실패하면 block 동안 로그인을 막습니다.
       pair-limit: 5
