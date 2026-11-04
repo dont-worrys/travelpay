@@ -38,6 +38,9 @@ public class ExchangeOrderController {
      * - COMPLETED: 200
      * - PROCESSING·MANUAL_REVIEW: 202 (아직 확정 아님, 조회 API로 결과 확인)
      * - FAILED: 422 + 실패 사유별 EXCHANGE_LEDGER_REJECTED_* 오류 (송금과 같은 방식)
+     * 지갑을 확인하지 못하면 주문을 만들지 않고 503입니다.
+     * - 원장 장애(지갑이 잔액을 원장에서 읽지 못함): EXCHANGE_LEDGER_UNAVAILABLE
+     * - 그 밖의 지갑 서비스 실패: EXCHANGE_WALLET_SERVICE_UNAVAILABLE
      * 헤더가 없으면 형식 오류와 같은 EXCHANGE_INVALID_IDEMPOTENCY_KEY(400)입니다.
      */
     @PostMapping
