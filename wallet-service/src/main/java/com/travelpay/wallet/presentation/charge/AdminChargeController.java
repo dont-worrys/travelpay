@@ -20,7 +20,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.time.Instant;
 import java.util.UUID;
 
-/** 관리자(MASTER) 충전 조회. 최신순 고정, 기간은 createdAt 기준 [from, to) */
+/** 관리자(MASTER) 충전 조회. 최신순 고정, 기간은 createdAt 기준 [from, to). 마이크로초보다 세밀한 시각은 다음 마이크로초로 올려 조회 */
 @RestController
 @RequestMapping("/api/v1/admin/charges")
 @RequiredArgsConstructor

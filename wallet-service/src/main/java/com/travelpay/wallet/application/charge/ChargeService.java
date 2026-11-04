@@ -26,7 +26,9 @@ import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -95,22 +97,24 @@ public class ChargeService {
 
     /**
      * 본인 충전 목록. createdAt 내림차순, 같으면 id 내림차순. 기간은 createdAt 기준 [from, to).
-     * page는 0부터, size는 1 이상이며 최대 크기를 넘으면 최대 크기로 조회한다
+     * page는 0부터, size는 1 이상이며 최대 크기를 넘으면 최대 크기로 조회한다. offset이 int 범위를 넘으면 400.
+     * 마이크로초보다 세밀한 from·to는 다음 마이크로초로 올려 조회한다
      */
     @Transactional(readOnly = true, timeout = ChargeTransactionSteps.TX_TIMEOUT_SECONDS)
     public Page<ChargeResult> listMyCharges(UUID userId, ChargeStatus status, Instant from, Instant to,
                                             int page, int size) {
         Objects.requireNonNull(userId, "userId");
         Pageable pageable = toListPageable(from, to, page, size);
-        return chargeRequestRepository.findByUser(userId, status, from, to, pageable).map(this::toResult);
+        return chargeRequestRepository.findByUser(userId, status, ceilToMicros(from), ceilToMicros(to), pageable)
+                .map(this::toResult);
     }
 
-    /** 전체 충전 목록(관리자). 정렬·기간·페이지 규칙은 listMyCharges와 같다 */
+    /** 전체 충전 목록(관리자). 정렬·기간·페이지·offset·마이크로초 올림 규칙은 listMyCharges와 같다 */
     @Transactional(readOnly = true, timeout = ChargeTransactionSteps.TX_TIMEOUT_SECONDS)
     public Page<AdminChargeResult> listCharges(UUID userId, ChargeStatus status, Instant from, Instant to,
                                                int page, int size) {
         Pageable pageable = toListPageable(from, to, page, size);
-        return chargeRequestRepository.search(userId, status, from, to, pageable)
+        return chargeRequestRepository.search(userId, status, ceilToMicros(from), ceilToMicros(to), pageable)
                 .map(charge -> new AdminChargeResult(toResult(charge), charge.getUserId(),
                         charge.getAttemptCount()));
     }
@@ -120,8 +124,32 @@ public class ChargeService {
             throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
         }
         // 정렬은 고정이며, 생성 시각이 같은 항목은 ID로 순서를 정한다
-        return PageableUtils.toStablePageable(
+        Pageable pageable = PageableUtils.toStablePageable(
                 PageRequest.of(page, size, LIST_SORT), LIST_SORT_FIELDS, "id", MAX_PAGE_SIZE);
+        // 보정된 size 기준 offset이 int를 넘으면 JPA firstResult(int)에서 넘친다
+        if (pageable.getOffset() > Integer.MAX_VALUE) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        return pageable;
+    }
+
+    /**
+     * DB(timestamptz)는 마이크로초 단위라, 저장 시각 t에 대해 t >= x ⇔ t >= ceil(x) 이고 t < x ⇔ t < ceil(x) 이다.
+     * 올려서 비교해도 [from, to) 계약은 그대로다. 올림이 범위를 넘으면 400
+     */
+    private static Instant ceilToMicros(Instant instant) {
+        if (instant == null) {
+            return null;
+        }
+        Instant truncated = instant.truncatedTo(ChronoUnit.MICROS);
+        if (truncated.equals(instant)) {
+            return instant;
+        }
+        try {
+            return truncated.plus(1, ChronoUnit.MICROS);
+        } catch (DateTimeException e) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
     }
 
     /** 계좌번호는 마스킹 값만 담는다. 원문·실명은 결과에 넣지 않는다 */

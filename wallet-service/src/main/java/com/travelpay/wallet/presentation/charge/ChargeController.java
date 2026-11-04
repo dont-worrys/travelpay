@@ -64,7 +64,7 @@ public class ChargeController {
                 callLogging(userId, chargeId, () -> chargeService.getCharge(userId, chargeId))));
     }
 
-    /** 본인 충전 목록. 최신순 고정, 기간은 createdAt 기준 [from, to) */
+    /** 본인 충전 목록. 최신순 고정, 기간은 createdAt 기준 [from, to). 마이크로초보다 세밀한 시각은 다음 마이크로초로 올려 조회 */
     @GetMapping
     public ApiResponse<PageResponse<ChargeResponse>> listMyCharges(
             @CurrentUser AuthenticatedUser user,
