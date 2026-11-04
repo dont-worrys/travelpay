@@ -1,6 +1,7 @@
 package com.travelpay.exchange.infrastructure.persistence.rate;
 
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Optional;
 
 import com.travelpay.exchange.domain.rate.DuplicateExchangeRateException;
@@ -43,6 +44,15 @@ class ExchangeRateRepositoryAdapter implements ExchangeRateRepository {
     @Override
     public Optional<ExchangeRate> findLatest(RateSource source, ForeignCurrency currency) {
         return jpaRepository.findFirstBySourceAndCurrencyOrderByRateDateDescCollectedAtDesc(source, currency);
+    }
+
+    @Override
+    public List<ExchangeRate> findLatestOfEach(RateSource source, List<ForeignCurrency> currencies) {
+        if (currencies.isEmpty()) {
+            return List.of();
+        }
+        String codes = String.join(",", currencies.stream().map(ForeignCurrency::name).toList());
+        return jpaRepository.findLatestOfEach(source.name(), codes);
     }
 
     @Override
