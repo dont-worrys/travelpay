@@ -49,7 +49,10 @@ public class BankTransactionController {
         return respond(refundService.refund(request.toCommand()));
     }
 
-    /** 기간 목록 [from, to). 정렬은 고정이라 Pageable·sort를 받지 않는다. */
+    /**
+     * 기간 목록 [from, to). 정렬은 고정이라 Pageable·sort를 받지 않는다.
+     * 마이크로초보다 세밀한 시각은 다음 마이크로초로 올려 조회한다 (범위 [from, to)는 그대로).
+     */
     @GetMapping("/transactions")
     public ApiResponse<PageResponse<BankTransactionResponse>> list(
             @RequestParam Instant from,
