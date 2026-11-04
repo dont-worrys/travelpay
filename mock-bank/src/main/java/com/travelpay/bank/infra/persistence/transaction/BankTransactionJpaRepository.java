@@ -3,8 +3,11 @@ package com.travelpay.bank.infra.persistence.transaction;
 import com.travelpay.bank.domain.transaction.BankTransaction;
 import com.travelpay.bank.domain.transaction.BankTransactionStatus;
 import com.travelpay.bank.domain.transaction.BankTransactionType;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -14,4 +17,7 @@ public interface BankTransactionJpaRepository extends JpaRepository<BankTransact
 
     boolean existsByOriginalTxIdAndTypeAndStatus(UUID originalTxId, BankTransactionType type,
                                                  BankTransactionStatus status);
+
+    Page<BankTransaction> findByCreatedAtGreaterThanEqualAndCreatedAtLessThan(Instant from, Instant to,
+                                                                             Pageable pageable);
 }

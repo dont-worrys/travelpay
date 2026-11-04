@@ -18,6 +18,7 @@ public record BankTransactionResult(
         BankFailureCode failureCode,
         long amount,
         UUID originalTxId,
+        Instant createdAt,
         Instant completedAt,
         boolean created
 ) {
@@ -39,6 +40,7 @@ public record BankTransactionResult(
                 transaction.getFailureCode(),
                 transaction.getAmount(),
                 transaction.getOriginalTxId(),
+                toStoredPrecision(transaction.getCreatedAt()),
                 toStoredPrecision(transaction.getCompletedAt()),
                 created
         );
