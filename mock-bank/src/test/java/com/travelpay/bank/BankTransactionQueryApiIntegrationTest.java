@@ -317,6 +317,51 @@ class BankTransactionQueryApiIntegrationTest {
     }
 
     @Test
+    void offset이_int_범위를_넘는_page는_400() throws Exception {
+        insert(uuid(1), "only", BASE);
+        String range = "/transactions?from=" + BASE.minusSeconds(1) + "&to=" + BASE.plusSeconds(1);
+
+        Resp over = get(range + "&page=21474837&size=100");        // offset 2,147,483,700
+        Resp overAfterClamp = get(range + "&page=21474837&size=101"); // 101 → 100 보정 뒤 계산
+        Resp below = get(range + "&page=21474836&size=100");       // offset 2,147,483,600
+
+        assertEquals(400, over.status());
+        assertEquals(400, overAfterClamp.status());
+        assertEquals(200, below.status());
+        assertTrue(items(below).isEmpty());
+        assertEquals(1, ((Number) below.data().get("totalElements")).longValue());
+    }
+
+    @Test
+    void 마이크로초보다_세밀한_from은_올려서_경계_거래를_제외한다() throws Exception {
+        insert(uuid(1), "at-base", BASE);
+
+        Resp resp = list(BASE.plusNanos(100), BASE.plusSeconds(1), null);
+
+        assertEquals(200, resp.status());
+        assertEmptyPage(resp);
+    }
+
+    @Test
+    void 마이크로초보다_세밀한_to는_올려서_경계_거래를_포함한다() throws Exception {
+        insert(uuid(1), "at-base", BASE);
+
+        Resp resp = list(BASE.minusSeconds(1), BASE.plusNanos(100), null);
+
+        assertEquals(200, resp.status());
+        assertEquals(List.of("at-base"), requestIds(resp));
+    }
+
+    @Test
+    void 마이크로초_단위_경계는_그대로_비교한다() throws Exception {
+        insert(uuid(1), "at-base", BASE);
+
+        assertEquals(List.of("at-base"), requestIds(list(BASE, BASE.plusNanos(1_000), null)));
+        assertTrue(items(list(BASE.plusNanos(1_000), BASE.plusSeconds(1), null)).isEmpty());
+        assertTrue(items(list(BASE.minusSeconds(1), BASE, null)).isEmpty());
+    }
+
+    @Test
     void 목록_응답에는_계좌_정보가_없다() throws Exception {
         String debitId = post("/withdrawals", withdrawal("l-debit", "유재석", 10_000)).data().get("bankTxId").toString();
         post("/refunds", refund("l-refund", debitId, 10_000));
