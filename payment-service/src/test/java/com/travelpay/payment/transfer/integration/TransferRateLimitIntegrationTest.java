@@ -8,7 +8,6 @@ import com.travelpay.payment.transfer.support.TransferApiIntegrationSupport;
 import feign.FeignException;
 import feign.Request;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,7 +25,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 송금 API 자체의 호출 제한은 구현되어 있지 않으며(Gateway·payment 모두 없음), 이 테스트의 대상이 아닙니다.
  * UserFeignApi(Feign) 응답만 Mock이고 TransferUserReader·common FeignErrors·서비스·컨트롤러·DB는 실제 코드입니다.
  */
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
 class TransferRateLimitIntegrationTest extends TransferApiIntegrationSupport {
 
     /** TC-24-I1: 수취인 조회 중 429 → 429 COMMON_TOO_MANY_REQUESTS, 지갑은 조회하지 않습니다. Retry-After 헤더는 전달하지 않습니다. */

@@ -1,8 +1,8 @@
 package com.travelpay.payment.transfer.controller;
 
+import com.travelpay.payment.support.PostgresContainerSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.web.servlet.MockMvc;
@@ -18,10 +18,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** 실제 애플리케이션 구성으로 송금 API 문서를 생성해 확인합니다. 컨텍스트 기동에 DB가 필요합니다. */
+/** 실제 애플리케이션 구성으로 송금 API 문서를 생성해 확인합니다. 컨텍스트 기동에 DB(Testcontainers PostgreSQL)가 필요합니다. */
 @SpringBootTest(properties = {"eureka.client.enabled=false", "transfer.recovery.enabled=false"})
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
-class TransferApiDocsIntegrationTest {
+class TransferApiDocsIntegrationTest extends PostgresContainerSupport {
 
     private static final String DOCS = "/v3/api-docs/transfer";
     private static final String CREATE = "$.paths['/api/v1/transfers'].post";

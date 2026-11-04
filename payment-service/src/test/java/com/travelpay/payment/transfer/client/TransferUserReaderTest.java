@@ -159,6 +159,7 @@ class TransferUserReaderTest {
     @Test
     void reportsUnexpectedResponseBodyAsBadGateway() {
         when(userFeignApi.getActiveUser(USER_ID))
+                .thenReturn(null)
                 .thenReturn(new ApiResponse<>(false, null, ErrorResponse.of(CommonErrorCode.INTERNAL_SERVER_ERROR)))
                 .thenReturn(ApiResponse.success(null))
                 .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(USER_ID, null)))
@@ -166,7 +167,7 @@ class TransferUserReaderTest {
                 .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(null, "홍길동")))
                 .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(OTHER_USER_ID, "홍길동")));
 
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 7; i++) {
             var exception = assertThrows(BusinessException.class, () -> userReader.findRecipient(USER_ID));
             assertSame(CommonErrorCode.BAD_GATEWAY, exception.getErrorCode());
         }

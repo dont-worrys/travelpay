@@ -10,11 +10,11 @@ import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.response.PageResponse;
+import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.dto.TransferResponse;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,13 +31,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 실제 PostgreSQL에 Flyway 마이그레이션을 적용한 뒤 엔티티 매핑(validate), 제약 조건, 목록 쿼리를 검증합니다.
- * 로컬 compose의 postgres를 사용하므로 PAYMENT_DB_URL 등 DB 환경 변수가 있을 때만 실행합니다.
+ * Testcontainers PostgreSQL을 사용하며 Docker가 없으면 건너뜁니다.
  * 각 테스트는 트랜잭션 안에서 실행 후 롤백되며, 무작위 회원 ID를 사용해 기존 데이터의 영향을 받지 않습니다.
  */
 @SpringBootTest(properties = {"eureka.client.enabled=false", "transfer.recovery.enabled=false"})
 @Transactional
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
-class TransferRepositoryIntegrationTest {
+class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
 
     private static final String REQUEST_HASH = "0".repeat(64);
 

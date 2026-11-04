@@ -9,6 +9,7 @@ import java.util.UUID;
 import com.jayway.jsonpath.JsonPath;
 import com.travelpay.common.auth.AuthHeaders;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
 import com.travelpay.payment.infra.client.user.UserFeignApi;
 import com.travelpay.payment.infra.client.wallet.WalletFeignApi;
@@ -18,7 +19,6 @@ import feign.FeignException;
 import feign.Request;
 import feign.Response;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -38,9 +38,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 /**
  * 송금 API 통합 테스트 공통 구성입니다. 실제 PostgreSQL(Flyway 스키마)과 실제 어댑터·Reader·서비스·컨트롤러를 쓰고,
  * 다른 서비스로 나가는 Feign 인터페이스(원장·지갑·회원)만 Mock으로 바꿉니다. 실제 서비스 간 통신(E2E)은 아닙니다.
- * 각 테스트는 트랜잭션 안에서 실행 후 롤백되어 로컬 DB에 데이터를 남기지 않습니다.
- * 백그라운드 스케줄러(송금 복구·결제 정산)는 꺼서 로컬 DB의 기존 데이터를 건드리지 않습니다.
- * PAYMENT_DB_URL 등 DB 환경 변수가 있을 때만 실행합니다.
+ * 각 테스트는 트랜잭션 안에서 실행 후 롤백되어 DB에 데이터를 남기지 않습니다.
+ * 백그라운드 스케줄러(송금 복구·결제 정산)는 꺼서 테스트 중 데이터를 건드리지 않게 합니다.
+ * DB는 Testcontainers PostgreSQL을 쓰며(PostgresContainerSupport) Docker가 없으면 건너뜁니다.
  */
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
@@ -48,8 +48,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
         "payment.settlement-recovery.enabled=false"
 })
 @Transactional
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
-public abstract class TransferApiIntegrationSupport {
+public abstract class TransferApiIntegrationSupport extends PostgresContainerSupport {
 
     protected static final String BODY = """
             {"receiverId":"%s","amount":3000,"currency":"KRW","memo":"IT"}""";

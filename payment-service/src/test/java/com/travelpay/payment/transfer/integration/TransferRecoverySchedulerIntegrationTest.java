@@ -14,7 +14,6 @@ import com.travelpay.payment.transfer.support.TransferApiIntegrationSupport;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -41,7 +40,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 백그라운드 스케줄 스레드는 테스트 트랜잭션의 데이터를 볼 수 없어 끄고, 같은 스케줄러 클래스를 실제 TransferService로 만들어
  * recover()를 직접 호출합니다. 실제 @Scheduled 스레드 동작은 E2E(서버 기동) 범위입니다.
  */
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
 class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSupport {
 
     @Autowired
@@ -53,7 +51,7 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
     @BeforeEach
     void setUpScheduler() {
         // 복구는 DB의 모든 처리 중 송금을 다루므로, 다른 처리 중 송금이 있으면 결과가 섞여 실행하지 않습니다.
-        assumeTrue(countByStatus("PROCESSING") == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다.");
+        assumeTrue(countByStatus("PROCESSING") == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
         meterRegistry = new SimpleMeterRegistry();
         scheduler = new TransferRecoveryScheduler(transferService, meterRegistry);
     }

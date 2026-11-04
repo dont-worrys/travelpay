@@ -7,7 +7,6 @@ import java.util.UUID;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.support.TransferApiIntegrationSupport;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,7 +28,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * TC-22: 원장 계정 정지(LEDGER_REJECTED_WALLET_SUSPENDED)·계정 없음 거절과 지갑 상태 사전 확인을 검증합니다.
  * 원장 Feign 응답(422 + 오류 코드)만 Mock이고, 어댑터의 오류 코드 해석부터 DB 기록·API 응답까지는 실제 코드입니다.
  */
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
 class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupport {
 
     @Autowired
@@ -61,7 +59,7 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
     /** TC-22-I3·I4·I5·I6: 거절된 송금은 같은 키 재요청에 같은 422(원장 미호출), 복구 대상 아님, 상세는 FAILED, 취소는 409입니다. */
     @Test
     void failedTransferIsFinalForRetryRecoveryDetailAndCancel() throws Exception {
-        assumeTrue(countByStatus("PROCESSING") == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다.");
+        assumeTrue(countByStatus("PROCESSING") == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
         when(ledgerFeignApi.register(any())).thenThrow(ledgerError(422, "LEDGER_REJECTED_WALLET_SUSPENDED"));
         requestTransfer("tc22-final").andExpect(status().isUnprocessableEntity());
         UUID transferId = onlyTransferIdOf(senderId);
@@ -130,7 +128,7 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
     /** TC-22-I10: 처리 중 송금을 복구하다 원장이 계정 정지로 거절하면 FAILED + ACCOUNT_UNAVAILABLE로 확정합니다. */
     @Test
     void recoveryMarksProcessingTransferFailedWhenLedgerRejectsAccount() throws Exception {
-        assumeTrue(countByStatus("PROCESSING") == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다.");
+        assumeTrue(countByStatus("PROCESSING") == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
         when(ledgerFeignApi.register(any()))
                 .thenThrow(ledgerError(503, "COMMON_SERVICE_UNAVAILABLE"))
                 .thenThrow(ledgerError(422, "LEDGER_REJECTED_WALLET_SUSPENDED"));

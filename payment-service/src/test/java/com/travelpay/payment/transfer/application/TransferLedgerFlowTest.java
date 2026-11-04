@@ -561,6 +561,34 @@ class TransferLedgerFlowTest {
         assertEquals(TransferStatus.PROCESSING, transfer.getStatus());
     }
 
+    /** 한 건을 복구하다 예외가 나도(예: 선점 UPDATE 실패) 로그만 남기고 다음 송금을 계속 복구합니다. */
+    @Test
+    void recoveryContinuesWithNextTransferWhenOneTransferFails() {
+        Instant base = Instant.parse("2026-11-02T00:00:00Z");
+        Transfer broken = staleProcessingTransfer("broken-key", base);
+        Transfer next = staleProcessingTransfer("next-key", base.plusSeconds(10));
+        when(transferRepository.claimForRecovery(eq(broken.getId()), any(Instant.class), any(Instant.class)))
+                .thenThrow(new DataIntegrityViolationException("connection lost"));
+
+        int settled = transferService.recoverDue(farFuture(), 10);
+
+        assertEquals(1, settled);
+        assertEquals(TransferStatus.PROCESSING, broken.getStatus());
+        assertEquals(TransferStatus.COMPLETED, next.getStatus());
+        assertEquals(List.of(next.getId()), ledger.requests.stream().map(LedgerTransactionRequest::referenceId).toList());
+    }
+
+    /** 원장 결과에 상태가 없으면 해석할 수 없으므로 결과 모름으로 두고 기록하지 않습니다. */
+    @Test
+    void keepsProcessingWhenLedgerResultHasNoStatus() {
+        ledger.onRegister = request -> new LedgerTransactionResponse(UUID.randomUUID(), null, null);
+
+        TransferResponse response = transferService.request(SENDER_ID, KEY, REQUEST);
+
+        assertEquals(TransferStatus.PROCESSING, response.status());
+        verify(transferRepository, never()).finishProcessing(any(), any(), any(), any());
+    }
+
     /** 원장 결과를 연달아 3번 확인하지 못하면 원장 장애로 보고 남은 송금은 다음 주기로 넘깁니다. */
     @Test
     void recoveryStopsAfterThreeConsecutiveUnknownResults() {

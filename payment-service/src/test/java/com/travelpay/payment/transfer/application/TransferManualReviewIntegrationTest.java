@@ -8,6 +8,7 @@ import java.util.UUID;
 
 import com.jayway.jsonpath.JsonPath;
 import com.travelpay.common.auth.AuthHeaders;
+import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.transfer.client.LedgerTransactionRequest;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
 import com.travelpay.payment.transfer.client.TransferLedgerClient;
@@ -18,7 +19,6 @@ import com.travelpay.payment.transfer.client.UserRecipientResponse;
 import com.travelpay.payment.transfer.controller.TransferController;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
@@ -46,12 +46,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * TC-21: 원장 결과 모름이 반복되면 재시도 한도(처음 요청 포함 5회)에서 MANUAL_REVIEW(RETRY_EXHAUSTED)로 바뀌는지
  * 실제 PostgreSQL(Flyway 스키마·CHECK 제약·조건부 UPDATE·복구 대상 쿼리)과 송금 API(MockMvc)로 확인합니다.
  * 원장·지갑·회원 조회만 Mock으로 바꿉니다. 복구 스케줄러는 끄고 TransferService.recoverDue를 직접 호출합니다.
- * 각 테스트는 트랜잭션 안에서 실행 후 롤백되며, PAYMENT_DB_URL 등 DB 환경 변수가 있을 때만 실행합니다.
+ * 각 테스트는 트랜잭션 안에서 실행 후 롤백됩니다. DB는 Testcontainers PostgreSQL을 쓰며 Docker가 없으면 건너뜁니다.
  */
 @SpringBootTest(properties = {"eureka.client.enabled=false", "transfer.recovery.enabled=false"})
 @Transactional
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
-class TransferManualReviewIntegrationTest {
+class TransferManualReviewIntegrationTest extends PostgresContainerSupport {
 
     private static final UUID SOURCE_WALLET_ID = UUID.randomUUID();
     private static final UUID TARGET_WALLET_ID = UUID.randomUUID();
@@ -85,10 +84,10 @@ class TransferManualReviewIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        // 로컬 DB에 다른 PROCESSING 송금이 있으면 복구가 그 송금부터 시도해 결과가 섞이므로 실행하지 않습니다.
+        // DB에 다른 PROCESSING 송금이 있으면 복구가 그 송금부터 시도해 결과가 섞이므로 실행하지 않습니다.
         Long otherProcessing = jdbcTemplate.queryForObject(
                 "select count(*) from transfer where status = 'PROCESSING'", Long.class);
-        assumeTrue(otherProcessing == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다: " + otherProcessing);
+        assumeTrue(otherProcessing == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다: " + otherProcessing);
 
         mvc = MockMvcBuilders.webAppContextSetup(context).build();
         senderId = UUID.randomUUID();
