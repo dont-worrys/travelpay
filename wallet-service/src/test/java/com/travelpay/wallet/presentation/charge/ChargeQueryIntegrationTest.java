@@ -324,7 +324,99 @@ class ChargeQueryIntegrationTest {
                 .andExpect(jsonPath("$.data.size").value(100));
     }
 
+    // ---- offset 범위·조회 경계 마이크로초 올림 (회원·관리자) ----
+
+    @Test
+    void offset이_int_범위를_넘는_page는_400() throws Exception {
+        assertOffsetBounds(false);
+    }
+
+    @Test
+    void 관리자_offset이_int_범위를_넘는_page는_400() throws Exception {
+        assertOffsetBounds(true);
+    }
+
+    @Test
+    void from이_저장_시각보다_100ns_뒤면_제외() throws Exception {
+        assertFromSubMicrosExcludes(false);
+    }
+
+    @Test
+    void 관리자_from이_저장_시각보다_100ns_뒤면_제외() throws Exception {
+        assertFromSubMicrosExcludes(true);
+    }
+
+    @Test
+    void to가_저장_시각보다_100ns_뒤면_포함() throws Exception {
+        assertToSubMicrosIncludes(false);
+    }
+
+    @Test
+    void 관리자_to가_저장_시각보다_100ns_뒤면_포함() throws Exception {
+        assertToSubMicrosIncludes(true);
+    }
+
+    @Test
+    void 마이크로초_경계는_기존_결과_그대로() throws Exception {
+        assertMicrosBoundaryUnchanged(false);
+    }
+
+    @Test
+    void 관리자_마이크로초_경계는_기존_결과_그대로() throws Exception {
+        assertMicrosBoundaryUnchanged(true);
+    }
+
+    private void assertOffsetBounds(boolean admin) throws Exception {
+        charge(me, myWallet, T1);
+
+        list(admin, get(listPath(admin)).param("page", "21474837").param("size", "100")) // offset 2,147,483,700
+                .andExpect(status().isBadRequest());
+        list(admin, get(listPath(admin)).param("page", "21474837").param("size", "101")) // 101 → 100 보정 뒤 계산
+                .andExpect(status().isBadRequest());
+        list(admin, get(listPath(admin)).param("page", "21474836").param("size", "100")) // offset 2,147,483,600
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items", hasSize(0)))
+                .andExpect(jsonPath("$.data.totalElements").value(1));
+    }
+
+    private void assertFromSubMicrosExcludes(boolean admin) throws Exception {
+        charge(me, myWallet, T2);
+
+        list(admin, get(listPath(admin)).param("from", T2.plusNanos(100).toString()).param("to", T3.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items", hasSize(0)))
+                .andExpect(jsonPath("$.data.totalElements").value(0));
+    }
+
+    private void assertToSubMicrosIncludes(boolean admin) throws Exception {
+        UUID c2 = charge(me, myWallet, T2);
+
+        list(admin, get(listPath(admin)).param("from", T1.toString()).param("to", T2.plusNanos(100).toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items[*].chargeId", contains(c2.toString())));
+    }
+
+    private void assertMicrosBoundaryUnchanged(boolean admin) throws Exception {
+        UUID c2 = charge(me, myWallet, T2);
+        Instant nextMicro = T2.plusNanos(1_000);
+
+        list(admin, get(listPath(admin)).param("from", T2.toString()).param("to", nextMicro.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items[*].chargeId", contains(c2.toString())));
+        list(admin, get(listPath(admin)).param("from", nextMicro.toString()).param("to", T3.toString()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items", hasSize(0)));
+    }
+
     // ---- helpers ----
+
+    private static String listPath(boolean admin) {
+        return admin ? "/api/v1/admin/charges" : "/api/v1/charges";
+    }
+
+    private ResultActions list(boolean admin, MockHttpServletRequestBuilder request) throws Exception {
+        return admin ? asMaster(request) : asUser(request);
+    }
 
     private ResultActions asUser(MockHttpServletRequestBuilder request) throws Exception {
         return mockMvc.perform(request.header("User-Id", me.toString()).header("User-Role", "USER"));
