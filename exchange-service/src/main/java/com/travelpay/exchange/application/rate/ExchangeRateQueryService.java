@@ -27,13 +27,13 @@ public class ExchangeRateQueryService {
         this.activeSource = provider.source();
     }
 
-    /** 지정한 통화별 최신 환율 목록입니다. 아직 수집된 환율이 없는 통화는 목록에서 빠집니다. */
-    @Transactional(readOnly = true)
+    /**
+     * 지정한 통화별 최신 환율 목록입니다. 아직 수집된 환율이 없는 통화는 목록에서 빠집니다.
+     * 쿼리 하나로 읽어 통화들이 같은 스냅샷(같은 수집 회차)입니다. 쿼리가 하나라 같은 시점을 맞출 트랜잭션이 필요 없어,
+     * 트랜잭션 없이(자동 커밋) 실행해 BEGIN·COMMIT 왕복을 줄입니다.
+     */
     public List<ExchangeRate> findLatest(List<ForeignCurrency> currencies) {
-        return currencies.stream()
-                .map(currency -> repository.findLatest(activeSource, currency))
-                .flatMap(Optional::stream)
-                .toList();
+        return repository.findLatestOfEach(activeSource, currencies);
     }
 
     /** 한 통화의 최신 환율입니다. 아직 수집된 환율이 없으면 empty입니다. */

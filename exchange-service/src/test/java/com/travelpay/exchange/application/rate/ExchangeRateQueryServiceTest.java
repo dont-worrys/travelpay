@@ -28,35 +28,26 @@ class ExchangeRateQueryServiceTest {
     private final ExchangeRateRepository repository = mock(ExchangeRateRepository.class);
     private final ExchangeRateProvider provider = mock(ExchangeRateProvider.class);
 
+    /** 여러 통화는 현재 모드 출처로 쿼리 하나에 맡깁니다. 통화별 최신 고르기·빠지는 통화는 저장소 통합 테스트가 확인합니다. */
     @Test
-    void returnsLatestRateOfEachSupportedCurrencyFromActiveSource() {
+    void readsAllRequestedCurrenciesInOneQueryFromActiveSource() {
         ExchangeRateQueryService service = serviceWithSource(RateSource.KOREAEXIM);
         ExchangeRate jpy = rate(ForeignCurrency.JPY);
         ExchangeRate cny = rate(ForeignCurrency.CNY);
-        when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
-        when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.of(cny));
+        List<ForeignCurrency> all = List.of(ForeignCurrency.values());
+        when(repository.findLatestOfEach(RateSource.KOREAEXIM, all)).thenReturn(List.of(jpy, cny));
 
-        assertEquals(List.of(jpy, cny), service.findLatest(List.of(ForeignCurrency.values())));
+        assertEquals(List.of(jpy, cny), service.findLatest(all));
+        verify(repository, never()).findLatest(any(), any());
     }
 
     @Test
-    void returnsOnlyRequestedCurrency() {
+    void passesOnlyRequestedCurrency() {
         ExchangeRateQueryService service = serviceWithSource(RateSource.KOREAEXIM);
         ExchangeRate cny = rate(ForeignCurrency.CNY);
-        when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.of(cny));
+        when(repository.findLatestOfEach(RateSource.KOREAEXIM, List.of(ForeignCurrency.CNY))).thenReturn(List.of(cny));
 
         assertEquals(List.of(cny), service.findLatest(List.of(ForeignCurrency.CNY)));
-        verify(repository, never()).findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY);
-    }
-
-    @Test
-    void omitsCurrencyThatHasNoCollectedRateYet() {
-        ExchangeRateQueryService service = serviceWithSource(RateSource.KOREAEXIM);
-        ExchangeRate jpy = rate(ForeignCurrency.JPY);
-        when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
-        when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.empty());
-
-        assertEquals(List.of(jpy), service.findLatest(List.of(ForeignCurrency.values())));
     }
 
     @Test
@@ -73,12 +64,13 @@ class ExchangeRateQueryServiceTest {
     @Test
     void readsOnlyFromCurrentModeSourceAndNeverCallsExternalApi() {
         ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
-        when(repository.findLatest(any(), any())).thenReturn(Optional.empty());
+        List<ForeignCurrency> all = List.of(ForeignCurrency.values());
+        when(repository.findLatestOfEach(any(), any())).thenReturn(List.of());
 
-        service.findLatest(List.of(ForeignCurrency.values()));
+        service.findLatest(all);
 
-        verify(repository).findLatest(RateSource.MOCK, ForeignCurrency.JPY);
-        verify(repository, never()).findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY);
+        verify(repository).findLatestOfEach(RateSource.MOCK, all);
+        verify(repository, never()).findLatestOfEach(RateSource.KOREAEXIM, all);
         verify(provider, never()).fetch(any());
     }
 
