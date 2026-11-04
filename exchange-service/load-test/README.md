@@ -75,16 +75,21 @@ docker compose --profile app up -d --wait app   # 측정 DB도 함께 뜸. 준�
 
 DB만 쓸 때와 Redis를 쓸 때는 **코드만 달라야** 합니다. 그래서 캐시를 끄는 설정을 따로 만들지 않고, **커밋별로 jar를 빌드해 같은 날 같은 PC 조건에서 jar만 바꿔 끼워** 연달아 잽니다. 캐시를 끈 코드는 트랜잭션 구조 등이 원래 DB 코드와 달라 비교를 흐릴 수 있기 때문입니다.
 
+저장소 루트에서 시작합니다. 비교할 커밋은 저장소 옆 폴더(`../travelpay-v0`)에 꺼냅니다.
+
 ```bash
-# 비교할 커밋을 별도 폴더에 꺼내 jar 빌드 (예: Redis 캐싱 전 커밋)
+# 1. 저장소 루트에서: 비교할 커밋을 옆 폴더에 꺼내 jar 빌드 (예: Redis 캐싱 전 커밋)
 git worktree add ../travelpay-v0 <커밋>
 (cd ../travelpay-v0 && ./gradlew :exchange-service:bootJar)
+./gradlew :exchange-service:bootJar                         # 지금 브랜치 jar (기본값으로 쓰임)
 
-# 측정 compose는 이 폴더 기준 상대 경로 또는 절대 경로로 jar를 받는다
+# 2. 측정 폴더에서: APP_JAR는 이 폴더(exchange-service/load-test) 기준 상대 경로 또는 절대 경로
 cd exchange-service/load-test
 APP_JAR=../../../travelpay-v0/exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar ./measure-all.sh db-v0
 ./measure-all.sh redis-v1                                   # 기본값: 지금 브랜치에서 빌드한 jar
-git worktree remove ../travelpay-v0                         # 끝나면 정리
+
+# 3. 끝나면 정리 (측정 폴더 기준 경로)
+git worktree remove ../../../travelpay-v0
 ```
 
 | 비교 | jar | 언제 |
@@ -166,7 +171,7 @@ docker compose run --rm -e VUS=50 -e LABEL=quote-db k6 run --quiet /scripts/quot
 | `QUOTE_AMOUNT` | 100000 | (견적 발급) 보내는 원화 금액. 1회 한도 1,000 ~ 2,000,000 안 |
 
 - 성공은 환율 조회 200, 견적 발급 201입니다.
-- 견적 발급은 지갑·원장을 부르지 않아 `User-Id` 헤더만으로 요청합니다. 가상 사용자 번호로 고정 UUID(1번 → `00000000-0000-4000-8000-000000000001`)를 만들어, 실행마다 같은 회원들이 각자 견적을 받습니다.
+- 견적 발급은 지갑·원장을 부르지 않아 **`User-Id`와 `User-Role: USER` 헤더**만으로 요청합니다(게이트웨이가 채워 줄 헤더를 직접 넣음. 둘 중 하나라도 없으면 401). 가상 사용자 번호로 고정 UUID(1번 → `00000000-0000-4000-8000-000000000001`)를 만들어, 실행마다 같은 회원들이 각자 견적을 받습니다.
 - 결과 JSON의 `okAll`은 예열 포함 성공 수입니다. 견적 발급 검산(저장된 견적 수와 비교)에 씁니다.
 
 출력 예 (2026-11-04, 동시 요청 5개 · 5초 시험 실행):
