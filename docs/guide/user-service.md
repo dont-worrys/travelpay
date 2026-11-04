@@ -1,6 +1,6 @@
 # User 서비스 실행·사용 가이드
 
-user-service는 일반 회원가입, 로그인·로그아웃, 비밀번호 변경, Redis 세션, CSRF, 내 정보 조회, 약관 조회와 내부 세션·회원 이름 조회를 담당합니다. 브라우저는 Gateway를 통해 호출하고, User는 세션의 발급·검증을 담당합니다. Gateway 실행과 프런트·배포 연결은 [Gateway 가이드](gateway.md)를 참고합니다.
+user-service는 일반 회원가입, 로그인·로그아웃, 비밀번호 변경, Redis 세션, CSRF, 내 정보 조회, 약관 조회와 내부 세션·회원 이름 조회를 담당합니다. 브라우저는 Gateway를 통해 호출하고, User는 세션의 발급·검증을 담당합니다.
 
 ## 로컬 실행
 
@@ -47,7 +47,7 @@ user-service는 일반 회원가입, 로그인·로그아웃, 비밀번호 변�
 | `PATCH /api/v1/users/me/password` | 현재 비밀번호 확인 후 비밀번호 변경 | 필요 | 필요 | 204 |
 | `POST /api/v1/auth/logout` | 로그아웃 | 필요 | 필요 | 204 |
 
-응답 본문은 `success`·`data`·`error` 공통 형식입니다([error-contract.md](error-contract.md)). 로그아웃·비밀번호 변경 성공은 본문 없는 204입니다.
+응답 본문은 `success`·`data`·`error` 공통 형식입니다. 성공은 `data`에 결과를, 실패는 `error`에 코드·안내 메시지·상세 목록을 담습니다. 로그아웃·비밀번호 변경 성공은 본문 없는 204입니다.
 
 ## 호출 순서
 
@@ -250,6 +250,14 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 | 세션 저장소 | 세션 Redis (`redis-session`, 메모리가 차도 키를 지우지 않는 `noeviction`) |
 | 응답 캐시 | Spring Security가 `Cache-Control: no-cache, no-store, max-age=0, must-revalidate`를 붙여 인증·개인정보 응답이 저장되지 않게 함 |
 | 회원 상태 확인 | 로그인이 필요한 요청마다 DB에서 현재 상태·권한 확인. 정지·종료 회원은 로그인이 필요한 API 중 로그아웃만 가능 |
+
+### 회원 상태와 역할
+
+`status`는 이용 상태(`ACTIVE`·`SUSPENDED`·`CLOSED`), `role`은 역할(`USER`·`MASTER`)입니다. 일반 회원가입은 ACTIVE·USER로 생성하며, 관리자는 ACTIVE·MASTER일 때 보호 규칙을 통과합니다. 역할값은 대문자로 사용합니다.
+
+User의 `/api/v1/admin/**` 보호 규칙은 DB의 현재 상태·역할로 MASTER를 확인하도록 준비되어 있습니다. 관리자 회원 조회·정지/해제·회원별 세션 종료·약관 관리 API와 Gateway의 관리자 라우트는 아직 구현하지 않았습니다.
+
+관리 API 경로의 `admin`은 기능 영역, `MASTER`는 허용 역할이므로 같은 이름으로 바꾸지 않습니다. 관리자 API도 기존 User 세션 인증을 사용하며, 외부 회원 헤더로 관리자 신원을 결정하지 않습니다.
 
 ### 로그인·현재 비밀번호 확인 시도 제한
 
