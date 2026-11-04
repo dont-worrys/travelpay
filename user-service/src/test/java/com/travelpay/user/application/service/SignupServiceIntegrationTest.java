@@ -491,6 +491,9 @@ class SignupServiceIntegrationTest {
                 @Override public Optional<UserCredentials> findByUserId(UUID userId) {
                     return delegate.findByUserId(userId);
                 }
+                @Override public Optional<UserCredentials> findByUserIdForUpdate(UUID userId) {
+                    return delegate.findByUserIdForUpdate(userId);
+                }
                 @Override public boolean existsByLoginEmail(String email) {
                     var exists = delegate.existsByLoginEmail(email);
                     state.synchronizeWrite(Race.EMAIL);

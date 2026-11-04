@@ -239,6 +239,46 @@ class LoginControllerIntegrationTest {
     }
 
     @Test
+    void anExistingUserSessionCanSignInAsAnotherMasterAndReplaceItsIdentity() throws Exception {
+        var userCookie = sessionCookie(login(request(), csrf(null)));
+        var userCsrf = csrf(userCookie);
+        assertEquals(userCookie.getValue(), userCsrf.cookie().getValue());
+        var previous = mvc.perform(get("/api/v1/users/me").cookie(userCsrf.cookie()))
+                .andExpect(status().isOk()).andReturn();
+        var previousMember = mapper.readTree(previous.getResponse().getContentAsString(UTF_8)).get("data");
+        assertEquals(userId.toString(), previousMember.get("userId").asString());
+        assertEquals("USER", previousMember.get("role").asString());
+        var masterEmail = "switch.master@example.com";
+        var masterId = transactions.execute(status -> {
+            var master = User.register("관리자 확인", "010-1500-0002", AT);
+            entityManager.persist(master);
+            entityManager.persist(UserCredentials.createFor(master, masterEmail,
+                    passwordEncoder.encode(PASSWORD), AT));
+            entityManager.createQuery("update User u set u.role = :role where u.id = :id")
+                    .setParameter("role", AuthRole.MASTER).setParameter("id", master.getId()).executeUpdate();
+            return master.getId();
+        });
+
+        var result = login(request().put("loginEmail", masterEmail), userCsrf);
+
+        assertEquals(200, result.getResponse().getStatus());
+        var data = mapper.readTree(result.getResponse().getContentAsString(UTF_8)).get("data");
+        assertEquals(masterId.toString(), data.get("userId").asString());
+        assertEquals("MASTER", data.get("role").asString());
+        var masterCookie = sessionCookie(result);
+        assertNotEquals(userCookie.getValue(), masterCookie.getValue());
+        mvc.perform(get("/api/v1/users/me").cookie(userCookie)).andExpect(status().isUnauthorized());
+        var me = mvc.perform(get("/api/v1/users/me").cookie(masterCookie))
+                .andExpect(status().isOk()).andReturn();
+        var member = mapper.readTree(me.getResponse().getContentAsString(UTF_8)).get("data");
+        assertEquals(masterId.toString(), member.get("userId").asString());
+        assertEquals("MASTER", member.get("role").asString());
+        assertError(mvc.perform(post("/test/login-change").cookie(masterCookie)
+                        .header(userCsrf.headerName(), userCsrf.token())).andReturn(),
+                403, "COMMON_CSRF_INVALID");
+    }
+
+    @Test
     void replacesTheOldCsrfTokenAndAcceptsTheNewTokenForChangesAfterLogin() throws Exception {
         var before = csrf(null);
         var cookie = sessionCookie(login(request(), before));

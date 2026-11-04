@@ -1,6 +1,6 @@
 # User 서비스 실행·사용 가이드
 
-user-service는 일반 회원가입, 로그인·로그아웃, Redis 세션, CSRF, 내 정보 조회, 약관 조회와 내부 세션·회원 이름 조회를 담당합니다. 브라우저는 Gateway를 통해 호출하고, User는 세션의 발급·검증을 담당합니다. Gateway 실행과 프런트·배포 연결은 [Gateway 가이드](gateway.md)를 참고합니다.
+user-service는 일반 회원가입, 로그인·로그아웃, 비밀번호 변경, Redis 세션, CSRF, 내 정보 조회, 약관 조회와 내부 세션·회원 이름 조회를 담당합니다. 브라우저는 Gateway를 통해 호출하고, User는 세션의 발급·검증을 담당합니다. Gateway 실행과 프런트·배포 연결은 [Gateway 가이드](gateway.md)를 참고합니다.
 
 ## 로컬 실행
 
@@ -44,9 +44,10 @@ user-service는 일반 회원가입, 로그인·로그아웃, Redis 세션, CSRF
 | `POST /api/v1/users` | 일반 회원가입 | 불필요 | 필요 | 201 |
 | `POST /api/v1/auth/login` | 일반 로그인 | 불필요 | 필요 | 200 |
 | `GET /api/v1/users/me` | 내 정보 조회 | 필요 | 불필요 | 200 |
+| `PATCH /api/v1/users/me/password` | 현재 비밀번호 확인 후 비밀번호 변경 | 필요 | 필요 | 204 |
 | `POST /api/v1/auth/logout` | 로그아웃 | 필요 | 필요 | 204 |
 
-응답 본문은 `success`·`data`·`error` 공통 형식입니다([error-contract.md](error-contract.md)). 로그아웃 성공은 본문 없는 204입니다.
+응답 본문은 `success`·`data`·`error` 공통 형식입니다([error-contract.md](error-contract.md)). 로그아웃·비밀번호 변경 성공은 본문 없는 204입니다.
 
 ## 호출 순서
 
@@ -82,6 +83,55 @@ TOKEN=$(curl -s -c jar -b jar $BASE/api/v1/auth/csrf | sed 's/.*"token":"\([^"]*
 curl -s -b jar $BASE/api/v1/users/me
 curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -X POST -o /dev/null -w '%{http_code}\n' $BASE/api/v1/auth/logout
 ```
+
+## 비밀번호 변경 (B05)
+
+로그인한 ACTIVE 회원이 자신의 현재 비밀번호를 확인한 뒤 새 비밀번호로 변경합니다. `USER`·`MASTER` 모두 같은 본인 변경 API를 사용합니다. 변경 대상은 서버의 세션에서 확인하므로 본문에 회원 ID·이메일·역할을 넣지 않습니다.
+
+```http
+PATCH /api/v1/users/me/password
+Content-Type: application/json
+Csrf-Token: 현재 세션의 유효한 토큰
+```
+
+```json
+{
+  "currentPassword": "TravelpayDemo-2026!",
+  "newPassword": "TravelpayNew-2026!"
+}
+```
+
+- 같은 `SESSION` 쿠키를 함께 보냅니다. Gateway 주소로 호출하며, 로컬에서 User를 직접 확인할 때만 `http://localhost:8081`을 사용합니다.
+- 현재 비밀번호는 필수이며 공백 없는 ASCII 1~72자입니다. 새 비밀번호는 기존 회원가입과 같은 정책으로, 공백 없는 영문·숫자·특수문자를 모두 포함한 10~72자입니다. 비밀번호 앞뒤 공백을 잘라서 처리하지 않습니다.
+- 현재 비밀번호와 같은 새 비밀번호는 거절합니다. 로그인·현재 비밀번호 확인은 아래의 [시도 제한](#로그인현재-비밀번호-확인-시도-제한)을 공유합니다.
+
+성공은 **204 No Content**이며 본문이 없습니다. `password_hash`·`password_changed_at`을 함께 커밋한 뒤 현재 세션 ID를 교체하고 기존 CSRF 토큰을 제거합니다. 클라이언트는 응답의 새 `SESSION` 쿠키를 저장하고 `GET /api/v1/auth/csrf`로 새 토큰을 받아 다음 변경 요청에 사용합니다. 최초 로그인 시각과 로그인 후 24시간의 절대 만료 기준은 유지합니다.
+
+현재 범위는 **현재 세션의 ID 교체**입니다. 다른 기기에 이미 로그인한 세션은 자동으로 종료하지 않습니다. 비밀번호 분실 복구·소셜 회원의 첫 비밀번호 등록·별도 목적의 재인증 API는 이 기능에 포함하지 않습니다.
+
+### 변경 실패 시 확인
+
+| 상태 | 코드 | 의미 |
+|---|---|---|
+| 400 | `COMMON_INVALID_REQUEST` | 현재·새 비밀번호 입력 형식 오류. `error.details`에 필드 안내 |
+| 400 | `USER_CURRENT_PASSWORD_MISMATCH` | 현재 비밀번호 불일치 |
+| 400 | `USER_NEW_PASSWORD_SAME_AS_CURRENT` | 새 비밀번호가 현재 비밀번호와 같음 |
+| 409 | `USER_CREDENTIAL_CONFLICT` | 처음 확인한 로그인 정보가 변경되었거나 비밀번호 수단이 없어 저장할 수 없음. 다시 로그인 후 확인 |
+| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인과 공유하는 비밀번호 확인 한도 초과 |
+| 503 | `COMMON_SERVICE_UNAVAILABLE` | DB·시도 제한 Redis 등 저장소 처리 실패 |
+| 503 | `USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE` | **DB 변경은 완료됐지만 세션 갱신에 실패함. 새 비밀번호로 다시 로그인** |
+
+기존 세션 인증·회원 상태·CSRF 오류도 적용됩니다. CSRF 없이 User에 직접 PATCH 요청하면 인증 검사 전에 `403 COMMON_CSRF_INVALID`가 될 수 있습니다. 유효한 CSRF가 있어도 로그인되지 않은 세션은 `401 COMMON_UNAUTHORIZED`입니다.
+
+전용 부분 성공 코드인 `USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE`을 받으면 이전 비밀번호로 변경 요청을 자동 재시도하지 않습니다. 저장소 복구 후 CSRF 토큰을 조회하고 **새 비밀번호로 로그인**합니다. 일반 503만으로 DB 변경 여부를 단정하지 말고, 복구 후 로그인으로 확인합니다. 장애 응답만으로 쿠키를 임의로 만료시키지는 않으며, 기존 쿠키가 계속 유효하다는 보장도 없습니다.
+
+### DB 작업 제한 시간
+
+| 설정 | 환경변수 | 로컬·배포 기본값 |
+|---|---|---|
+| `travelpay.user.password-change.transaction-timeout` | `USER_PASSWORD_CHANGE_TRANSACTION_TIMEOUT` | `5s` |
+
+처음 자격 증명을 읽는 트랜잭션과 마지막 잠금 조회·저장 트랜잭션에 각각 적용합니다. 비밀번호 해시 연산·Redis 호출은 이 DB 트랜잭션 밖에서 수행하며, 이 값은 HTTP 요청 전체의 제한 시간이 아닙니다. 1초 이상의 정수 초 단위만 허용하고 잘못된 설정은 앱 시작 시 거절합니다. 기본 5초는 초기 보호값이며 성능 측정으로 정한 최적값은 아닙니다.
 
 ## 내부 API
 
@@ -201,18 +251,18 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 | 응답 캐시 | Spring Security가 `Cache-Control: no-cache, no-store, max-age=0, must-revalidate`를 붙여 인증·개인정보 응답이 저장되지 않게 함 |
 | 회원 상태 확인 | 로그인이 필요한 요청마다 DB에서 현재 상태·권한 확인. 정지·종료 회원은 로그인이 필요한 API 중 로그아웃만 가능 |
 
-### 로그인 시도 제한
+### 로그인·현재 비밀번호 확인 시도 제한
 
-비밀번호 추측을 막기 위해 로그인 실패를 두 단위로 셉니다. 설정은 `travelpay.user.login-attempt`입니다.
+비밀번호 추측을 막기 위해 로그인과 비밀번호 변경의 현재 비밀번호 확인 실패를 함께 셉니다. 같은 이메일·IP의 카운터와 차단을 공유하며 비밀번호 변경용 이메일은 회원 DB에서 가져옵니다. 설정은 `travelpay.user.login-attempt`입니다.
 
 | 단위 | 한도 | 결과 |
 |---|---|---|
 | 같은 이메일 + 같은 IP | 첫 실패부터 10분 안에 5번 실패 | 그 이메일·IP 조합을 20분 동안 `429 COMMON_TOO_MANY_REQUESTS` |
 | 같은 이메일 (IP 무관) | 첫 실패부터 10분 안에 20번 실패 | 그 이메일을 모든 IP에서 20분 동안 429 |
 
-- 실패로 세는 것: 비밀번호 불일치, 없는 이메일. 두 경우 모두 같은 `401 USER_INVALID_CREDENTIALS`라서 이메일 존재 여부를 알 수 없습니다.
+- 실패로 세는 것: 로그인 비밀번호 불일치·없는 이메일, 비밀번호 변경의 현재 비밀번호 불일치. 로그인은 앞의 두 경우 모두 `401 USER_INVALID_CREDENTIALS`, 본인 비밀번호 변경은 `400 USER_CURRENT_PASSWORD_MISMATCH`입니다.
 - 세지 않는 것: 입력 형식 오류(400), 올바른 비밀번호를 입력한 정지·종료 회원(403), 서버·DB·Redis 장애(503).
-- 로그인에 성공하면 그 이메일+IP 실패 횟수는 0이 됩니다. 이메일 전체 횟수는 유지해 여러 IP에 나눈 공격을 계속 셉니다.
+- 올바른 비밀번호 확인을 기록하면 그 이메일+IP 실패 횟수는 0이 됩니다. 비밀번호 변경에서는 이 기록을 DB 쓰기 전에 끝내며, 이후 동일 비밀번호·변경 충돌 거절을 틀린 비밀번호 시도로 세지 않습니다. 이메일 전체 횟수는 유지해 여러 IP에 나눈 공격을 계속 셉니다.
 - 막힌 동안에는 비밀번호를 확인하지 않고 바로 429를 반환합니다.
 - 요청을 동시에 여러 개 보내면, 단위마다 실패 횟수와 아직 끝나지 않은 시도의 합이 한도에 닿은 뒤의 요청은 바로 429입니다. 끝나지 않은 시도는 실패로 확정될 때만 실패 횟수에 더해집니다.
 - 다른 IP의 공격으로 실제 회원이 바로 잠기지 않도록 엄격한 차단은 이메일+IP 단위로 하고, 이메일 단위는 더 높은 한도를 둡니다.
@@ -229,6 +279,8 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 |---|---|---|
 | 400 | `COMMON_INVALID_REQUEST` | 입력 형식 오류. 필드별 안내는 `error.details` |
 | 400 | `USER_TERMS_CONSENT_INVALID` | 필수 약관 누락, 없는 약관·버전 |
+| 400 | `USER_CURRENT_PASSWORD_MISMATCH` | 비밀번호 변경의 현재 비밀번호 불일치 |
+| 400 | `USER_NEW_PASSWORD_SAME_AS_CURRENT` | 새 비밀번호가 현재 비밀번호와 같음 |
 | 401 | `COMMON_UNAUTHORIZED` | 세션 없음·만료(유휴 60분·절대 24시간), 회원 정보 없음 |
 | 401 | `USER_INVALID_CREDENTIALS` | 이메일 없음 또는 비밀번호 불일치 |
 | 403 | `COMMON_CSRF_INVALID` | CSRF 토큰 없음·불일치 |
@@ -237,10 +289,12 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 | 404 | `USER_RECIPIENT_NOT_FOUND`, `USER_NOT_FOUND` | 내부 이름 조회 대상 없음(I02·I03) |
 | 409 | `USER_EMAIL_ALREADY_EXISTS`, `USER_PHONE_ALREADY_EXISTS` | 이미 가입한 이메일·휴대폰 번호 |
 | 409 | `COMMON_CONFLICT` | 같은 세션의 다른 요청이 로그인·로그아웃으로 세션을 바꾼 경우 |
-| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인 시도 제한 또는 I02 요청자별 조회 한도 초과 |
+| 409 | `USER_CREDENTIAL_CONFLICT` | 비밀번호 변경 중 자격 증명 충돌 또는 비밀번호 수단 없음 |
+| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인·현재 비밀번호 확인 시도 제한 또는 I02 요청자별 조회 한도 초과 |
 | 503 | `COMMON_SERVICE_UNAVAILABLE` | DB·Redis 장애, 시행 중인 약관 없음 |
+| 503 | `USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE` | 비밀번호 DB 변경 완료 후 세션 갱신 실패 |
 
-503은 장애를 뜻하므로 기존 세션 쿠키를 지우지 않습니다. 잠시 후 같은 쿠키로 다시 시도할 수 있습니다.
+503은 장애 응답이며 오류 코드로 비밀번호 변경 완료 여부를 구분합니다. 응답만으로 기존 세션 쿠키를 지우지 않습니다. 비밀번호 변경의 부분 성공과 재로그인 방법은 [비밀번호 변경](#비밀번호-변경-b05)을 따릅니다.
 
 ## DB 스키마 (Flyway)
 
@@ -264,6 +318,8 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 ```
 
 테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다.
+
+비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
 
 ## Gateway 연결과 배포 시 신뢰 경계
 
