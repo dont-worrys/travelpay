@@ -8,11 +8,13 @@ import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.transaction.annotation.Transactional;
 
-public interface TransferRepository extends JpaRepository<Transfer, UUID> {
+/** 관리자 목록처럼 선택 조건이 많은 조회는 Specification(JpaSpecificationExecutor)으로 조건을 조합합니다. */
+public interface TransferRepository extends JpaRepository<Transfer, UUID>, JpaSpecificationExecutor<Transfer> {
 
     Optional<Transfer> findBySenderIdAndIdempotencyKey(UUID senderId, String idempotencyKey);
 
@@ -112,6 +114,22 @@ public interface TransferRepository extends JpaRepository<Transfer, UUID> {
               and t.status = com.travelpay.payment.transfer.domain.TransferStatus.PROCESSING
             """)
     int markManualReview(UUID transferId, TransferReviewReason reviewReason, Instant now);
+
+    /**
+     * 운영자 확정: MANUAL_REVIEW 송금만 지정 상태로 바꾸고 변경된 행 수(0 또는 1)를 반환합니다. 검토 사유는 비웁니다.
+     * 실패 사유는 FAILED일 때만 넣고(ck_transfer_failure_reason), 재처리(PROCESSING)로 돌릴 때는 시도 횟수를 0으로 넘깁니다.
+     * 이력 저장과 같은 트랜잭션에서 실행되도록 자체 트랜잭션을 두지 않습니다.
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Transfer t
+            set t.status = :status, t.failureReason = :failureReason, t.reviewReason = null,
+                t.attemptCount = :attemptCount, t.updatedAt = :now
+            where t.id = :transferId
+              and t.status = com.travelpay.payment.transfer.domain.TransferStatus.MANUAL_REVIEW
+            """)
+    int resolveManualReview(UUID transferId, TransferStatus status, TransferFailureReason failureReason,
+            int attemptCount, Instant now);
 
     long countByStatus(TransferStatus status);
 
