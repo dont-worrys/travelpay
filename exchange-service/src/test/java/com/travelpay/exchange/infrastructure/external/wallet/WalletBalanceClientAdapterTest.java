@@ -11,6 +11,7 @@ import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
+import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
@@ -115,6 +116,40 @@ class WalletBalanceClientAdapterTest {
         WalletBalanceFetchException exception =
                 assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
         assertEquals("지갑 잔액 API 호출 실패: HTTP 500", exception.getMessage());
+    }
+
+    /** 지갑이 잔액을 원장에서 읽지 못했다고 알려 주면(#134) 원장 장애로 구분합니다. */
+    @Test
+    void ledgerOutageReportedByWalletIsLedgerUnavailable() {
+        when(feignClient.getBalances(USER_ID)).thenThrow(errorResponse(503, """
+                {"success":false,"data":null,"error":{"code":"WALLET_LEDGER_UNAVAILABLE","message":"잔액 정보를 일시적으로 확인할 수 없습니다."}}
+                """));
+
+        assertThrows(WalletLedgerUnavailableException.class, () -> adapter.read(USER_ID));
+    }
+
+    /** 같은 503이라도 다른 코드면 지갑 장애입니다. 상태 코드만으로 원장 장애라고 판단하지 않습니다. */
+    @Test
+    void otherServiceUnavailableIsWalletFailure() {
+        when(feignClient.getBalances(USER_ID)).thenThrow(errorResponse(503, """
+                {"success":false,"data":null,"error":{"code":"COMMON_SERVICE_UNAVAILABLE","message":"서비스를 일시적으로 사용할 수 없습니다."}}
+                """));
+
+        WalletBalanceFetchException exception =
+                assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
+        assertFalse(exception instanceof WalletLedgerUnavailableException);
+    }
+
+    /** 원장 장애 코드라도 503이 아니면 계약과 다른 응답이라 지갑 장애로 둡니다. */
+    @Test
+    void ledgerCodeWithOtherStatusIsWalletFailure() {
+        when(feignClient.getBalances(USER_ID)).thenThrow(errorResponse(500, """
+                {"success":false,"data":null,"error":{"code":"WALLET_LEDGER_UNAVAILABLE","message":"x"}}
+                """));
+
+        WalletBalanceFetchException exception =
+                assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
+        assertFalse(exception instanceof WalletLedgerUnavailableException);
     }
 
     @Test

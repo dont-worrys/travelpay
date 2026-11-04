@@ -11,6 +11,7 @@ import com.travelpay.exchange.domain.quote.QuoteFixtures;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
+import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
 import org.junit.jupiter.api.Test;
 
 import static com.travelpay.exchange.domain.quote.QuoteFixtures.range;
@@ -79,6 +80,22 @@ class ExchangeLimitQueryServiceTest {
         };
 
         List<ExchangeLimit> limits = new ExchangeLimitQueryService(QuoteFixtures.policy(), failing).findAll(USER_ID);
+
+        assertEquals(List.of(
+                ExchangeLimit.withoutBalance(range(Currency.KRW, 1000, 2_000_000)),
+                ExchangeLimit.withoutBalance(range(Currency.JPY, 100, 200_000)),
+                ExchangeLimit.withoutBalance(range(Currency.CNY, 1000, 1_000_000))
+        ), limits);
+    }
+
+    /** 원장 장애로 잔액을 못 읽어도 지갑 장애와 같게 한도만 응답합니다. 원장 장애를 따로 알리는 것은 환전 신청뿐입니다. */
+    @Test
+    void returnsOnlyLimitsWhenLedgerIsUnavailable() {
+        WalletBalanceReader ledgerDown = userId -> {
+            throw new WalletLedgerUnavailableException("원장 장애");
+        };
+
+        List<ExchangeLimit> limits = new ExchangeLimitQueryService(QuoteFixtures.policy(), ledgerDown).findAll(USER_ID);
 
         assertEquals(List.of(
                 ExchangeLimit.withoutBalance(range(Currency.KRW, 1000, 2_000_000)),

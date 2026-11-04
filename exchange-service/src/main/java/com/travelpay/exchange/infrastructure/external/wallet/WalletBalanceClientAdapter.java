@@ -13,6 +13,7 @@ import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
+import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
 import feign.FeignException;
 import feign.codec.DecodeException;
 import lombok.RequiredArgsConstructor;
@@ -22,6 +23,7 @@ import org.springframework.stereotype.Component;
  * 지갑 서비스의 내부 잔액 API 응답을 환전의 지갑 잔액으로 바꿉니다. 응답 본문은 예외 메시지·로그에 싣지 않습니다.
  * - 2xx: 지갑 서비스의 상태 문자열은 ACTIVE 여부로만 바꾸고, 환전이 지원하지 않는 통화는 건너뜁니다.
  * - 404 WALLET_NOT_FOUND: 지갑 없음 (empty)
+ * - 503 WALLET_LEDGER_UNAVAILABLE: 지갑이 잔액을 원장에서 읽지 못함 (WalletLedgerUnavailableException)
  * - 그 밖의 4xx·5xx·타임아웃·연결 실패·형식 이상: WalletBalanceFetchException
  * 실패를 공통 오류(FeignErrors.toCommonException)로 바꾸지 않는 이유: 잔액을 못 가져와도 한도 조회는 한도만 응답하고,
  * 환전 신청은 지갑 서비스 장애 오류로 응답하는 등 부르는 쪽마다 처리가 달라 이 예외 하나로 알립니다.
@@ -32,6 +34,7 @@ public class WalletBalanceClientAdapter implements WalletBalanceReader {
 
     private static final String ACTIVE = "ACTIVE";
     private static final String WALLET_NOT_FOUND = "WALLET_NOT_FOUND";
+    private static final String WALLET_LEDGER_UNAVAILABLE = "WALLET_LEDGER_UNAVAILABLE";
 
     private final WalletFeignClient feignClient;
 
@@ -52,6 +55,10 @@ public class WalletBalanceClientAdapter implements WalletBalanceReader {
             // 경로가 틀린 404와 구분하려고, 지갑 서비스의 지갑 없음 코드일 때만 지갑이 없다고 봅니다.
             if (e.status() == 404 && FeignErrors.hasErrorCode(e, WALLET_NOT_FOUND)) {
                 return Optional.empty();
+            }
+            // 원장 장애는 지갑 서비스가 전용 코드로 알려 줄 때만 구분합니다. 상태 코드(503)만으로는 지갑 자체 장애와 같습니다.
+            if (e.status() == 503 && FeignErrors.hasErrorCode(e, WALLET_LEDGER_UNAVAILABLE)) {
+                throw new WalletLedgerUnavailableException("지갑 잔액 API 호출 실패: 원장 장애 (HTTP 503)");
             }
             // 타임아웃·연결 실패는 응답이 없어 status가 음수입니다.
             throw callFailed(e.status() < 0 ? "응답 없음" : "HTTP " + e.status());

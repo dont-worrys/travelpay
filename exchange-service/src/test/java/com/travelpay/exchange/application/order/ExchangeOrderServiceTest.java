@@ -32,6 +32,7 @@ import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
+import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -215,6 +216,17 @@ class ExchangeOrderServiceTest {
         assertError(ExchangeOrderErrorCode.WALLET_SERVICE_UNAVAILABLE,
                 () -> service.place(command(quote.getId(), WALLET_ID)));
         verify(orderRepository, never()).save(any());
+    }
+
+    /** 원장이 꺼져 지갑이 잔액을 읽지 못하면, 지갑 장애가 아니라 원장 장애로 알리고 주문을 만들지 않습니다. */
+    @Test
+    void rejectsAsLedgerUnavailableWhenWalletCannotReadLedger() {
+        when(walletBalanceReader.read(USER_ID)).thenThrow(new WalletLedgerUnavailableException("ledger down"));
+
+        assertError(ExchangeOrderErrorCode.LEDGER_UNAVAILABLE,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+        verify(orderRepository, never()).save(any());
+        verify(ledgerProcessor, never()).process(any());
     }
 
     @Test

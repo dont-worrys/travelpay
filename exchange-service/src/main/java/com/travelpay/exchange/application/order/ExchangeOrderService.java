@@ -23,6 +23,7 @@ import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
+import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -133,6 +134,11 @@ public class ExchangeOrderService {
         try {
             wallet = walletBalanceReader.read(userId)
                     .orElseThrow(() -> new BusinessException(ExchangeOrderErrorCode.WALLET_NOT_FOUND));
+        } catch (WalletLedgerUnavailableException e) {
+            // 원장이 꺼져 있으면 지갑이 잔액을 읽지 못해 여기서 막힌다. 주문을 만들지 않고 거절한다.
+            // 받아 두면 원장이 돌아온 뒤 오래된 견적 환율로 체결되므로, 원장 결과를 모를 때만 PROCESSING으로 둔다 (TIL #65 후속 확인)
+            log.warn("원장 장애로 지갑을 확인하지 못해 환전 신청을 받지 않습니다: userId={}, reason={}", userId, e.getMessage());
+            throw new BusinessException(ExchangeOrderErrorCode.LEDGER_UNAVAILABLE, e);
         } catch (WalletBalanceFetchException e) {
             log.warn("지갑을 확인하지 못해 환전 신청을 받지 않습니다: userId={}, reason={}", userId, e.getMessage());
             throw new BusinessException(ExchangeOrderErrorCode.WALLET_SERVICE_UNAVAILABLE, e);
