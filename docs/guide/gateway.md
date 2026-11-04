@@ -2,6 +2,27 @@
 
 Gateway는 브라우저 요청을 받아 User에 세션 검증을 요청하고, 검증된 회원 정보로 업무 서비스에 전달합니다. 브라우저는 User·Wallet 포트에 직접 접속하는 대신 Gateway 주소를 API 기준 주소로 사용합니다.
 
+## 구성 선택과 이유
+
+- **세션 검증은 User에 요청합니다.** Gateway가 세션 Redis 구조를 공유하지 않고 I01로 현재 회원 상태와 역할을 확인합니다. User 자신의 보호 API는 실제 요청에서도 SecurityContext로 인증하므로, Gateway의 회원 헤더를 로그인 근거로 사용하지 않습니다.
+- **외부 회원 헤더는 검증한 값으로 교체합니다.** User-Id·User-Role 위조를 막기 위한 경계입니다. Request-Id는 새로 생성하고 Client-Ip는 신뢰하는 연결의 값으로 판단합니다. 서비스 포트의 외부 접근 제한은 배포 망에서 적용합니다.
+- **추적 정보는 관측 시작 전부터 제한합니다.** 필터가 헤더를 지울 때는 부모 trace가 이미 추출됐을 수 있어, 외부 trace 추출 설정과 전달 헤더를 함께 제한합니다. 내부 호출은 새 traceId를 이어 씁니다.
+- **CORS와 HTTP 오류는 프레임워크 확장점에서 처리합니다.** 별도 OPTIONS 허용 필터를 만들지 않고, 정상 preflight와 실제 API의 인증·CSRF 검사를 구분합니다. 오류 응답에서는 no-store와 Allow 같은 필요한 HTTP 헤더를 유지합니다.
+- **I01의 대기 시간과 업무 호출 시간을 구분합니다.** 연결·읽기·전체 제한은 세션 검증 구간에만 적용해, 검증 후 업무 API가 늦어진 것을 인증 장애로 분류하지 않습니다.
+
+## 파일의 책임
+
+| 파일 | 책임 |
+|---|---|
+| `NormalizedPathFilter` | 우회 해석될 경로 거절 |
+| `InternalHeaderResetFilter` | 외부 내부용·추적 헤더 정리, Request-Id·Client-Ip 작성 |
+| `ClientIpResolver`·`ClientIpProperties` | 신뢰 연결 대역과 IP 형식 확인 |
+| `PublicEndpoints`·`SessionAuthenticationFilter` | 공개 요청 분류와 I01 결과에 따른 전달·거절 |
+| `SessionVerificationClient` | 필요한 헤더만 전달하고 검증 응답을 엄격히 해석 |
+| `SessionVerificationConfiguration`·`SessionVerificationProperties` | 내부 HTTP 클라이언트와 관측·제한 시간 설정 |
+| `GatewayErrorHandler` | 공통 JSON·HTTP 상태·Allow·no-store 처리 |
+| `GatewayCorsConfiguration` | 허용 출처 검증과 프레임워크 CORS 거절 응답 연결 |
+
 ## 주소와 포트
 
 | 용도 | 로컬 기본값 | 배포 기준 |
@@ -14,11 +35,17 @@ Gateway는 브라우저 요청을 받아 User에 세션 검증을 요청하고, 
 
 ## 로컬 실행
 
-1. [.env.example](../../.env.example)을 개인 `.env`로 복사하고 DB·Redis 값을 준비합니다. Compose는 `.env`를 읽고, Spring Boot에는 실행 환경변수로 전달합니다.
+1. `.env.example`을 개인 `.env`로 복사하고 DB·Redis 값을 준비합니다. Compose는 `.env`를 읽고, Spring Boot에는 실행 환경변수로 전달합니다.
 2. `docker compose up -d postgres redis-session`으로 User 기반을 실행합니다.
 3. 각각의 터미널 또는 IntelliJ 실행 설정에서 Eureka → User → 필요한 업무 앱 → Gateway 순서로 실행합니다.
 
+환경 변수는 실행할 앱마다 전달합니다. IntelliJ에서는 각 실행 설정의 환경 파일로 프로젝트 루트의 `.env`를 선택합니다. 로컬 설정을 명시할 때는 실행 인자로 `--spring.config.name=application --spring.profiles.active=default`를 사용합니다. 터미널에서는 아래처럼 환경을 불러온 뒤 각각의 앱을 실행합니다.
+
 ```bash
+set -a
+source .env
+set +a
+
 ./gradlew :eureka-server:bootRun
 ./gradlew :user-service:bootRun
 ```
@@ -46,6 +73,8 @@ GATEWAY_CORS_ALLOWED_ORIGINS=http://localhost:5173 ./gradlew :gateway:bootRun
 
 현재 Gateway는 공개 목록을 제외한 매핑 요청을 I01로 먼저 확인합니다. User 자신의 보호 API도 Gateway를 거치면 이 확인을 받고, 실제 User API에서는 세션의 SecurityContext를 근거로 요청자를 판단합니다. User의 `header-context.enabled`는 `false`입니다.
 
+User 보호 API의 중복 I01 호출을 줄이는 구조는 후속 검토 사항이며 현재 동작에 반영되지 않았습니다. 관리자 API용 `/api/v1/admin/**`도 아직 외부 라우트에 없으므로 관리자 기능 구현 시 User 보안 규칙과 함께 추가해야 합니다.
+
 | 라우트 | 전달 대상 | SESSION 쿠키 |
 |---|---|---|
 | `/api/v1/auth/**`, `/api/v1/terms/**`, `/api/v1/users/**` | User | 전달 |
@@ -53,7 +82,7 @@ GATEWAY_CORS_ALLOWED_ORIGINS=http://localhost:5173 ./gradlew :gateway:bootRun
 | `/api/v1/payments/**`, `/api/v1/transfers/**` | Payment | 제거 |
 | 환율·한도·견적·환전 경로 | Exchange | 제거 |
 
-환전 경로는 `/api/v1/exchange-rates/**`, `/api/v1/exchange-limits/**`, `/api/v1/exchange-quotes/**`, `/api/v1/exchanges/**`입니다. 정확한 매핑은 [application.yml](../../gateway/src/main/resources/application.yml)의 `routes` 목록을 기준으로 합니다. `/internal/**`, `/actuator/**`는 외부 API 라우트에 없습니다.
+환전 경로는 `/api/v1/exchange-rates/**`, `/api/v1/exchange-limits/**`, `/api/v1/exchange-quotes/**`, `/api/v1/exchanges/**`입니다. 정확한 매핑은 실행 시 사용하는 Gateway 설정의 `routes` 목록을 기준으로 합니다. `/internal/**`, `/actuator/**`는 외부 API 라우트에 없습니다.
 
 로그인 없이 통과하는 조합은 다음과 같습니다. 공개 API라도 회원가입·로그인·로그아웃의 CSRF 및 세션 확인은 User가 담당합니다.
 
@@ -120,6 +149,17 @@ const loginResponse = await fetch(`${API_BASE}/api/v1/auth/login`, {
 User의 검증 거절 401·403·409는 상태와 본문을 전달하고, 연결 실패·시간 초과·해석할 수 없는 검증 응답 등은 503입니다. 두 오류 경로 모두 `Cache-Control: no-store`를 적용하고, 일시 장애만으로 SESSION 쿠키를 삭제하지 않습니다. 지원하지 않는 실제 메서드는 405와 Gateway의 `Allow` 목록으로 거절합니다. 업무 API 자체의 메서드·권한 판단은 해당 서비스가 맡습니다.
 
 Gateway 수신 기본 한도는 8KiB이고, User는 로컬·배포 모두 16KiB로 두어 Gateway가 붙이는 내부 헤더의 여유를 확보했습니다. 테스트용 큰 쿠키는 검증 입력이며 실제 앱이 추가 쿠키를 발급하는 구조가 아닙니다.
+
+`Connection`의 hop-by-hop 제거 목록에서도 내부 헤더 이름을 정리합니다. 그래야 Gateway가 새로 만든 헤더가 뒤의 전송 필터에서 다시 삭제되지 않습니다. I01 응답의 역할값도 엄격히 해석해 숫자가 enum 순서로 바뀌어 인증 결과로 받아들여지지 않게 합니다.
+
+## 검증 범위
+
+```bash
+./gradlew :gateway:test
+./gradlew :user-service:test --tests 'com.travelpay.user.presentation.controller.GatewayContractHttpTest'
+```
+
+Gateway HTTP 시험은 실제 Gateway 서버와 User·업무 서비스 대역 사이의 상태·본문·헤더·호출 여부를 확인합니다. User의 `GatewayContractHttpTest`는 실제 User 서버·PostgreSQL·Redis로 I01·Client-Ip·쿠키 등 Gateway가 기대는 계약을 확인합니다. 이 시험은 Gateway 서버를 함께 실행하는 시험이 아닙니다. 전체 연결과 브라우저·배포 동작은 실제 실행 환경을 연결한 뒤 별도로 확인합니다.
 
 ## 내부 추적
 

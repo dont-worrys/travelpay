@@ -1,4 +1,24 @@
-# 공통 응답·오류 사용 방법
+# common 공통 모듈 사용 가이드
+
+`common`은 실행 서버가 아닌 공유 Java 라이브러리입니다. 공통 응답·오류, MVC 요청자 정보 전달, Feign 실패 분류·내부 헤더 전달, 페이징을 제공합니다. 로그인 세션 발급·검증은 User, 외부 요청의 신뢰 경계는 Gateway가 담당합니다.
+
+## 모듈 적용
+
+각 서비스는 기존 멀티 모듈 구성에서 다음 의존성을 사용합니다.
+
+```groovy
+implementation project(':common')
+```
+
+오류 계약은 Spring 타입 없이 HTTP 상태를 `int`로 표현합니다. MVC·Feign·페이징 기능에 필요한 Spring·Feign·Jackson API는 common에서 `compileOnly`로 선언하고, 실행 앱이 필요한 starter를 직접 선택합니다. common 패키지를 앱의 컴포넌트 스캔에 추가할 필요는 없습니다.
+
+## 구성 선택과 이유
+
+- **공통 형식은 한 모듈에서 관리합니다.** 응답·오류·헤더 규격이 서비스마다 달라지는 것을 줄이되, 이메일 중복·잔액 부족 같은 업무 오류는 소유 서비스에 둡니다.
+- **웹 환경별 처리는 조건부로 등록합니다.** MVC 처리기를 각 앱에 복사하지 않고 자동 설정으로 제공하며, WebFlux Gateway는 자기 처리기에서 같은 오류 형식을 사용합니다.
+- **회원 정보 전달과 인증을 구분합니다.** 업무 서비스는 검증된 회원 헤더를 전달받고 User는 자기 세션을 확인합니다. 공통 Provider·Resolver는 이 차이를 유지하면서 컨트롤러에 같은 타입을 전달합니다.
+
+## 공통 응답·오류
 
 JSON 본문이 있는 업무 API는 `success`·`data`·`error` 구조를 사용합니다. 성공하면 `data`에 결과를 담고 `error`는 null, 실패하면 `data`는 null이고 `error`에 오류 정보를 담습니다. 기존 HTTP 상태 코드는 유지합니다.
 
@@ -46,10 +66,13 @@ Gateway 자체 오류도 `ApiResponse.failure(errorResponse)`로 반환합니다
 | ApiResponse | success·data·error로 구성한 공통 응답 |
 | ErrorResponse | code·message·details로 구성한 오류 정보 |
 | AuthHeaders | User-Id·User-Role·Request-Id 헤더 이름 |
+| AuthenticatedUser·AuthRole | 현재 요청자의 내부 회원 UUID와 역할(`USER`·`MASTER`) |
+| CurrentUserProvider·CurrentUserArgumentResolver | 현재 요청자를 조회하고 `@CurrentUser` 매개변수에 전달 |
 | FeignErrors | Feign 호출 실패의 오류 코드 읽기·거절 확인·공통 오류 변환 |
 | InternalHeaderRelayInterceptor | 사용자 요청 중의 Feign 호출에 User-Id·User-Role·Request-Id 전달 |
+| PageResponse·PageableUtils | 페이지 응답과 요청 크기·정렬 검증 |
 
-`common`은 실행 애플리케이션이 아닌 단일 Java 라이브러리입니다. 오류 계약은 Spring 타입 없이 HTTP 상태를 `int`로 표현하고, MVC 오류 처리·자동 설정·Feign 호출에 필요한 Spring·Feign·Jackson API는 `compileOnly`로 선언합니다. 각 실행 앱이 필요한 starter를 직접 선택합니다.
+`AuthHeaders`에는 Gateway·User가 사용하는 `Original-Method`·`Csrf-Token`·`Client-Ip` 이름도 정의되어 있습니다. 헤더 이름을 공유하는 것과 그 값을 신뢰할 수 있는지는 별도의 문제입니다.
 
 ## 서비스별 업무 오류
 
@@ -82,9 +105,9 @@ public enum UserErrorCode implements ErrorCode {
 | 업무 서비스 5개·Mock Bank의 MVC 요청 | common의 error/GlobalExceptionHandler를 조건부 자동 등록 |
 | Gateway의 WebFlux 요청 | gateway의 error/GatewayErrorHandler에서 공통 ApiResponse 실패 응답 작성 |
 | User의 로그인·인가·CSRF 보안 필터 | user-service의 `RestAuthenticationEntryPoint`(인증 실패 401·회원 확인 장애 503)와 `RestAccessDeniedHandler`(CSRF·권한·회원 상태 403)가 공통 실패 응답 작성 |
-| User의 세션 저장소(Redis) 오류 | user-service의 `RedisSessionErrorResponseFilter`가 503, 동시 세션 변경은 409 공통 실패 응답 작성 |
+| User의 세션 저장소(Redis) 오류 | `RedisSessionErrorResponseFilter`가 기본 503·동시 세션 변경 409를 작성. 비밀번호 DB 변경 완료 뒤의 세션 갱신 실패는 User 전용 503으로 구분 |
 
-MVC 처리기는 `ResponseEntityExceptionHandler`를 확장해 요청 검증·JSON 파싱·메소드·미디어 타입 오류의 상태를 유지합니다. 프레임워크의 `Allow` 같은 응답 헤더도 보존합니다. Gateway의 공통 오류 응답 어댑터와 대응 테스트는 오류 계약을 연결하는 범위로 포함합니다. Gateway의 회원 인증·세션 검증 호출 기능은 포함하지 않습니다.
+MVC 처리기는 `ResponseEntityExceptionHandler`를 확장해 요청 검증·JSON 파싱·메소드·미디어 타입 오류의 상태를 유지합니다. 프레임워크의 `Allow` 같은 응답 헤더도 보존합니다. Gateway는 자신의 WebFlux 처리기에서 같은 오류 계약을 사용하며, 인증·세션 검증 호출은 Gateway 모듈이 담당합니다. User의 비밀번호 DB 변경 완료 뒤 세션 갱신이 실패하면 `503 USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE`로 알리고 새 비밀번호로 재로그인하도록 안내합니다.
 
 ## MVC 오류 처리기의 자동 등록
 
@@ -132,7 +155,7 @@ spring:
 
 ## 내부 헤더
 
-`AuthHeaders.USER_ID`, `USER_ROLE`, `REQUEST_ID`를 사용해 헤더 이름을 공유합니다. Gateway 인증을 구현할 때 클라이언트의 User-Id·User-Role을 제거하고 검증한 값으로 다시 구성해야 합니다. Request-Id는 요청 추적용이며 사용자 신원을 증명하지 않습니다.
+`AuthHeaders.USER_ID`, `USER_ROLE`, `REQUEST_ID`를 사용해 헤더 이름을 공유합니다. Gateway는 클라이언트의 User-Id·User-Role을 제거하고 User의 세션 검증 결과로 다시 작성합니다. Request-Id도 Gateway가 새로 생성하며, 사용자 신원을 증명하는 값으로 사용하지 않습니다.
 
 common은 회원 ID·역할을 담는 `AuthenticatedUser`와 현재 요청자를 읽는 `CurrentUserProvider`를 제공합니다. MVC에서는 인터셉터가 회원 헤더의 형식을 검사하고 현재 요청 속성에 저장합니다. Provider는 이 객체를 읽으며, Resolver는 컨트롤러의 `@CurrentUser AuthenticatedUser user` 파라미터에 전달합니다.
 
@@ -165,7 +188,7 @@ Gateway·Eureka·Mock Bank에는 이 활성화 옵션을 추가하지 않습니�
 |---|---|
 | 반환 타입 | 공통 `ApiResponse<응답 DTO>`. DTO에는 호출하는 쪽에 필요한 필드만 둡니다 |
 | 실패 처리 | 어댑터에서 `FeignException`을 잡아 아는 오류 코드만 자기 서비스 오류로 바꾸고, 나머지는 `FeignErrors.toCommonException`으로 바꿉니다 |
-| 재시도 | 자동 재시도하지 않습니다(OpenFeign 기본값). 돈이 움직이는 호출은 호출하는 쪽이 같은 멱등 키로 다시 보냅니다 |
+| 재시도 | Spring Cloud OpenFeign 기본값은 자동 재시도 없음입니다. 별도 Retryer는 클라이언트 설정을 확인하고, 돈이 움직이는 재요청에는 같은 멱등 키를 사용합니다 |
 | 타임아웃 | 클라이언트별로 각 서비스의 YAML에 둡니다 |
 
 ### 실패 처리
@@ -176,10 +199,10 @@ Gateway·Eureka·Mock Bank에는 이 활성화 옵션을 추가하지 않습니�
 |---|---|
 | `errorCode(e)` | 실패 응답의 `error.code`. 본문이 없거나 공통 형식이 아니면 빈 값 |
 | `hasErrorCode(e, code)` | 그 오류 코드인지 확인 |
-| `isRejected(e)` | 상대가 요청을 받아 거절했는지(4xx). 거절된 요청은 적용되지 않았습니다 |
+| `isRejected(e)` | HTTP 상태가 4xx인지 분류. 그 오류가 뜻하는 거절 범위는 상대 API 계약으로 확인 |
 | `toCommonException(e)` | 따로 처리하지 않은 실패를 공통 오류로 바꿉니다 |
 
-거절이 아닌 실패는 상대가 처리했을 수 있습니다. 503과 연결 실패도 마찬가지입니다. 우리 서비스는 결과를 모를 때도(DB 장애 등) 503을 돌려주고, 본문 없는 요청은 JDK가 한 번 더 보내서 상대가 이미 받은 요청도 연결 실패로 보일 수 있습니다. 그래서 돈이 움직이는 호출은 거절이 아닌 실패에서 되돌리지(보상하지) 않고, 같은 멱등 키로 다시 보내거나 결과를 조회합니다. 거절도 그 한 번의 요청에 대한 판단이라, 같은 키로 먼저 보낸 요청의 결과를 몰랐다면 거절만으로 적용된 적이 없다고 볼 수 없습니다.
+시간 초과·503·연결 실패는 상대가 처리했는지 모르는 결과일 수 있습니다. HTTP 상태만으로 DB 롤백을 보장할 수 없으므로, 돈이 움직이는 호출은 그 실패만으로 반대 거래를 실행하지 않고 같은 멱등 키로 재요청하거나 결과를 조회합니다. 상대 계약상 거절이 확인되어도 그 한 번의 요청에 대한 판단입니다. 같은 키로 먼저 보낸 요청의 결과를 몰랐다면 나중의 거절만으로 한 번도 적용되지 않았다고 판단하지 않습니다.
 
 `toCommonException`의 변환 규칙입니다. 개별 서비스의 업무 오류 코드는 그대로 내보내지 않고, 알려진 공통 호출 제한 오류는 상태와 코드를 확인해 유지합니다.
 
@@ -192,16 +215,19 @@ Gateway·Eureka·Mock Bank에는 이 활성화 옵션을 추가하지 않습니�
 
 HTTP 429라도 오류 코드가 다르거나 본문에서 코드를 읽을 수 없으면 기존 분류를 유지합니다. `Retry-After` 때문에 Feign 예외가 감싸져도 내부 응답의 코드를 읽어 같은 규칙을 적용합니다. 이 함수는 오류 분류를 담당하며, 자동 재시도와 `Retry-After` 응답 헤더 전달은 별도 정책입니다.
 
+회원 없음처럼 업무 의미가 있는 실패는 호출 서비스가 **HTTP 상태와 오류 코드**를 함께 확인합니다. 다음은 I02 수취인 조회 어댑터의 실패 분기 예시입니다.
+
 ```java
-try {
-    return userClient.getFundingIdentity(userId, userId, AuthRole.USER.name()).data();
-} catch (FeignException e) {
-    if (FeignErrors.hasErrorCode(e, "USER_NOT_FOUND")) {
-        throw new BusinessException(WalletErrorCode.CHARGE_USER_NOT_ACTIVE, e);
+catch (FeignException exception) {
+    if (exception.status() == 404
+            && FeignErrors.hasErrorCode(exception, "USER_RECIPIENT_NOT_FOUND")) {
+        return Optional.empty();
     }
-    throw FeignErrors.toCommonException(e);
+    throw FeignErrors.toCommonException(exception);
 }
 ```
+
+429는 위 공통 변환이 처리하므로 호출부에 동일한 분기를 반복해서 추가할 필요가 없습니다. 회원 조회의 업무 오류는 해당 API가 정한 HTTP 상태와 오류 코드의 의미를 함께 확인합니다.
 
 ### 내부 헤더 전달
 
@@ -214,10 +240,34 @@ try {
 
 - 클라이언트 메서드가 직접 지정한 헤더는 덮어쓰지 않습니다. `User-Id`·`User-Role`은 한 쌍이라 하나라도 지정하면 둘 다 그대로 둡니다.
 - Kafka 소비자·스케줄러처럼 들어온 요청이 없는 호출에는 붙지 않습니다. 이런 호출에서 요청자가 필요하면 `@RequestHeader(AuthHeaders.USER_ID)`·`@RequestHeader(AuthHeaders.USER_ROLE)`로 직접 보냅니다.
-- `User-Id`·`User-Role`은 요청을 시작한 사용자입니다. 받는 쪽은 대상 회원을 경로·파라미터로 받고, 이 값으로 소유권을 판단하지 않습니다. 예를 들어 송금 중 받는 사람의 지갑을 조회해도 보내는 사람의 정보가 붙습니다.
+- `User-Id`·`User-Role`은 요청자 정보이고, 대상 회원은 경로·파라미터로 따로 받습니다. 각 API는 계약에 따라 요청자와 대상의 소유권·권한 관계를 검사합니다. 예를 들어 수취인 지갑을 조회해도 헤더에는 송금인 정보가 붙고, I03 본인 조회에서는 요청자와 대상 ID가 같아야 합니다.
 - 요청자가 반드시 필요한 내부 API는 헤더가 없으면 거절합니다. 그래야 호출 위치가 바뀌어 헤더가 빠졌을 때 바로 드러납니다.
-- `Request-Id`는 아직 만드는 곳이 없어서, 들어온 요청에 값이 있을 때만 전달됩니다.
+- Gateway를 통과한 요청은 Gateway가 생성한 `Request-Id`를 전달받습니다. 인터셉터 자체는 ID를 생성하지 않으므로 값이 없는 직접 호출에는 추가하지 않습니다.
 
 서비스가 `InternalHeaderRelayInterceptor` 빈을 직접 등록하면 기본 빈을 추가하지 않습니다. 자동 등록을 제외하려면 `spring.autoconfigure.exclude`에 `com.travelpay.common.config.CommonFeignAutoConfiguration`을 지정합니다.
+
+## 페이징
+
+페이지 요청은 `PageableUtils.toStablePageable`로 크기와 정렬을 확인할 수 있습니다. 아래 `pageable`은 요청에서 받은 Pageable이며, 허용 필드와 최대 100건은 사용 예시입니다. 각 API가 실제 조회 필드와 정책을 지정합니다.
+
+```java
+var normalized = PageableUtils.toStablePageable(
+        pageable, Set.of("createdAt", "id"), "id", 100);
+```
+
+- 페이지 크기는 지정한 최댓값으로 제한하고, 허용하지 않은 정렬 필드와 unpaged 요청은 400으로 거절합니다.
+- 동률의 순서를 정하기 위해 서버가 지정한 고유 필드를 마지막 정렬 기준에 추가합니다. 실제 조회 대상의 NULL 없는 고유 속성을 지정해야 하며, 클라이언트 허용 정렬 목록과는 별개입니다.
+- 정렬이 안정적이어도 페이지 조회 사이의 데이터 추가·삭제까지 방지하지는 않습니다.
+- 조회 결과 `Page<T>`는 `PageResponse.from(page)`로 변환합니다. DTO 변환이 필요하면 `PageResponse.from(page, mapper)`를 사용합니다.
+
+`PageResponse`는 `items`·`page`·`size`·`totalElements`·`totalPages`를 담습니다. page는 0부터 시작하며, 컨트롤러는 필요에 따라 `ApiResponse.success(pageResponse)`로 감쌉니다.
+
+## 검증
+
+```bash
+./gradlew :common:test
+```
+
+common 테스트는 응답·오류 계약, 요청자 헤더 파싱과 Provider·Resolver 연결, 조건부 자동 등록, Feign 오류·헤더 전달, 페이징을 확인합니다. 각 앱의 인증·DB·세션 연동은 해당 서비스 테스트에서 확인하며, 서비스 사용법의 확인 기준은 그 서비스 가이드를 따릅니다.
 
 근거: [Spring MVC 예외 처리 확장](https://docs.spring.io/spring-framework/docs/current/javadoc-api/org/springframework/web/servlet/mvc/method/annotation/ResponseEntityExceptionHandler.html), [Spring Boot의 Jackson 3 지원](https://docs.spring.io/spring-boot/reference/features/json.html), [Spring Cloud OpenFeign 기본 설정](https://docs.spring.io/spring-cloud-openfeign/reference/spring-cloud-openfeign.html)
