@@ -14,7 +14,6 @@ import feign.Request;
 import feign.RetryableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,7 +39,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 원장이 돌아오면 복구가 같은 reference로 확정하는지 검증합니다.
  * 원장 Feign 호출 결과만 Mock이고 TransferLedgerClientAdapter의 장애 분류부터 DB·API 응답까지는 실제 코드입니다.
  */
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
 class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport {
 
     private static final String LEDGER_URL = "http://ledger-service/internal/v1/ledger/transactions";
@@ -51,7 +49,7 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
     @BeforeEach
     void requireNoOtherProcessing() {
         // 복구는 DB의 모든 처리 중 송금을 다루므로, 다른 처리 중 송금이 있으면 결과가 섞여 실행하지 않습니다.
-        assumeTrue(countByStatus("PROCESSING") == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다.");
+        assumeTrue(countByStatus("PROCESSING") == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
     }
 
     /** TC-08-I1~I6: 장애 종류별로 202 PROCESSING, 시도 1, 실패 사유 없음. 장애 내용은 응답에 노출하지 않습니다. */

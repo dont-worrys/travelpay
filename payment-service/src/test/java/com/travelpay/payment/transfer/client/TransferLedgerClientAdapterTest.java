@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignConfig;
@@ -159,6 +161,7 @@ class TransferLedgerClientAdapterTest {
     void reportsUnreadableSuccessResponseAsResultUnknown() {
         assertResultUnknownFor(null);
         assertResultUnknownFor(new ApiResponse<>(true, null, null));
+        assertResultUnknownFor(new ApiResponse<>(false, null, ErrorResponse.of(CommonErrorCode.INTERNAL_SERVER_ERROR)));
         assertResultUnknownFor(ApiResponse.success(new LedgerFeignApi.TransactionResponse(null, "POSTED")));
         assertResultUnknownFor(ApiResponse.success(new LedgerFeignApi.TransactionResponse(TRANSACTION_ID, "REJECTED")));
     }

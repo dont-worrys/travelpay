@@ -377,14 +377,10 @@ PROCESSING ──원장 반영──▶ COMPLETED
 ```
 
 - 단위 테스트는 DB 없이 실행됩니다. 원장은 테스트 안의 Mock으로 연결해 응답별 상태 처리, 재전송 때 잔액이 한 번만 바뀌는지, 복구 스케줄러 동작을 확인합니다.
-- DB 통합 테스트(`TransferRepositoryIntegrationTest`, `TransferApiDocsIntegrationTest`, `integration` 패키지 등)는 로컬 compose PostgreSQL을 쓰며 `PAYMENT_DB_URL`이 있을 때만 실행됩니다. 없으면 건너뜁니다. 테스트마다 롤백하고 복구·정산 스케줄러는 끈 상태로 돕니다.
-
-  ```bash
-  set -a; source .env; set +a
-  ./gradlew :payment-service:test --tests "com.travelpay.payment.transfer.*" --rerun
-  ```
-
-  환경 변수는 Gradle의 테스트 입력이 아니어서, 이전에 건너뛴 결과가 재사용되지 않도록 `--rerun`을 붙입니다.
+- DB 통합 테스트(`TransferRepositoryIntegrationTest`, `TransferApiDocsIntegrationTest`, `integration` 패키지 등)는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway 마이그레이션을 적용해 실행합니다. `.env`나 로컬 compose DB는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다.
+  - 컨테이너는 테스트 실행마다 한 번만 띄워 여러 테스트 클래스가 함께 씁니다(`com.travelpay.payment.support.PostgresContainerSupport`). 새 DB 통합 테스트는 이 클래스를 상속합니다.
+  - 테스트마다 롤백하고 복구·정산 스케줄러는 끈 상태로 돕니다.
+- 커버리지 리포트(JaCoCo)는 테스트 후 `payment-service/build/reports/jacoco/test/html/index.html`에 생성됩니다.
 
 ## Gateway 연결과 신뢰 경계
 
@@ -407,4 +403,3 @@ PROCESSING ──원장 반영──▶ COMPLETED
 | 잔액 사전 조회 | 하지 않음. 잔액 부족은 원장 거절로만 판단 | 원장 잔액 조회로 빠르게 거절할지 |
 | `MASTER` 역할 | payment-service가 `User-Role`을 검사하지 않아 송금 API 사용 가능(wallet-service는 403) | 송금에서 차단할지 |
 | 송금 API 호출 제한 | 없음 | Gateway 또는 송금 API에서 사용자 단위 제한을 둘지 |
-| CI DB 통합 테스트 | payment-service에 Testcontainers가 없어 CI에서는 건너뜀 | Testcontainers 도입 |

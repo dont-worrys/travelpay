@@ -149,11 +149,12 @@ class TransferWalletReaderTest {
     @Test
     void reportsUnexpectedResponseBodyAsBadGateway() {
         when(walletFeignApi.getWallet(USER_ID))
+                .thenReturn(null)
                 .thenReturn(new ApiResponse<>(false, null, ErrorResponse.of(CommonErrorCode.INTERNAL_SERVER_ERROR)))
                 .thenReturn(ApiResponse.success(null))
                 .thenReturn(ApiResponse.success(new WalletFeignApi.WalletResponse(null, "ACTIVE")));
 
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             var exception = assertThrows(BusinessException.class, () -> walletReader.findActiveWalletId(USER_ID));
             assertSame(CommonErrorCode.BAD_GATEWAY, exception.getErrorCode());
         }

@@ -12,7 +12,6 @@ import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferRepository;
 import com.travelpay.payment.transfer.support.TransferApiIntegrationSupport;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,7 +27,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * TC-25: 송금 목록 API(GET /api/v1/transfers)의 페이지네이션·방향 필터·정렬·사용자 범위를 실제 DB와 실제 MVC 구성으로 검증합니다.
  * 데이터는 이 테스트가 무작위 회원 ID로 만들고 롤백합니다.
  */
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
 class TransferListApiIntegrationTest extends TransferApiIntegrationSupport {
 
     private static final String REQUEST_HASH = "0".repeat(64);

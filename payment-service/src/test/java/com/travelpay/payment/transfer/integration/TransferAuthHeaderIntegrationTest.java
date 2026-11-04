@@ -7,7 +7,6 @@ import com.travelpay.common.auth.AuthHeaders;
 import com.travelpay.payment.transfer.controller.TransferController;
 import com.travelpay.payment.transfer.support.TransferApiIntegrationSupport;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -30,7 +29,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 그 회원 범위로만 동작하는지 실제 MVC 구성(common CurrentUserHeaderInterceptor 포함)과 DB로 검증합니다.
  * 세션 검증·브라우저가 보낸 회원 헤더 제거는 Gateway(인프라 담당) 책임이며 이 테스트의 대상이 아닙니다.
  */
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
 class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
 
     /** TC-26-I1: 회원 헤더가 없으면 5개 API 모두 401 COMMON_UNAUTHORIZED이고 다른 서비스를 호출하지 않습니다. */

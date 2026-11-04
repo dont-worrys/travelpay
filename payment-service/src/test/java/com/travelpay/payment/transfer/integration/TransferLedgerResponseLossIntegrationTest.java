@@ -14,7 +14,6 @@ import feign.Request;
 import feign.RetryableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -31,7 +30,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 같은 reference의 재요청에는 처리 없이 처음 결과(200, 같은 거래 ID 또는 같은 422)를 돌려줍니다(원장 PR #37의 reference 멱등 계약).
  * 실제 원장의 멱등성은 2026-11-02 로컬 E2E(원장 직접 재전송 2회 → 같은 transactionId)로 확인된 사실을 전제로 합니다.
  */
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
 class TransferLedgerResponseLossIntegrationTest extends TransferApiIntegrationSupport {
 
     @Autowired
@@ -43,7 +41,7 @@ class TransferLedgerResponseLossIntegrationTest extends TransferApiIntegrationSu
 
     @BeforeEach
     void requireNoOtherProcessing() {
-        assumeTrue(countByStatus("PROCESSING") == 0, "로컬 DB에 PROCESSING 송금이 없어야 합니다.");
+        assumeTrue(countByStatus("PROCESSING") == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
     }
 
     /** TC-09-I1: 응답 유실 → 202 PROCESSING. 복구가 같은 reference·내용으로 재전송해 같은 거래 ID로 COMPLETED, 원장 반영은 1회입니다. */
