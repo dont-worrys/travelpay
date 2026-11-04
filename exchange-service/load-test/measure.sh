@@ -2,8 +2,10 @@
 # 동시 요청 수 한 단계를 측정합니다: 앱 재시작 → 이력 적재 → k6 실행(그동안 DB·커넥션 지표를 1초마다 기록) → 결과 정리.
 # 측정 DB·앱·k6는 compose.yaml로 같은 Docker 네트워크에 띄웁니다(jar는 먼저 빌드). 자세한 순서는 README.md를 봅니다.
 #
-# 사용법: ./measure.sh <LABEL> <VUS> [HOURS]
-#   예: ./measure.sh db 50      → results/db-vus50.json(k6) + results/db-vus50-db.json(DB 지표)
+# 사용법: [SCRIPT=<k6 스크립트>] ./measure.sh <LABEL> <VUS> [HOURS]
+#   예: ./measure.sh db 50                               → 환율 조회 (기본 SCRIPT=rate-query.js)
+#       SCRIPT=quote-issue.js ./measure.sh quote-db 50   → 견적 발급
+#   결과: results/<LABEL>-vus<VUS>.json(k6) + results/<LABEL>-vus<VUS>-db.json(DB 지표)
 #
 # DB 지표는 측정 구간(k6가 실제로 시작한 시각 + 예열 ~ 그로부터 측정 시간)의 1초 간격 표본으로 계산합니다.
 # 표본이 없거나 측정 구간 전체를 덮지 못하면(지표를 못 읽음, 수집기가 먼저 끝남) 0이나 일부 구간으로 채우지 않고 실패로 끝냅니다.
@@ -11,6 +13,7 @@
 #   연결 얻는 시간: hikaricp_connections_acquire_seconds 합계·횟수의 구간 차이로 평균 (_max는 앞 실행 값을 들고 있어 쓰지 않음)
 #   DB 활성 세션: pg_stat_activity에서 state=active인 세션 수(이 조회 자신은 제외)의 평균·최대
 #   환율 조회 쿼리 수: pg_stat_statements의 exchange_rates SELECT 호출 수 합 (예열·수집기 포함, 검산용)
+#   견적 행 수: exchange_quotes 행 수 (all = 예열 포함 전체, measure = created_at이 측정 구간 안). 환율 조회 측정이면 0
 set -euo pipefail
 
 LABEL=${1:?LABEL(db/redis)을 주세요}
@@ -18,10 +21,15 @@ VUS=${2:?VUS(50/100/300)를 주세요}
 HOURS=${3:-24}
 WARMUP_SECONDS=${WARMUP_SECONDS:-15}
 MEASURE_SECONDS=${MEASURE_SECONDS:-60}
+SCRIPT=${SCRIPT:-rate-query.js}
 
 cd "$(dirname "$0")"
 export MSYS_NO_PATHCONV=1   # Windows Git Bash가 컨테이너 안 경로(/load-test/...)를 바꾸지 않게
 mkdir -p results
+if [ ! -f "$SCRIPT" ]; then
+    echo "k6 스크립트가 없습니다: $SCRIPT (rate-query.js / quote-issue.js)" >&2
+    exit 1
+fi
 hikari_samples="results/${LABEL}-vus${VUS}-hikari.tsv"
 session_samples="results/${LABEL}-vus${VUS}-sessions.tsv"
 summary="results/${LABEL}-vus${VUS}-db.json"
@@ -39,7 +47,7 @@ docker compose --profile app up -d --force-recreate --wait app >/dev/null 2>&1
 echo "[2/4] 환율 이력 적재 (hours=${HOURS})"
 psql_q -v hours="${HOURS}" -f /load-test/seed-rate-history.sql >/dev/null
 
-echo "[3/4] k6 실행 (VUS=${VUS}), DB 지표 1초 간격 기록"
+echo "[3/4] k6 실행 (${SCRIPT}, VUS=${VUS}), DB 지표 1초 간격 기록"
 # 지표는 Docker 네트워크 안에서 읽는다(앱 컨테이너 안에서 curl). PC에서 읽으면 포트 전달을 지나 표본이 빠짐.
 # 수집기는 정해진 시간이 지나면 스스로 끝난다(Windows에서는 백그라운드 docker를 kill로 멈출 수 없음).
 collect_seconds=$((WARMUP_SECONDS + MEASURE_SECONDS + 15))   # k6 컨테이너가 뜨는 시간 여유
@@ -62,7 +70,7 @@ printf "SELECT extract(epoch FROM now())::bigint, count(*) FROM pg_stat_activity
 session_pid=$!
 
 docker compose run --rm -e VUS="${VUS}" -e LABEL="${LABEL}" -e WARMUP="${WARMUP_SECONDS}s" \
-    -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet /scripts/rate-query.js
+    -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet "/scripts/${SCRIPT}"
 k6_ended=$(date +%s)
 
 # 측정 구간은 k6가 실제로 테스트를 시작한 시각에서 계산한다. 컨테이너 생성·이미지 내려받기에 걸린 시간과 상관없이
@@ -81,10 +89,14 @@ wait "$session_pid" 2>/dev/null || true
 
 echo "[4/4] DB 지표 정리"
 rate_selects=$(psql_q -c "SELECT coalesce(sum(calls), 0) FROM public.pg_stat_statements WHERE query ILIKE 'select%' AND query ILIKE '%exchange_rates%'")
+# 견적 행 수. 측정 직전 적재 SQL이 견적 테이블을 비우므로 all = 이번 실행(예열 포함)에서 만든 견적이다
+quote_rows=$(psql_q -F ' ' -c "SELECT count(*), count(*) FILTER (WHERE created_at >= to_timestamp(${measure_from}) AND created_at < to_timestamp(${measure_to})) FROM exchange_service.exchange_quotes")
+quote_all=${quote_rows% *}
+quote_measure=${quote_rows#* }
 
 # 측정 구간 표본만 골라 평균·최대를 낸다
 awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects" \
-    -v label="$LABEL" -v vus="$VUS" '
+    -v quoteAll="$quote_all" -v quoteMeasure="$quote_measure" -v label="$LABEL" -v vus="$VUS" '
     FNR == 1 { file++ }
     $1 < from || $1 > to || $2 == "" { next }
     # 커넥션 풀 표본은 지표 6개가 모두 있어야 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 더해져
@@ -137,6 +149,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         # PC 전체(system)와 환전 서비스 JVM(app)의 CPU 사용률. 한 PC에서 k6·Docker·DB와 CPU를 나눠 쓰는지 본다
         printf "  \"cpuPercent\": {\"systemAvg\": %.1f, \"systemMax\": %.1f, \"appAvg\": %.1f},\n", sys / n * 100, sysMax * 100, proc / n * 100
         printf "  \"dbActiveSessions\": {\"avg\": %.2f, \"max\": %d},\n", (m ? ses / m : 0), sesMax
+        printf "  \"quoteRows\": {\"all\": %d, \"measure\": %d},\n", quoteAll, quoteMeasure
         printf "  \"rateSelectCalls\": %d\n", selects
         printf "}\n"
     }' "$hikari_samples" "$session_samples" >"$summary.tmp" || {

@@ -62,7 +62,8 @@ services:
       - "127.0.0.1:18084:18084"
       - "127.0.0.1:18085:18085"
     volumes:
-      - ../build/libs/exchange-service-0.0.1-SNAPSHOT.jar:/app/exchange-service.jar:ro
+      # 측정할 jar. 버전끼리 비교할 때는 커밋별로 빌드한 jar를 APP_JAR로 바꿔 끼운다 (README "버전별 jar로 비교")
+      - ${APP_JAR:-../build/libs/exchange-service-0.0.1-SNAPSHOT.jar}:/app/exchange-service.jar:ro
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:18085/actuator/health"]
       interval: 2s
