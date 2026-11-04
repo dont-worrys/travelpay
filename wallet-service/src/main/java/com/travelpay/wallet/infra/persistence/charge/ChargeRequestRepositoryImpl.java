@@ -9,6 +9,8 @@ import com.travelpay.wallet.domain.charge.DuplicateChargeRequestException;
 import lombok.RequiredArgsConstructor;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
@@ -81,6 +83,18 @@ public class ChargeRequestRepositoryImpl implements ChargeRequestRepository {
     @Override
     public int claimForRecovery(UUID chargeId, ChargeStatus status, Instant updatedAt) {
         return jpaRepository.claimForRecovery(chargeId, status.name(), updatedAt);
+    }
+
+    @Override
+    public Page<ChargeRequest> findByUser(UUID userId, ChargeStatus status, Instant from, Instant to,
+                                          Pageable pageable) {
+        return jpaRepository.findByUser(userId, status, from, to, pageable);
+    }
+
+    @Override
+    public Page<ChargeRequest> search(UUID userId, ChargeStatus status, Instant from, Instant to,
+                                      Pageable pageable) {
+        return jpaRepository.search(userId, status, from, to, pageable);
     }
 
     private static boolean isIdempotencyViolation(Throwable exception) {
