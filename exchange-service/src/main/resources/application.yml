@@ -11,6 +11,12 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  task:
+    scheduling:
+      pool:
+        # 기본 1스레드면 주문 복구(원장 호출 최대 50건 × 약 7초)가 길어질 때 환율 수집이 멈춘다.
+        # mock 모드는 환율이 30초 넘게 오래되면 견적을 막으므로, 수집과 복구가 서로 기다리지 않게 둘로 나눈다
+        size: 2
   cloud:
     openfeign:
       client:
@@ -20,6 +26,7 @@ spring:
             connect-timeout: 2000
             read-timeout: 3000
           # 원장 최대 응답(약 5초)까지 기다린다. 넘으면 결과 모름으로 두고 복구 스케줄러가 같은 요청을 다시 보낸다.
+          # 선점 유효 기간(10초)이 이 값(최대 약 7초)보다 길다는 전제라, application-prod.yml에도 같은 값을 둔다
           ledger-service:
             connect-timeout: 2000
             read-timeout: 5000
