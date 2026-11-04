@@ -9,8 +9,11 @@ import com.travelpay.bank.domain.transaction.BankTransactionType;
 import lombok.RequiredArgsConstructor;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -54,6 +57,11 @@ public class BankTransactionRepositoryImpl implements BankTransactionRepository 
     public boolean existsSucceededRefund(UUID originalTxId) {
         return bankTransactionJpaRepository.existsByOriginalTxIdAndTypeAndStatus(
                 originalTxId, BankTransactionType.REFUND, BankTransactionStatus.SUCCEEDED);
+    }
+
+    @Override
+    public Page<BankTransaction> findCreatedBetween(Instant from, Instant to, Pageable pageable) {
+        return bankTransactionJpaRepository.findByCreatedAtGreaterThanEqualAndCreatedAtLessThan(from, to, pageable);
     }
 
     /** Hibernate가 뽑은 제약 이름을 우선 쓰고, 없으면 원인 메시지에서 찾는다. */

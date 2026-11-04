@@ -1,5 +1,9 @@
 package com.travelpay.bank.domain.transaction;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -17,4 +21,7 @@ public interface BankTransactionRepository {
     Optional<BankTransaction> findById(UUID id);
 
     boolean existsSucceededRefund(UUID originalTxId);
+
+    /** created_at이 [from, to) 범위인 거래 */
+    Page<BankTransaction> findCreatedBetween(Instant from, Instant to, Pageable pageable);
 }

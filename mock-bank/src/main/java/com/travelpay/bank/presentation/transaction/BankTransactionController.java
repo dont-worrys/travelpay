@@ -9,6 +9,7 @@ import com.travelpay.bank.presentation.transaction.dto.BankRefundRequest;
 import com.travelpay.bank.presentation.transaction.dto.BankTransactionResponse;
 import com.travelpay.bank.presentation.transaction.dto.BankWithdrawalRequest;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.common.response.PageResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -18,7 +19,10 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.Instant;
 
 /**
  * 신규 성공 201, 신규 업무 거절 200 + FAILED, 같은 requestId 재요청 200 + 기존 결과.
@@ -43,6 +47,20 @@ public class BankTransactionController {
     public ResponseEntity<ApiResponse<BankTransactionResponse>> refund(
             @Valid @RequestBody BankRefundRequest request) {
         return respond(refundService.refund(request.toCommand()));
+    }
+
+    /**
+     * 기간 목록 [from, to). 정렬은 고정이라 Pageable·sort를 받지 않는다.
+     * 마이크로초보다 세밀한 시각은 다음 마이크로초로 올려 조회한다 (범위 [from, to)는 그대로).
+     */
+    @GetMapping("/transactions")
+    public ApiResponse<PageResponse<BankTransactionResponse>> list(
+            @RequestParam Instant from,
+            @RequestParam Instant to,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer size) {
+        return ApiResponse.success(
+                PageResponse.from(queryService.findPage(from, to, page, size), BankTransactionResponse::from));
     }
 
     @GetMapping("/transactions/{requestId}")
