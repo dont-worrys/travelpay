@@ -15,6 +15,8 @@ public enum ExchangeOrderErrorCode implements ErrorCode {
     WALLET_NOT_AVAILABLE("EXCHANGE_WALLET_NOT_AVAILABLE", "지금은 이 지갑으로 환전할 수 없습니다.", 409),
     WALLET_SERVICE_UNAVAILABLE("EXCHANGE_WALLET_SERVICE_UNAVAILABLE",
             "지금은 지갑을 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503),
+    LEDGER_UNAVAILABLE("EXCHANGE_LEDGER_UNAVAILABLE",
+            "지금은 환전할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503),
     LEDGER_REJECTED_INSUFFICIENT_BALANCE("EXCHANGE_LEDGER_REJECTED_INSUFFICIENT_BALANCE",
             "잔액이 부족해 환전하지 못했습니다.", 422),
     LEDGER_REJECTED_WALLET_SUSPENDED("EXCHANGE_LEDGER_REJECTED_WALLET_SUSPENDED",
