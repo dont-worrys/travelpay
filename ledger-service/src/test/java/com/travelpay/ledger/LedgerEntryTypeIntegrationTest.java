@@ -1,6 +1,15 @@
 package com.travelpay.ledger;
 
+import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.ledger.application.transaction.LedgerTransactionService;
+import com.travelpay.ledger.application.transaction.dto.RegisterTransactionCommand;
+import com.travelpay.ledger.domain.Currency;
+import com.travelpay.ledger.domain.account.AccountType;
+import com.travelpay.ledger.domain.account.OwnerType;
+import com.travelpay.ledger.domain.transaction.Direction;
 import com.travelpay.ledger.domain.transaction.EntryType;
+import com.travelpay.ledger.domain.transaction.ReferenceType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -27,6 +36,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -64,6 +74,9 @@ class LedgerEntryTypeIntegrationTest {
 
     @Autowired
     private JsonMapper jsonMapper;
+
+    @Autowired
+    private LedgerTransactionService transactionService;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
@@ -125,6 +138,63 @@ class LedgerEntryTypeIntegrationTest {
         assertEquals(balanceBefore, walletBalance(walletId));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "\"0\""})
+    void entryType에_숫자나_숫자_문자열은_400이다(String entryTypeLiteral) throws Exception {
+        UUID walletId = openWallet();
+        UUID referenceId = UUID.randomUUID();
+
+        HttpResponse<String> response = registerRaw(referenceId, walletId, Map.of("entryType", entryTypeLiteral));
+
+        assertInvalidAndNothingRecorded(response, referenceId);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"referenceType", "ownerType", "accountType", "currency", "direction"})
+    void 다른_enum_필드에도_숫자는_400이다(String field) throws Exception {
+        UUID walletId = openWallet();
+        UUID referenceId = UUID.randomUUID();
+
+        HttpResponse<String> response = registerRaw(referenceId, walletId, Map.of(field, "0"));
+
+        assertInvalidAndNothingRecorded(response, referenceId);
+    }
+
+    @Test
+    void 정상_문자열_enum_값은_그대로_등록된다() throws Exception {
+        UUID walletId = openWallet();
+        UUID referenceId = UUID.randomUUID();
+
+        HttpResponse<String> response = registerRaw(referenceId, walletId,
+                Map.of("currency", quoted("KRW"), "entryType", quoted("CHARGE_IN")));
+
+        assertEquals(201, response.statusCode(), response.body());
+        assertEquals(List.of("CHARGE_IN", "CHARGE_IN"), entryTypesOf(referenceId));
+        assertEquals(AMOUNT, walletBalance(walletId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CHARGE", "charge_in"})
+    void 서비스에_허용_밖_entryType_명령이_오면_DB에_닿기_전에_거절한다(String entryType) throws Exception {
+        UUID walletId = openWallet();
+        UUID referenceId = UUID.randomUUID();
+        long balanceBefore = walletBalance(walletId);
+        RegisterTransactionCommand command = new RegisterTransactionCommand(
+                ReferenceType.CHARGE, referenceId, null, null, null, List.of(
+                new RegisterTransactionCommand.Entry(OwnerType.SYSTEM, null, AccountType.CHARGE_SOURCE,
+                        Currency.KRW, Direction.DEBIT, AMOUNT, entryType),
+                new RegisterTransactionCommand.Entry(OwnerType.USER, walletId, null,
+                        Currency.KRW, Direction.CREDIT, AMOUNT, entryType)));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> transactionService.register(command));
+
+        assertEquals(CommonErrorCode.INVALID_REQUEST, exception.getErrorCode());
+        assertEquals(0, transactionCountOf(referenceId));
+        assertEquals(List.of(), entryTypesOf(referenceId));
+        assertEquals(balanceBefore, walletBalance(walletId));
+    }
+
     private UUID openWallet() throws Exception {
         UUID walletId = UUID.randomUUID();
         HttpResponse<String> response = post("/internal/v1/ledger/accounts",
@@ -133,21 +203,49 @@ class LedgerEntryTypeIntegrationTest {
         return walletId;
     }
 
-    /** 충전 자금원(SYSTEM, 음수 허용) DEBIT → 지갑 KRW CREDIT. 두 항목 모두 같은 entryType */
     private HttpResponse<String> register(UUID referenceId, UUID walletId, String entryType) throws Exception {
+        return registerRaw(referenceId, walletId, Map.of("entryType", quoted(entryType)));
+    }
+
+    /**
+     * 충전 자금원(SYSTEM, 음수 허용) DEBIT → 지갑 KRW CREDIT. 두 항목 모두 같은 entryType·currency.
+     * overrides는 enum 필드 이름 → JSON 리터럴(따옴표 포함 문자열 또는 숫자). ownerType·accountType·direction은 SYSTEM 항목에만 적용
+     */
+    private HttpResponse<String> registerRaw(UUID referenceId, UUID walletId, Map<String, String> overrides)
+            throws Exception {
         String body = """
                 {
-                  "referenceType": "CHARGE",
+                  "referenceType": %s,
                   "referenceId": "%s",
                   "entries": [
-                    {"ownerType": "SYSTEM", "accountType": "CHARGE_SOURCE", "currency": "KRW",
-                     "direction": "DEBIT", "amount": %d, "entryType": "%s"},
-                    {"ownerType": "USER", "walletId": "%s", "currency": "KRW",
-                     "direction": "CREDIT", "amount": %d, "entryType": "%s"}
+                    {"ownerType": %s, "accountType": %s, "currency": %s,
+                     "direction": %s, "amount": %d, "entryType": %s},
+                    {"ownerType": "USER", "walletId": "%s", "currency": %s,
+                     "direction": "CREDIT", "amount": %d, "entryType": %s}
                   ]
                 }
-                """.formatted(referenceId, AMOUNT, entryType, walletId, AMOUNT, entryType);
+                """.formatted(
+                overrides.getOrDefault("referenceType", quoted("CHARGE")), referenceId,
+                overrides.getOrDefault("ownerType", quoted("SYSTEM")),
+                overrides.getOrDefault("accountType", quoted("CHARGE_SOURCE")),
+                overrides.getOrDefault("currency", quoted("KRW")),
+                overrides.getOrDefault("direction", quoted("DEBIT")), AMOUNT,
+                overrides.getOrDefault("entryType", quoted("CHARGE_IN")),
+                walletId, overrides.getOrDefault("currency", quoted("KRW")), AMOUNT,
+                overrides.getOrDefault("entryType", quoted("CHARGE_IN")));
         return post("/internal/v1/ledger/transactions", body);
+    }
+
+    private static String quoted(String value) {
+        return "\"" + value + "\"";
+    }
+
+    private void assertInvalidAndNothingRecorded(HttpResponse<String> response, UUID referenceId) {
+        assertEquals(400, response.statusCode(), response.body());
+        JsonNode body = jsonMapper.readTree(response.body());
+        assertEquals("COMMON_INVALID_REQUEST", body.get("error").get("code").asString());
+        assertEquals(0, transactionCountOf(referenceId));
+        assertEquals(List.of(), entryTypesOf(referenceId));
     }
 
     private HttpResponse<String> post(String path, String json) throws Exception {
