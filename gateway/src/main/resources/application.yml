@@ -26,18 +26,18 @@ spring:
             - id: user-service
               uri: lb://user-service
               predicates:
-                - Path=/api/v1/auth/**,/api/v1/terms/**,/api/v1/users/**
+                - Path=/api/v1/auth/**,/api/v1/terms/**,/api/v1/users/**,/api/v1/admin/users/**,/api/v1/admin/terms/**
             - id: wallet-service
               uri: lb://wallet-service
               predicates:
-                - Path=/api/v1/wallets/**,/api/v1/charges/**
+                - Path=/api/v1/wallets/**,/api/v1/charges/**,/api/v1/admin/charges/**
               filters:
                 # 업무 서비스는 Gateway가 붙인 회원 헤더만 쓰므로 세션 쿠키를 넘기지 않음
                 - RemoveRequestHeader=Cookie
             - id: payment-service
               uri: lb://payment-service
               predicates:
-                - Path=/api/v1/payments/**,/api/v1/transfers/**
+                - Path=/api/v1/payments/**,/api/v1/transfers/**,/api/v1/admin/transfers/**
               filters:
                 - RemoveRequestHeader=Cookie
             - id: exchange-service
