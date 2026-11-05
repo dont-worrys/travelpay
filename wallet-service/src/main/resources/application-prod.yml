@@ -84,11 +84,11 @@ travelpay:
     # 배포는 Eureka에서 서비스 이름으로 찾으므로 주소를 비워 둔다
     # 은행 장애 주입(fault-injection)은 로컬 검증 전용이라 넣지 않는다
     bank:
-      url: ""
+      url: ${MOCK_BANK_URL}
     ledger:
-      url: ""
+      url: ${LEDGER_SERVICE_URL:}
     user:
-      url: ""
+      url: ${USER_SERVICE_URL:}
 
 server:
   port: 8080
