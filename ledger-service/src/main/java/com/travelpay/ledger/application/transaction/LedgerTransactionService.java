@@ -33,8 +33,12 @@ public class LedgerTransactionService {
     private static final int TX_TIMEOUT_SECONDS = 3;
     /** 기간 목록 한 페이지 기본·최대 건수 */
     private static final int MAX_PAGE_SIZE = 100;
+    /** from·to 공통 하한 (포함) */
     private static final Instant MIN_SUPPORTED_INSTANT = Instant.parse("0001-01-01T00:00:00Z");
-    private static final Instant MAX_SUPPORTED_INSTANT = Instant.parse("9999-12-31T23:59:59.999999Z");
+    /** from 상한 (포함). 업무상 마지막 시각 */
+    private static final Instant MAX_FROM_INSTANT = Instant.parse("9999-12-31T23:59:59.999999Z");
+    /** to 상한 (포함). to는 미포함 경계라 from 상한보다 1µs 뒤까지 받아야 마지막 시각 거래를 조회할 수 있다 */
+    private static final Instant MAX_TO_INSTANT = Instant.parse("+10000-01-01T00:00:00Z");
 
     private final LedgerTransactionRecorder recorder;
     private final LedgerTransactionRepository transactionRepository;
@@ -68,7 +72,9 @@ public class LedgerTransactionService {
     }
 
     /**
-     * 기간 [from, to) 거래 목록 (createdAt, id 오름차순). from·to는 다음 마이크로초로 올린다.
+     * 기간 [from, to) 거래 목록 (createdAt, id 오름차순).
+     * from > to 검사는 원래 값으로 먼저 하고, 그 뒤 from·to를 다음 마이크로초로 올려 범위를 검사한다.
+     * 커서 위치가 [from, to) 밖이면 조회 전에 거부한다 ({@link LedgerPeriodCursor#decode}).
      * size + 1건을 읽어 다음 페이지 여부를 정하고, 다음 커서는 돌려주는 마지막 행으로 만든다.
      * 항목은 페이지 거래 id를 모아 한 번에 읽는다 (거래가 없으면 읽지 않음).
      */
@@ -76,11 +82,13 @@ public class LedgerTransactionService {
     public TransactionPeriodResult getByPeriod(TransactionPeriodQuery query) {
         Objects.requireNonNull(query, "query");
         ReferenceType referenceType = Objects.requireNonNull(query.referenceType(), "referenceType");
-        Instant from = LedgerPeriodCursor.ceilToMicros(requireSupportedInstant(query.from(), "from"));
-        Instant to = LedgerPeriodCursor.ceilToMicros(requireSupportedInstant(query.to(), "to"));
-        if (from.isAfter(to)) {
+        Instant rawFrom = Objects.requireNonNull(query.from(), "from");
+        Instant rawTo = Objects.requireNonNull(query.to(), "to");
+        if (rawFrom.isAfter(rawTo)) {
             throw new BusinessException(LedgerErrorCode.LEDGER_INVALID_PERIOD);
         }
+        Instant from = ceilWithinSupported(rawFrom, MAX_FROM_INSTANT);
+        Instant to = ceilWithinSupported(rawTo, MAX_TO_INSTANT);
         int size = pageSize(query.size());
         LedgerTransactionPosition after = null;
         if (query.cursor() != null) {
@@ -115,16 +123,21 @@ public class LedgerTransactionService {
     }
 
     /**
-     * 업무상 허용 시각 [0001-01-01T00:00:00Z, 9999-12-31T23:59:59.999999Z]. 범위 밖이면 400.
+     * 다음 마이크로초로 올린 값이 [0001-01-01T00:00:00Z, max] 밖이면 400.
+     * from의 max는 9999-12-31T23:59:59.999999Z, to의 max는 +10000-01-01T00:00:00Z.
      * 이 범위는 커서의 epoch 마이크로초(long)와 PostgreSQL timestamptz 한계 안에 있다.
-     * 올림 전에 검사하므로 상한 이하 값은 올려도 상한을 넘지 않는다.
+     * max는 마이크로초 단위 값이라 "원래 값 > max"와 "올린 값 > max"가 같다. 그래서 상한은 올리기 전에 먼저 걸러
+     * Instant 최댓값 근처를 올리다 넘치는 일을 막는다.
      */
-    private static Instant requireSupportedInstant(Instant instant, String name) {
-        Objects.requireNonNull(instant, name);
-        if (instant.isBefore(MIN_SUPPORTED_INSTANT) || instant.isAfter(MAX_SUPPORTED_INSTANT)) {
+    private static Instant ceilWithinSupported(Instant instant, Instant max) {
+        if (instant.isAfter(max)) {
             throw new BusinessException(LedgerErrorCode.LEDGER_INVALID_PERIOD);
         }
-        return instant;
+        Instant ceiled = LedgerPeriodCursor.ceilToMicros(instant);
+        if (ceiled.isBefore(MIN_SUPPORTED_INSTANT)) {
+            throw new BusinessException(LedgerErrorCode.LEDGER_INVALID_PERIOD);
+        }
+        return ceiled;
     }
 
     private static int pageSize(Integer requested) {

@@ -16,6 +16,7 @@ import java.util.UUID;
  * 기간 목록의 다음 페이지 커서. 조회 조건(referenceType, from, to)과 마지막으로 돌려준 행의 위치(createdAt, id)를 담는다.
  * 시각은 epoch 마이크로초 정수로 담아 만들고 되돌리는 과정에서 정밀도·시각이 바뀌지 않게 한다 (DB 정밀도 = 마이크로초).
  * 형식: Base64URL("v1:{referenceType}:{fromMicros}:{toMicros}:{createdAtMicros}:{id}"). 호출자에게는 불투명 문자열.
+ * 풀었을 때 위치(createdAt)가 [from, to) 밖이면 잘못된 커서로 거부한다.
  */
 record LedgerPeriodCursor(ReferenceType referenceType, Instant from, Instant to, LedgerTransactionPosition position) {
 
@@ -49,12 +50,22 @@ record LedgerPeriodCursor(ReferenceType referenceType, Instant from, Instant to,
             if (parts.length != PARTS || !VERSION.equals(parts[0])) {
                 throw invalid();
             }
-            return new LedgerPeriodCursor(ReferenceType.valueOf(parts[1]),
+            LedgerPeriodCursor decoded = new LedgerPeriodCursor(ReferenceType.valueOf(parts[1]),
                     fromMicros(Long.parseLong(parts[2])), fromMicros(Long.parseLong(parts[3])),
                     new LedgerTransactionPosition(fromMicros(Long.parseLong(parts[4])), UUID.fromString(parts[5])));
+            if (!decoded.positionWithinPeriod()) {
+                throw invalid();
+            }
+            return decoded;
         } catch (IllegalArgumentException | ArithmeticException | java.time.DateTimeException e) {
             throw invalid();
         }
+    }
+
+    /** 위치는 돌려준 행이므로 반드시 [from, to) 안이다. 밖이면 조작된 커서 */
+    private boolean positionWithinPeriod() {
+        Instant createdAt = position.createdAt();
+        return !createdAt.isBefore(from) && createdAt.isBefore(to);
     }
 
     /** 마이크로초 미만이 있으면 다음 마이크로초로 올린다. 정확히 마이크로초면 그대로 */
