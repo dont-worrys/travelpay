@@ -55,9 +55,16 @@ public interface LedgerFeignApi {
     record TransactionResponse(UUID transactionId, String status) {
     }
 
-    /** rejectReason은 REJECTED일 때만 있습니다. */
+    /** rejectReason은 REJECTED일 때만 있습니다. entries는 원장에 기록된 거래 항목이며 REJECTED 거래는 빈 배열입니다. */
     @JsonIgnoreProperties(ignoreUnknown = true)
-    record TransactionResultResponse(UUID transactionId, String status, String rejectReason) {
+    record TransactionResultResponse(UUID transactionId, String status, String rejectReason,
+                                     List<EntryResult> entries) {
+    }
+
+    /** 원장 거래 항목 한 건입니다. USER 계정은 walletId(accountType=WALLET), SYSTEM 계정은 walletId가 null입니다. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record EntryResult(String ownerType, UUID walletId, String accountType, String currency, String direction,
+                       Long amount, String entryType) {
     }
 
     record OpenAccountsRequest(UUID walletId) {

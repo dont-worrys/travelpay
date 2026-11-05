@@ -2,6 +2,8 @@ package com.travelpay.payment.transfer.integration;
 
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -148,12 +150,81 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
     }
 
     @Test
-    void refusesToSettleNotAcceptedTransferThatHasLedgerRecord() throws Exception {
+    void completesNotAcceptedTransferWhenLedgerEntriesMatch() throws Exception {
         UUID transferId = manualReview(NOT_ACCEPTED);
-        givenLedger(transferId, "POSTED", null);
+        // 원장 항목 순서는 송금 요청과 달라도 됩니다.
+        givenPostedLedger(transferId, List.of(
+                entry("USER", targetWalletId, "KRW", "CREDIT", 1000L, "TRANSFER_IN"),
+                entry("USER", sourceWalletId, "KRW", "DEBIT", 1000L, "TRANSFER_OUT")));
 
-        expectMismatch(resolve(transferId, "COMPLETED", ledgerTransactionId));
+        resolve(transferId, "COMPLETED", ledgerTransactionId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.reviewReason").doesNotExist());
+        assertThat(historyCount(transferId)).isEqualTo(1);
+    }
+
+    @Test
+    void refusesToSettleNotAcceptedTransferWhenLedgerRejected() throws Exception {
+        UUID transferId = manualReview(NOT_ACCEPTED);
+        givenLedger(transferId, "REJECTED", "INSUFFICIENT_BALANCE");
+
+        // 원장은 거절 거래에 항목을 남기지 않아 같은 내용의 거절인지 확인할 수 없습니다.
+        expectMismatch(resolve(transferId, "FAILED", ledgerTransactionId));
+        expectMismatch(resolve(transferId, "PROCESSING", null));
+        assertUnchanged(transferId);
         assertThat(row(transferId).get("review_reason")).isEqualTo(NOT_ACCEPTED);
+    }
+
+    @Test
+    void refusesToSettleWhenLedgerEntriesDifferFromTransfer() throws Exception {
+        List<List<LedgerFeignApi.EntryResult>> differing = List.of(
+                entries(sourceWalletId, targetWalletId, "KRW", 999L, "TRANSFER_OUT", "TRANSFER_IN"),
+                entries(UUID.randomUUID(), targetWalletId, "KRW", 1000L, "TRANSFER_OUT", "TRANSFER_IN"),
+                entries(sourceWalletId, UUID.randomUUID(), "KRW", 1000L, "TRANSFER_OUT", "TRANSFER_IN"),
+                entries(sourceWalletId, targetWalletId, "JPY", 1000L, "TRANSFER_OUT", "TRANSFER_IN"),
+                entries(sourceWalletId, targetWalletId, "KRW", 1000L, "PAYMENT_OUT", "PAYMENT_IN"),
+                // 송금인·수취인 방향이 바뀐 경우
+                entries(targetWalletId, sourceWalletId, "KRW", 1000L, "TRANSFER_OUT", "TRANSFER_IN"),
+                // 항목이 빠지거나 더 있는 경우
+                List.of(entry("USER", sourceWalletId, "KRW", "DEBIT", 1000L, "TRANSFER_OUT")),
+                List.of(entry("USER", sourceWalletId, "KRW", "DEBIT", 1000L, "TRANSFER_OUT"),
+                        entry("USER", targetWalletId, "KRW", "CREDIT", 1000L, "TRANSFER_IN"),
+                        entry("USER", targetWalletId, "KRW", "CREDIT", 1000L, "TRANSFER_IN")),
+                // 시스템 계정 항목
+                List.of(entry("USER", sourceWalletId, "KRW", "DEBIT", 1000L, "TRANSFER_OUT"),
+                        entry("SYSTEM", null, "KRW", "CREDIT", 1000L, "TRANSFER_IN")));
+
+        for (String reviewReason : List.of(NOT_ACCEPTED, RETRY_EXHAUSTED)) {
+            for (List<LedgerFeignApi.EntryResult> ledgerEntries : differing) {
+                UUID transferId = manualReview(reviewReason);
+                givenPostedLedger(transferId, ledgerEntries);
+
+                expectMismatch(resolve(transferId, "COMPLETED", ledgerTransactionId));
+                assertUnchanged(transferId);
+            }
+        }
+    }
+
+    @Test
+    void keepsManualReviewWhenPostedLedgerHasNoReadableEntries() throws Exception {
+        List<List<LedgerFeignApi.EntryResult>> unreadable = new ArrayList<>();
+        unreadable.add(null);
+        unreadable.add(List.of());
+        unreadable.add(List.of(entry("USER", sourceWalletId, "KRW", "DEBIT", null, "TRANSFER_OUT"),
+                entry("USER", targetWalletId, "KRW", "CREDIT", 1000L, "TRANSFER_IN")));
+        unreadable.add(List.of(entry("USER", sourceWalletId, "KRW", "DEBIT", 1000L, null),
+                entry("USER", targetWalletId, "KRW", "CREDIT", 1000L, "TRANSFER_IN")));
+
+        for (List<LedgerFeignApi.EntryResult> ledgerEntries : unreadable) {
+            UUID transferId = manualReview(RETRY_EXHAUSTED);
+            givenPostedLedger(transferId, ledgerEntries);
+
+            resolve(transferId, "COMPLETED", ledgerTransactionId)
+                    .andExpect(status().isBadGateway())
+                    .andExpect(jsonPath("$.error.code").value("COMMON_BAD_GATEWAY"));
+            assertUnchanged(transferId);
+        }
     }
 
     @Test
@@ -280,7 +351,7 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
                 .thenThrow(lookupError(wrongNotFound, 404, "COMMON_NOT_FOUND"));
         UUID unreadable = manualReview(RETRY_EXHAUSTED);
         when(ledgerFeignApi.getTransaction("TRANSFER", unreadable)).thenReturn(ApiResponse.success(
-                new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "UNKNOWN", null)));
+                new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "UNKNOWN", null, List.of())));
 
         resolve(unavailable, "COMPLETED", ledgerTransactionId)
                 .andExpect(status().isServiceUnavailable())
@@ -298,9 +369,33 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
         return insertTransferRow(senderId, receiverId, "KRW", "MANUAL_REVIEW", null, 5, reviewReason, CREATED);
     }
 
+    /** 원장 결과를 정합니다. POSTED는 이 송금과 같은 항목을, REJECTED는 원장처럼 빈 항목을 돌려줍니다. */
     private void givenLedger(UUID transferId, String status, String rejectReason) {
+        List<LedgerFeignApi.EntryResult> ledgerEntries = "POSTED".equals(status) ? transferEntries() : List.of();
         when(ledgerFeignApi.getTransaction("TRANSFER", transferId)).thenReturn(ApiResponse.success(
-                new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, status, rejectReason)));
+                new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, status, rejectReason, ledgerEntries)));
+    }
+
+    private void givenPostedLedger(UUID transferId, List<LedgerFeignApi.EntryResult> ledgerEntries) {
+        when(ledgerFeignApi.getTransaction("TRANSFER", transferId)).thenReturn(ApiResponse.success(
+                new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "POSTED", null, ledgerEntries)));
+    }
+
+    /** manualReview로 넣은 송금(KRW 1000, 이 테스트의 송금인·수취인 지갑)의 원장 항목입니다. */
+    private List<LedgerFeignApi.EntryResult> transferEntries() {
+        return entries(sourceWalletId, targetWalletId, "KRW", 1000L, "TRANSFER_OUT", "TRANSFER_IN");
+    }
+
+    private static List<LedgerFeignApi.EntryResult> entries(UUID debitWalletId, UUID creditWalletId, String currency,
+            Long amount, String debitType, String creditType) {
+        return List.of(entry("USER", debitWalletId, currency, "DEBIT", amount, debitType),
+                entry("USER", creditWalletId, currency, "CREDIT", amount, creditType));
+    }
+
+    private static LedgerFeignApi.EntryResult entry(String ownerType, UUID walletId, String currency, String direction,
+            Long amount, String entryType) {
+        String accountType = "USER".equals(ownerType) ? "WALLET" : "FX_POSITION";
+        return new LedgerFeignApi.EntryResult(ownerType, walletId, accountType, currency, direction, amount, entryType);
     }
 
     /**
@@ -320,7 +415,7 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
                     values (?, ?, 'MANUAL_REVIEW', 'COMPLETED', ?, 'OPERATOR', ?, ?, ?)""",
                     UUID.randomUUID(), transferId, winnerReason, winnerId, ledgerTransactionId, Timestamp.from(now));
             return ApiResponse.success(
-                    new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "POSTED", null));
+                    new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "POSTED", null, transferEntries()));
         });
     }
 

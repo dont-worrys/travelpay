@@ -14,6 +14,7 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.transfer.client.LedgerTransactionResponse;
+import com.travelpay.payment.transfer.client.LedgerTransferRecord;
 import com.travelpay.payment.transfer.client.TransferLedgerReader;
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferCurrency;
@@ -72,8 +73,10 @@ public class TransferAdminService {
      *     <li>원장 POSTED → COMPLETED만 허용, ledgerTransactionId가 원장 거래 ID와 같아야 함</li>
      *     <li>원장 REJECTED → FAILED만 허용(실패 사유는 원장 거절 사유로 정함), ledgerTransactionId가 같아야 함</li>
      *     <li>원장 기록 없음 → PROCESSING만 허용(시도 횟수 0으로 되돌려 복구 스케줄러가 같은 reference로 재전송)</li>
-     *     <li>원장이 요청을 받지 않은 송금(LEDGER_REQUEST_NOT_ACCEPTED)인데 원장에 같은 reference 거래가 있으면 내용이 다를 수 있어
-     *         확정하지 않음(원장 담당 확인 필요)</li>
+     *     <li>원장 POSTED이면 원장에 기록된 항목이 이 송금의 원장 요청 항목(지갑·통화·방향·금액·entryType)과 같아야 함.
+     *         다르면 같은 reference로 다른 내용이 기록된 것이라 확정하지 않음</li>
+     *     <li>원장이 요청을 받지 않은 송금(LEDGER_REQUEST_NOT_ACCEPTED)은 원장 POSTED이고 항목이 같을 때만 COMPLETED로 확정.
+     *         원장 REJECTED는 항목이 없어 내용을 확인할 수 없으므로 확정하지 않음</li>
      * </ul>
      * 원장 조회는 DB 트랜잭션 밖에서 하고, 조건부 UPDATE(MANUAL_REVIEW일 때만)와 이력 저장은 한 트랜잭션으로 묶습니다.
      * 원장 조회 실패(타임아웃·5xx 등)는 상태를 바꾸지 않고 common 규칙의 5xx로 응답합니다.
@@ -95,9 +98,9 @@ public class TransferAdminService {
             return replay(admin, transfer, request, reason);
         }
 
-        Optional<LedgerTransactionResponse> ledger = ledgerReader.findTransfer(transferId);
+        Optional<LedgerTransferRecord> ledger = ledgerReader.findTransfer(transferId);
         TransferFailureReason failureReason = verify(transfer, ledger, request);
-        UUID ledgerTransactionId = ledger.map(LedgerTransactionResponse::transactionId).orElse(null);
+        UUID ledgerTransactionId = ledger.map(record -> record.result().transactionId()).orElse(null);
         int attemptCount = target == TransferStatus.PROCESSING ? 0 : transfer.getAttemptCount();
 
         Boolean applied = transactionTemplate.execute(status -> {
@@ -163,7 +166,7 @@ public class TransferAdminService {
     }
 
     /** 원장 결과와 확정 요청이 맞는지 확인하고, FAILED로 확정할 때의 실패 사유를 반환합니다(그 밖에는 null). */
-    private static TransferFailureReason verify(Transfer transfer, Optional<LedgerTransactionResponse> ledger,
+    private static TransferFailureReason verify(Transfer transfer, Optional<LedgerTransferRecord> ledger,
             AdminTransferResolveRequest request) {
         if (ledger.isEmpty()) {
             if (request.targetStatus() != TransferStatus.PROCESSING) {
@@ -171,14 +174,23 @@ public class TransferAdminService {
             }
             return null;
         }
-        LedgerTransactionResponse result = ledger.get();
-        if (transfer.getReviewReason() == TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED
-                || !result.transactionId().equals(request.ledgerTransactionId())) {
+        LedgerTransactionResponse result = ledger.get().result();
+        if (!result.transactionId().equals(request.ledgerTransactionId())) {
             throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
         }
         if (result.status() == LedgerTransactionResponse.Status.POSTED
                 && request.targetStatus() == TransferStatus.COMPLETED) {
+            if (!ledger.get().matches(transfer)) {
+                // 같은 reference로 송금과 다른 내용이 원장에 기록되어 있습니다. 운영자 확정으로 해결할 수 없습니다.
+                log.error("원장 거래 항목이 송금과 다름 transferId={} ledgerTransactionId={} reviewReason={}",
+                        transfer.getId(), result.transactionId(), transfer.getReviewReason());
+                throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
+            }
             return null;
+        }
+        // REJECTED 거래는 원장에 항목이 없어 내용을 대조할 수 없습니다. 요청을 받지 않은 송금은 다른 내용의 거절일 수 있어 확정하지 않습니다.
+        if (transfer.getReviewReason() == TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED) {
+            throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
         }
         if (result.status() == LedgerTransactionResponse.Status.REJECTED
                 && request.targetStatus() == TransferStatus.FAILED) {
