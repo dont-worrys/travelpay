@@ -2,6 +2,7 @@ package com.travelpay.ledger.infra.persistence.transaction;
 
 import com.travelpay.ledger.domain.transaction.DuplicateReferenceException;
 import com.travelpay.ledger.domain.transaction.LedgerEntry;
+import com.travelpay.ledger.domain.transaction.LedgerEntryLine;
 import com.travelpay.ledger.domain.transaction.LedgerTransaction;
 import com.travelpay.ledger.domain.transaction.LedgerTransactionRepository;
 import com.travelpay.ledger.domain.transaction.ReferenceType;
@@ -49,6 +50,11 @@ public class LedgerTransactionRepositoryImpl implements LedgerTransactionReposit
     @Override
     public void saveEntries(List<LedgerEntry> entries) {
         entryJpaRepository.saveAll(entries);
+    }
+
+    @Override
+    public List<LedgerEntryLine> findEntryLines(UUID transactionId) {
+        return entryJpaRepository.findLinesByTransactionId(transactionId);
     }
 
     private static boolean isReferenceViolation(Throwable exception) {

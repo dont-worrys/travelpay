@@ -1,10 +1,13 @@
 package com.travelpay.ledger.application.transaction;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.ledger.application.transaction.dto.LedgerEntryResult;
 import com.travelpay.ledger.application.transaction.dto.RegisterTransactionCommand;
+import com.travelpay.ledger.application.transaction.dto.TransactionDetailResult;
 import com.travelpay.ledger.application.transaction.dto.TransactionResult;
 import com.travelpay.ledger.domain.LedgerErrorCode;
 import com.travelpay.ledger.domain.transaction.DuplicateReferenceException;
+import com.travelpay.ledger.domain.transaction.LedgerTransaction;
 import com.travelpay.ledger.domain.transaction.LedgerTransactionRepository;
 import com.travelpay.ledger.domain.transaction.ReferenceType;
 import lombok.RequiredArgsConstructor;
@@ -12,6 +15,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -42,11 +46,14 @@ public class LedgerTransactionService {
     }
 
     @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
-    public TransactionResult getByReference(ReferenceType referenceType, UUID referenceId) {
+    public TransactionDetailResult getByReference(ReferenceType referenceType, UUID referenceId) {
         Objects.requireNonNull(referenceType, "referenceType");
         Objects.requireNonNull(referenceId, "referenceId");
-        return transactionRepository.findByReference(referenceType, referenceId)
-                .map(transaction -> TransactionResult.of(transaction, false))
+        LedgerTransaction transaction = transactionRepository.findByReference(referenceType, referenceId)
                 .orElseThrow(() -> new BusinessException(LedgerErrorCode.LEDGER_TRANSACTION_NOT_FOUND));
+        List<LedgerEntryResult> entries = transactionRepository.findEntryLines(transaction.getId()).stream()
+                .map(LedgerEntryResult::from)
+                .toList();
+        return TransactionDetailResult.of(transaction, entries);
     }
 }

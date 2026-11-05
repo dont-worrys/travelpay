@@ -14,4 +14,7 @@ public interface LedgerTransactionRepository {
     LedgerTransaction save(LedgerTransaction transaction);
 
     void saveEntries(List<LedgerEntry> entries);
+
+    /** 항목과 계정을 한 번에 읽는다. 순서는 항목 id 순 */
+    List<LedgerEntryLine> findEntryLines(UUID transactionId);
 }
