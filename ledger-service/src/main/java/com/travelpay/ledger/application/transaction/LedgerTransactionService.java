@@ -33,6 +33,8 @@ public class LedgerTransactionService {
     private static final int TX_TIMEOUT_SECONDS = 3;
     /** 기간 목록 한 페이지 기본·최대 건수 */
     private static final int MAX_PAGE_SIZE = 100;
+    private static final Instant MIN_SUPPORTED_INSTANT = Instant.parse("0001-01-01T00:00:00Z");
+    private static final Instant MAX_SUPPORTED_INSTANT = Instant.parse("9999-12-31T23:59:59.999999Z");
 
     private final LedgerTransactionRecorder recorder;
     private final LedgerTransactionRepository transactionRepository;
@@ -74,8 +76,8 @@ public class LedgerTransactionService {
     public TransactionPeriodResult getByPeriod(TransactionPeriodQuery query) {
         Objects.requireNonNull(query, "query");
         ReferenceType referenceType = Objects.requireNonNull(query.referenceType(), "referenceType");
-        Instant from = LedgerPeriodCursor.ceilToMicros(Objects.requireNonNull(query.from(), "from"));
-        Instant to = LedgerPeriodCursor.ceilToMicros(Objects.requireNonNull(query.to(), "to"));
+        Instant from = LedgerPeriodCursor.ceilToMicros(requireSupportedInstant(query.from(), "from"));
+        Instant to = LedgerPeriodCursor.ceilToMicros(requireSupportedInstant(query.to(), "to"));
         if (from.isAfter(to)) {
             throw new BusinessException(LedgerErrorCode.LEDGER_INVALID_PERIOD);
         }
@@ -110,6 +112,19 @@ public class LedgerTransactionService {
                     new LedgerTransactionPosition(last.getCreatedAt(), last.getId())).encode();
         }
         return new TransactionPeriodResult(items, nextCursor);
+    }
+
+    /**
+     * 업무상 허용 시각 [0001-01-01T00:00:00Z, 9999-12-31T23:59:59.999999Z]. 범위 밖이면 400.
+     * 이 범위는 커서의 epoch 마이크로초(long)와 PostgreSQL timestamptz 한계 안에 있다.
+     * 올림 전에 검사하므로 상한 이하 값은 올려도 상한을 넘지 않는다.
+     */
+    private static Instant requireSupportedInstant(Instant instant, String name) {
+        Objects.requireNonNull(instant, name);
+        if (instant.isBefore(MIN_SUPPORTED_INSTANT) || instant.isAfter(MAX_SUPPORTED_INSTANT)) {
+            throw new BusinessException(LedgerErrorCode.LEDGER_INVALID_PERIOD);
+        }
+        return instant;
     }
 
     private static int pageSize(Integer requested) {
