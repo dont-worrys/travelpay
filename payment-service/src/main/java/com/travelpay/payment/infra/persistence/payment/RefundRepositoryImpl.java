@@ -1,11 +1,14 @@
 package com.travelpay.payment.infra.persistence.payment;
 
 import com.travelpay.payment.domain.payment.Refund;
+import com.travelpay.payment.domain.payment.RefundManualReview;
 import com.travelpay.payment.domain.payment.RefundRepository;
 import com.travelpay.payment.domain.payment.RefundStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
@@ -23,6 +26,31 @@ public class RefundRepositoryImpl implements RefundRepository {
     @Override
     public Refund save(Refund refund) {
         return refundJpaRepository.save(refund);
+    }
+
+    @Override
+    public Optional<Refund> findById(UUID refundId) {
+        return refundJpaRepository.findById(refundId);
+    }
+
+    @Override
+    public Page<RefundManualReview> findManualReviews(SettlementReviewReason reviewReason, Pageable pageable) {
+        return refundJpaRepository.findManualReviews(reviewReason, pageable);
+    }
+
+    @Override
+    public int resolveCompleted(UUID refundId, UUID ledgerId, Instant now) {
+        return refundJpaRepository.resolveCompleted(refundId, ledgerId, now);
+    }
+
+    @Override
+    public int resolveDeclined(UUID refundId, String declineReason, Instant now) {
+        return refundJpaRepository.resolveDeclined(refundId, declineReason, now);
+    }
+
+    @Override
+    public int resolveRetry(UUID refundId, Instant now) {
+        return refundJpaRepository.resolveRetry(refundId, now);
     }
 
     @Override

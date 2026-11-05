@@ -1,14 +1,18 @@
 package com.travelpay.payment.infra.client.ledger;
 
+import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.feign.FeignErrors;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerClient;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerLookup;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
+import com.travelpay.payment.domain.payment.PaymentErrorCode;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.Entry;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.RegisterRequest;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResponse;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResultResponse;
 import feign.FeignException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -17,6 +21,7 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 @Slf4j
 @Component
@@ -24,6 +29,7 @@ import java.util.Optional;
 public class PaymentLedgerFeignClient implements PaymentLedgerClient {
 
     private static final String REJECTED_CODE_PREFIX = "LEDGER_REJECTED_";
+    private static final String TRANSACTION_NOT_FOUND_CODE = "LEDGER_TRANSACTION_NOT_FOUND";
 
     /** 원장 거절 코드별 결제 거절 사유. 목록에 없는 거절 코드는 기본 사유로 남긴다 */
     private static final DeclineReasons PAYMENT_DECLINE_REASONS = new DeclineReasons(Map.of(
@@ -57,6 +63,64 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
                 Entry.user(command.merchantWalletId(), currency, "DEBIT", command.amount(), "PAYMENT_REFUND_OUT"),
                 Entry.user(command.userWalletId(), currency, "CREDIT", command.amount(), "PAYMENT_REFUND_IN"))),
                 REFUND_DECLINE_REASONS);
+    }
+
+    @Override
+    public PaymentLedgerLookup findPaymentTransaction(UUID paymentId) {
+        return lookup("PAYMENT", paymentId, PAYMENT_DECLINE_REASONS);
+    }
+
+    @Override
+    public PaymentLedgerLookup findRefundTransaction(UUID refundId) {
+        return lookup("PAYMENT_REFUND", refundId, REFUND_DECLINE_REASONS);
+    }
+
+    private PaymentLedgerLookup lookup(String referenceType, UUID referenceId, DeclineReasons declineReasons) {
+        ApiResponse<TransactionResultResponse> response;
+        try {
+            response = ledgerFeignApi.getTransaction(referenceType, referenceId);
+        } catch (FeignException exception) {
+            // 원장이 "기록 없음"이라고 답한 경우만 NOT_FOUND. 코드 없는 404(경로 오류 등)는 기록 없음으로 단정하지 않는다
+            if (exception.status() == 404 && FeignErrors.hasErrorCode(exception, TRANSACTION_NOT_FOUND_CODE)) {
+                return PaymentLedgerLookup.notFound();
+            }
+            log.warn("원장 거래 조회 실패 referenceType={} referenceId={} status={}",
+                    referenceType, referenceId, exception.status());
+            throw new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE);
+        }
+
+        TransactionResultResponse data = response == null || !response.success() ? null : response.data();
+        if (data == null || data.transactionId() == null || data.status() == null) {
+            log.error("원장 거래 조회 응답 형식 이상 referenceType={} referenceId={}", referenceType, referenceId);
+            throw new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE);
+        }
+        return switch (data.status()) {
+            case "POSTED" -> PaymentLedgerLookup.posted(data.transactionId(),
+                    postedEntries(data, referenceType, referenceId));
+            // 조회 응답의 거절 사유는 접두어 없는 이름(INSUFFICIENT_BALANCE)이라, 등록 거절 코드와 같은 표를 쓰려고 접두어를 붙인다
+            case "REJECTED" -> PaymentLedgerLookup.rejected(data.transactionId(),
+                    declineReasons.of(REJECTED_CODE_PREFIX + data.rejectReason()));
+            default -> {
+                log.error("알 수 없는 원장 거래 상태 referenceType={} referenceId={} status={}",
+                        referenceType, referenceId, data.status());
+                throw new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE);
+            }
+        };
+    }
+
+    // POSTED 거래는 항목이 있어야 우리 기록과 비교할 수 있다. 없으면 응답 형식 이상으로 보고 결론을 내지 않는다
+    private static List<PaymentLedgerLookup.Entry> postedEntries(TransactionResultResponse data, String referenceType,
+                                                                 UUID referenceId) {
+        if (data.entries() == null || data.entries().isEmpty()
+                || data.entries().stream().anyMatch(entry -> entry == null || entry.amount() == null)) {
+            log.error("원장 POSTED 거래에 항목이 없거나 금액이 없음 referenceType={} referenceId={}",
+                    referenceType, referenceId);
+            throw new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE);
+        }
+        return data.entries().stream()
+                .map(entry -> new PaymentLedgerLookup.Entry(entry.walletId(), entry.currency(), entry.direction(),
+                        entry.amount(), entry.entryType()))
+                .toList();
     }
 
     private PaymentLedgerResult register(RegisterRequest request, DeclineReasons declineReasons) {

@@ -53,6 +53,14 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
     }
 
     @Override
+    public Page<Payment> findManualReviews(SettlementReviewReason reviewReason, Pageable pageable) {
+        if (reviewReason == null) {
+            return paymentJpaRepository.findByStatus(PaymentStatus.MANUAL_REVIEW, pageable);
+        }
+        return paymentJpaRepository.findByStatusAndReviewReason(PaymentStatus.MANUAL_REVIEW, reviewReason, pageable);
+    }
+
+    @Override
     public List<Payment> findRecoveryTargets(Instant now, int limit) {
         return paymentJpaRepository.findRecoveryTargets(now, limit);
     }

@@ -1,18 +1,24 @@
 package com.travelpay.payment.infra.client.ledger;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerLookup;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
 import com.travelpay.payment.domain.payment.CurrencyCode;
+import com.travelpay.payment.domain.payment.PaymentErrorCode;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.Entry;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.RegisterRequest;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResponse;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.EntryResult;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResultResponse;
 import com.travelpay.payment.support.FeignFailures;
 import feign.FeignException;
 import feign.Request;
@@ -20,6 +26,7 @@ import feign.codec.DecodeException;
 import feign.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -28,6 +35,7 @@ import org.mockito.ArgumentCaptor;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -176,6 +184,151 @@ class PaymentLedgerFeignClientTest {
         for (int i = 0; i < 4; i++) {
             assertEquals(PaymentLedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
         }
+    }
+
+    // ── 원장 거래 조회 (MANUAL_REVIEW 처리) ──
+
+    @Test
+    void lookupReturnsPostedPaymentTransaction() {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID)).thenReturn(result(TRANSACTION_ID, "POSTED", null));
+
+        assertEquals(PaymentLedgerLookup.posted(TRANSACTION_ID, LOOKUP_ENTRIES), ledgerClient.findPaymentTransaction(PAYMENT_ID));
+    }
+
+    @Test
+    void lookupUsesRefundReferenceTypeForRefunds() {
+        when(feignApi.getTransaction("PAYMENT_REFUND", REFUND_ID))
+                .thenReturn(result(REFUND_TRANSACTION_ID, "POSTED", null));
+
+        assertEquals(PaymentLedgerLookup.posted(REFUND_TRANSACTION_ID, LOOKUP_ENTRIES), ledgerClient.findRefundTransaction(REFUND_ID));
+    }
+
+    // 조회 응답의 거절 사유는 접두어가 없어 등록 거절 코드와 같은 문구표로 바꾼다
+    @ParameterizedTest
+    @CsvSource({
+            "INSUFFICIENT_BALANCE, 잔액이 부족합니다.",
+            "WALLET_SUSPENDED, 사용할 수 없는 지갑입니다.",
+            "ACCOUNT_NOT_FOUND, 결제할 수 있는 계정이 없습니다.",
+            "NEW_REASON, 결제가 거절되었습니다."
+    })
+    void lookupConvertsPaymentRejectReason(String rejectReason, String expectedReason) {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID)).thenReturn(result(TRANSACTION_ID, "REJECTED", rejectReason));
+
+        assertEquals(PaymentLedgerLookup.rejected(TRANSACTION_ID, expectedReason),
+                ledgerClient.findPaymentTransaction(PAYMENT_ID));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "INSUFFICIENT_BALANCE, 환불이 거절되었습니다.",
+            "WALLET_SUSPENDED, 환불할 수 없는 계정입니다.",
+            "ACCOUNT_NOT_FOUND, 환불할 수 있는 계정이 없습니다."
+    })
+    void lookupConvertsRefundRejectReason(String rejectReason, String expectedReason) {
+        when(feignApi.getTransaction("PAYMENT_REFUND", REFUND_ID))
+                .thenReturn(result(REFUND_TRANSACTION_ID, "REJECTED", rejectReason));
+
+        assertEquals(PaymentLedgerLookup.rejected(REFUND_TRANSACTION_ID, expectedReason),
+                ledgerClient.findRefundTransaction(REFUND_ID));
+    }
+
+    @Test
+    void lookupUsesDefaultReasonWhenRejectReasonIsMissing() {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID)).thenReturn(result(TRANSACTION_ID, "REJECTED", null));
+
+        assertEquals(PaymentLedgerLookup.rejected(TRANSACTION_ID, "결제가 거절되었습니다."),
+                ledgerClient.findPaymentTransaction(PAYMENT_ID));
+    }
+
+    @Test
+    void lookupReturnsNotFoundOnlyWhenLedgerSaysTransactionNotFound() {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID))
+                .thenThrow(feignError(404, rejectedBody("LEDGER_TRANSACTION_NOT_FOUND")));
+
+        assertEquals(PaymentLedgerLookup.notFound(), ledgerClient.findPaymentTransaction(PAYMENT_ID));
+    }
+
+    // 코드 없는 404(경로 오류 등)를 기록 없음으로 보면 실제로 반영된 결제를 거절로 확정할 수 있다
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "<html>Not Found</html>",
+            "",
+            "{\"success\":false,\"data\":null,\"error\":{\"code\":\"COMMON_NOT_FOUND\",\"message\":\"x\",\"details\":[]}}"
+    })
+    void lookupTreats404WithoutLedgerCodeAsUnavailable(String body) {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID)).thenThrow(feignError(404, body));
+
+        assertLookupUnavailable(() -> ledgerClient.findPaymentTransaction(PAYMENT_ID));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {400, 409, 500, 503})
+    void lookupTreatsOtherErrorsAsUnavailable(int status) {
+        when(feignApi.getTransaction("PAYMENT_REFUND", REFUND_ID)).thenThrow(feignError(status, ""));
+
+        assertLookupUnavailable(() -> ledgerClient.findRefundTransaction(REFUND_ID));
+    }
+
+    @Test
+    void lookupTreatsNoResponseAsUnavailable() {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID))
+                .thenThrow(FeignFailures.connectionRefused())
+                .thenThrow(FeignFailures.readTimeout());
+
+        assertLookupUnavailable(() -> ledgerClient.findPaymentTransaction(PAYMENT_ID));
+        assertLookupUnavailable(() -> ledgerClient.findPaymentTransaction(PAYMENT_ID));
+    }
+
+    @Test
+    void lookupTreatsUnexpectedBodyAsUnavailable() {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID))
+                .thenReturn(result(null, "POSTED", null))
+                .thenReturn(result(TRANSACTION_ID, null, null))
+                .thenReturn(result(TRANSACTION_ID, "PENDING", null))
+                .thenReturn(ApiResponse.success(null))
+                .thenReturn(new ApiResponse<>(false, null, ErrorResponse.of(CommonErrorCode.INTERNAL_SERVER_ERROR)))
+                .thenReturn(null);
+
+        for (int i = 0; i < 6; i++) {
+            assertLookupUnavailable(() -> ledgerClient.findPaymentTransaction(PAYMENT_ID));
+        }
+    }
+
+    // POSTED인데 항목이나 금액이 없으면 우리 기록과 비교할 수 없으므로 결론을 내지 않음
+    @Test
+    void lookupTreatsPostedWithoutEntriesAsUnavailable() {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID))
+                .thenReturn(result(TRANSACTION_ID, "POSTED", null, List.of()))
+                .thenReturn(result(TRANSACTION_ID, "POSTED", null, null))
+                .thenReturn(result(TRANSACTION_ID, "POSTED", null, List.of(
+                        new EntryResult("USER", USER_WALLET_ID, "WALLET", "KRW", "DEBIT", null, "PAYMENT_OUT"))));
+
+        for (int i = 0; i < 3; i++) {
+            assertLookupUnavailable(() -> ledgerClient.findPaymentTransaction(PAYMENT_ID));
+        }
+    }
+
+    private static void assertLookupUnavailable(Executable lookup) {
+        BusinessException exception = assertThrows(BusinessException.class, lookup);
+        assertEquals(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE, exception.getErrorCode());
+    }
+
+    // 원장 응답의 항목과, 그걸 바꾼 조회 결과 항목
+    private static final List<EntryResult> LEDGER_ENTRIES = List.of(
+            new EntryResult("USER", USER_WALLET_ID, "WALLET", "KRW", "DEBIT", 10_000L, "PAYMENT_OUT"),
+            new EntryResult("USER", MERCHANT_WALLET_ID, "WALLET", "KRW", "CREDIT", 10_000L, "PAYMENT_IN"));
+    private static final List<PaymentLedgerLookup.Entry> LOOKUP_ENTRIES = List.of(
+            new PaymentLedgerLookup.Entry(USER_WALLET_ID, "KRW", "DEBIT", 10_000L, "PAYMENT_OUT"),
+            new PaymentLedgerLookup.Entry(MERCHANT_WALLET_ID, "KRW", "CREDIT", 10_000L, "PAYMENT_IN"));
+
+    // POSTED면 항목을 채우고, 그 밖에는 원장처럼 빈 목록
+    private static ApiResponse<TransactionResultResponse> result(UUID transactionId, String status, String rejectReason) {
+        return result(transactionId, status, rejectReason, "POSTED".equals(status) ? LEDGER_ENTRIES : List.of());
+    }
+
+    private static ApiResponse<TransactionResultResponse> result(UUID transactionId, String status, String rejectReason,
+                                                                 List<EntryResult> entries) {
+        return ApiResponse.success(new TransactionResultResponse(transactionId, status, rejectReason, entries));
     }
 
     private RegisterRequest captureRequest() {
