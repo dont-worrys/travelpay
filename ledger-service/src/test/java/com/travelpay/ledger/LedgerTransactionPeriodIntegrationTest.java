@@ -428,6 +428,17 @@ class LedgerTransactionPeriodIntegrationTest {
         assertEquals(0, empty.get("items").size());
     }
 
+    /** from = t+2ns, to = t+1ns: 올리면 둘 다 t+1µs로 같아지지만 원래 값으로 비교하므로 400 */
+    @Test
+    void from이_to보다_1나노초_늦으면_올림_전_값으로_비교해_400이다() throws Exception {
+        Instant t = dayStart.plusSeconds(400);
+        HttpResponse<String> reversed = period("CHARGE", t.plusNanos(2).toString(), t.plusNanos(1).toString(),
+                null, null);
+
+        assertEquals(400, reversed.statusCode(), reversed.body());
+        assertEquals("LEDGER_INVALID_PERIOD", errorCode(reversed));
+    }
+
     @Test
     void size가_1보다_작으면_400이다() throws Exception {
         for (Integer size : List.of(0, -1)) {
@@ -457,19 +468,60 @@ class LedgerTransactionPeriodIntegrationTest {
 
     @Test
     void 업무_범위_경계값은_허용한다() throws Exception {
-        JsonNode data = periodData("CHARGE", "0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999Z", null, 1);
-        assertNotNull(data.get("items"));
+        List<String[]> periods = List.of(
+                new String[] {"0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999Z"},
+                new String[] {"0001-01-01T00:00:00Z", "+10000-01-01T00:00:00Z"},          // to 상한
+                new String[] {"9999-12-31T23:59:59.999999Z", "+10000-01-01T00:00:00Z"}); // from 상한
+        for (String[] period : periods) {
+            JsonNode data = periodData("CHARGE", period[0], period[1], null, 1);
+            assertNotNull(data.get("items"), String.join(" ~ ", period));
+        }
     }
 
-    /** 허용 범위 [0001-01-01T00:00:00Z, 9999-12-31T23:59:59.999999Z] 밖의 from·to는 400 */
+    /** 9999-12-31T23:59:59.999999Z 거래 — to의 올림·상한 테스트가 함께 쓴다 (없으면 넣는다) */
+    private UUID lastMicroTransaction() {
+        Instant last = Instant.parse("9999-12-31T23:59:59.999999Z");
+        List<UUID> existing = jdbcTemplate.queryForList(
+                "SELECT id FROM ledger_transactions WHERE reference_type = 'CHARGE' AND created_at = ?",
+                UUID.class, OffsetDateTime.ofInstant(last, ZoneOffset.UTC));
+        return existing.isEmpty() ? insertPosted("CHARGE", last, 1) : existing.getFirst();
+    }
+
+    /** to = 9999-12-31T23:59:59.999999999Z → +10000-01-01T00:00:00Z로 올림되어 허용, 마지막 마이크로초 거래 포함 */
+    @Test
+    void to가_9999년_마지막_나노초면_올림되어_마지막_마이크로초_거래까지_포함한다() throws Exception {
+        UUID last = lastMicroTransaction();
+
+        JsonNode data = periodData("CHARGE", "9999-12-31T23:59:59Z", "9999-12-31T23:59:59.999999999Z", null, null);
+
+        assertEquals(List.of(last.toString()), ids(data));
+    }
+
+    /** to 상한은 +10000-01-01T00:00:00Z (URL에서는 %2B10000…). 그 너머(1µs, 올림되는 1ns)는 400 */
+    @Test
+    void to_상한은_10000년_1월_1일이고_그_너머는_400이다() throws Exception {
+        UUID last = lastMicroTransaction();
+
+        JsonNode data = periodData("CHARGE", "9999-12-31T23:59:59Z", "+10000-01-01T00:00:00Z", null, null);
+        assertEquals(List.of(last.toString()), ids(data));
+
+        for (String to : List.of("+10000-01-01T00:00:00.000001Z", "+10000-01-01T00:00:00.000000001Z")) {
+            HttpResponse<String> response = period("CHARGE", "9999-12-31T23:59:59Z", to, null, null);
+            assertEquals(400, response.statusCode(), to + " " + response.body());
+            assertEquals("LEDGER_INVALID_PERIOD", errorCode(response), to);
+        }
+    }
+
+    /** from 허용 [0001-01-01T00:00:00Z, 9999-12-31T23:59:59.999999Z], to 허용 [0001-01-01T00:00:00Z, +10000-01-01T00:00:00Z] (올림 후 값 기준). 밖이면 400 */
     @Test
     void 업무_범위_밖의_시각은_400이다() throws Exception {
         List<String[]> periods = List.of(
-                new String[] {dayStart.toString(), "+10000-01-01T00:00:00Z"},     // 범위 밖 미래 (to)
-                new String[] {"-9999-01-01T00:00:00Z", dayEnd.toString()},        // 기원전 1만 년 (from)
-                new String[] {dayStart.toString(), "9999-12-31T23:59:59.9999991Z"}, // 상한 + 1ns
-                new String[] {"0000-12-31T23:59:59.999999Z", dayEnd.toString()},  // 하한 - 1µs
-                new String[] {"+300000-01-01T00:00:00Z", "+300001-01-01T00:00:00Z"}); // 마이크로초 long 범위 밖
+                new String[] {dayStart.toString(), "+10000-01-01T00:00:00.000001Z"},     // to 상한 + 1µs
+                new String[] {"-9999-01-01T00:00:00Z", dayEnd.toString()},               // 기원전 1만 년 (from)
+                new String[] {"9999-12-31T23:59:59.9999991Z", "+10000-01-01T00:00:00Z"}, // from 상한 + 1ns (올림 시 초과)
+                new String[] {"+10000-01-01T00:00:00Z", "+10000-01-01T00:00:00Z"},       // from = to 상한
+                new String[] {"0000-12-31T23:59:59.999999Z", dayEnd.toString()},         // 하한 - 1µs
+                new String[] {"+300000-01-01T00:00:00Z", "+300001-01-01T00:00:00Z"});    // 마이크로초 long 범위 밖
 
         for (String[] period : periods) {
             HttpResponse<String> response = period("CHARGE", period[0], period[1], null, null);
@@ -511,6 +563,41 @@ class LedgerTransactionPeriodIntegrationTest {
             assertEquals(400, response.statusCode(), cursor + " " + response.body());
             assertEquals("LEDGER_INVALID_CURSOR", errorCode(response), cursor);
         }
+    }
+
+    /** 요청과 같은 조건이지만 위치가 [from, to) 밖인 커서는 DB 조회 없이 400. to와 같은 위치도 미포함이라 거부 */
+    @Test
+    void 범위_밖_위치의_조작된_커서는_DB_조회_전에_400이다() throws Exception {
+        Statistics statistics = statistics();
+        Map<String, Instant> outside = new LinkedHashMap<>();
+        outside.put("from - 1µs", dayStart.minus(1, ChronoUnit.MICROS));
+        outside.put("to (같은 값)", dayEnd);
+        outside.put("to + 1s", dayEnd.plusSeconds(1));
+
+        for (Map.Entry<String, Instant> e : outside.entrySet()) {
+            statistics.clear();
+            HttpResponse<String> response = period("CHARGE", dayStart.toString(), dayEnd.toString(),
+                    forgedCursor(dayStart, dayEnd, e.getValue()), null);
+
+            assertEquals(400, response.statusCode(), e.getKey() + " " + response.body());
+            assertEquals("LEDGER_INVALID_CURSOR", errorCode(response), e.getKey());
+            assertEquals(0, statistics.getPrepareStatementCount(), e.getKey() + " 쿼리 수");
+        }
+
+        // 대조: 범위 안 위치(from 포함, to - 1µs)는 통과한다
+        for (Instant inside : List.of(dayStart, dayEnd.minus(1, ChronoUnit.MICROS))) {
+            periodData("CHARGE", dayStart.toString(), dayEnd.toString(), forgedCursor(dayStart, dayEnd, inside), null);
+        }
+    }
+
+    private static String forgedCursor(Instant from, Instant to, Instant position) {
+        String raw = String.join(":", "v1", "CHARGE", Long.toString(micros(from)), Long.toString(micros(to)),
+                Long.toString(micros(position)), UUID.randomUUID().toString());
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static long micros(Instant instant) {
+        return instant.getEpochSecond() * 1_000_000L + instant.getNano() / 1_000L;
     }
 
     // ---- 커서 순회 ----
