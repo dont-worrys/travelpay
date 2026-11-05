@@ -31,6 +31,12 @@ public class TransferLedgerReader {
         this.ledgerFeignApi = ledgerFeignApi;
     }
 
+    /**
+     * 송금 ID를 reference로 원장 거래 결과를 조회합니다.
+     *
+     * @return 원장 거래가 있으면 POSTED 또는 REJECTED(거절 사유 포함), 404 LEDGER_TRANSACTION_NOT_FOUND이면 empty
+     * @throws BusinessException 그 밖의 원장 오류는 common 규칙의 5xx·502, 해석할 수 없는 성공 응답은 502
+     */
     public Optional<LedgerTransactionResponse> findTransfer(UUID transferId) {
         ApiResponse<LedgerFeignApi.TransactionResultResponse> response;
         try {
@@ -55,6 +61,7 @@ public class TransferLedgerReader {
         throw new BusinessException(CommonErrorCode.BAD_GATEWAY);
     }
 
+    /** 원장 거절 사유 문자열을 변환합니다. 없거나 모르는 값이면 502입니다. */
     private static RejectReason rejectReason(String value) {
         try {
             return RejectReason.valueOf(value);

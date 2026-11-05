@@ -1,5 +1,6 @@
 package com.travelpay.payment.transfer.integration;
 
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -20,6 +21,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -116,6 +118,12 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
         entityManager.clear();
         transferService.recoverDue(Instant.now().plusSeconds(31), 10);
         assertThat(row(transferId).get("status")).isEqualTo("COMPLETED");
+
+        // 재처리로 돌린 요청을 다시 보내면 복구로 바뀐 현재 상태를 돌려줍니다.
+        resolve(transferId, "PROCESSING", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"));
+        assertThat(historyCount(transferId)).isEqualTo(1);
     }
 
     @Test
@@ -169,15 +177,58 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
     }
 
     @Test
-    void secondResolutionIsConflict() throws Exception {
+    void sameResolutionRetryReturnsExistingResultWithoutLedgerLookup() throws Exception {
         UUID transferId = manualReview(RETRY_EXHAUSTED);
-        givenLedger(transferId, "POSTED", null);
-        resolve(transferId, "COMPLETED", ledgerTransactionId).andExpect(status().isOk());
+        givenLedger(transferId, "REJECTED", "INSUFFICIENT_BALANCE");
+        resolve(transferId, "FAILED", ledgerTransactionId).andExpect(status().isOk());
+
+        resolve(transferId, "FAILED", ledgerTransactionId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("FAILED"))
+                .andExpect(jsonPath("$.data.failureReason").value("INSUFFICIENT_BALANCE"));
+        assertThat(historyCount(transferId)).isEqualTo(1);
+        verify(ledgerFeignApi, times(1)).getTransaction("TRANSFER", transferId);
+    }
+
+    @Test
+    void concurrentSameResolutionThatLosesConditionalUpdateReturnsWinnerResult() throws Exception {
+        UUID transferId = manualReview(RETRY_EXHAUSTED);
+        givenLedgerPostedAfterCompetingResolution(transferId, masterId, "원장 POSTED 확인");
+
+        resolve(transferId, "COMPLETED", ledgerTransactionId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"));
+        assertThat(row(transferId).get("status")).isEqualTo("COMPLETED");
+        assertThat(historyCount(transferId)).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentDifferentResolutionThatLosesConditionalUpdateIsConflict() throws Exception {
+        UUID transferId = manualReview(RETRY_EXHAUSTED);
+        givenLedgerPostedAfterCompetingResolution(transferId, UUID.randomUUID(), "원장 POSTED 확인");
 
         resolve(transferId, "COMPLETED", ledgerTransactionId)
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
+        assertThat(row(transferId).get("status")).isEqualTo("COMPLETED");
         assertThat(historyCount(transferId)).isEqualTo(1);
+    }
+
+    @Test
+    void differentResolutionAfterSettlementIsConflict() throws Exception {
+        UUID transferId = manualReview(RETRY_EXHAUSTED);
+        givenLedger(transferId, "POSTED", null);
+        resolve(transferId, "COMPLETED", ledgerTransactionId).andExpect(status().isOk());
+
+        expectConflict(asMaster(post(resolvePath(transferId))), body("COMPLETED", ledgerTransactionId, "다른 사유"));
+        expectConflict(asMaster(post(resolvePath(transferId))), body("COMPLETED", UUID.randomUUID(), "원장 POSTED 확인"));
+        expectConflict(asMaster(post(resolvePath(transferId))), body("FAILED", ledgerTransactionId, "원장 POSTED 확인"));
+        expectConflict(post(resolvePath(transferId)).header(AuthHeaders.USER_ID, UUID.randomUUID().toString())
+                .header(AuthHeaders.USER_ROLE, "MASTER"), body("COMPLETED", ledgerTransactionId, "원장 POSTED 확인"));
+
+        assertThat(row(transferId).get("status")).isEqualTo("COMPLETED");
+        assertThat(historyCount(transferId)).isEqualTo(1);
+        verify(ledgerFeignApi, times(1)).getTransaction("TRANSFER", transferId);
     }
 
     @Test
@@ -252,6 +303,27 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
                 new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, status, rejectReason)));
     }
 
+    /**
+     * 동시 요청 경합을 재현합니다. 서비스는 MANUAL_REVIEW 확인 → 원장 조회 → 조건부 UPDATE 순서라, 원장 조회 중에
+     * 다른 요청이 먼저 확정(COMPLETED + 운영자 이력)한 것처럼 DB를 바꿔 두면 이 요청의 조건부 UPDATE는 0행이 됩니다.
+     */
+    private void givenLedgerPostedAfterCompetingResolution(UUID transferId, UUID winnerId, String winnerReason) {
+        when(ledgerFeignApi.getTransaction("TRANSFER", transferId)).thenAnswer(invocation -> {
+            Instant now = Instant.now();
+            jdbcTemplate.update("""
+                    update transfer set status = 'COMPLETED', review_reason = null, updated_at = ? where id = ?""",
+                    Timestamp.from(now), transferId);
+            jdbcTemplate.update("""
+                    insert into transfer_status_history
+                        (id, transfer_id, from_status, to_status, reason, actor_type, actor_id,
+                         ledger_transaction_id, created_at)
+                    values (?, ?, 'MANUAL_REVIEW', 'COMPLETED', ?, 'OPERATOR', ?, ?, ?)""",
+                    UUID.randomUUID(), transferId, winnerReason, winnerId, ledgerTransactionId, Timestamp.from(now));
+            return ApiResponse.success(
+                    new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "POSTED", null));
+        });
+    }
+
     private void givenLedgerNotFound(UUID transferId) {
         when(ledgerFeignApi.getTransaction("TRANSFER", transferId))
                 .thenThrow(lookupError(transferId, 404, "LEDGER_TRANSACTION_NOT_FOUND"));
@@ -263,6 +335,7 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
                 status, errorBody(code));
     }
 
+    /** MASTER로 확정 요청을 보냅니다. 사유는 targetStatus별 고정값이라 같은 호출을 반복하면 같은 요청이 됩니다. */
     private ResultActions resolve(UUID transferId, String targetStatus, UUID ledgerId) throws Exception {
         String reason = "COMPLETED".equals(targetStatus) ? "원장 POSTED 확인" : "원장 결과 확인";
         return mvc.perform(asMaster(post(resolvePath(transferId)))
@@ -274,6 +347,13 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
         mvc.perform(asMaster(post(resolvePath(transferId))).contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+    }
+
+    /** 확정 요청이 409 COMMON_CONFLICT인지 확인합니다. */
+    private void expectConflict(MockHttpServletRequestBuilder builder, String body) throws Exception {
+        mvc.perform(builder.contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
     }
 
     private static void expectMismatch(ResultActions result) throws Exception {
@@ -295,6 +375,7 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
                 "select count(*) from transfer_status_history where transfer_id = ?", Long.class, transferId);
     }
 
+    /** 확정 요청 본문 JSON을 만듭니다. ledgerId가 null이면 null 값으로 보냅니다. */
     private static String body(String targetStatus, UUID ledgerId, String reason) {
         String ledger = ledgerId == null ? "null" : "\"" + ledgerId + "\"";
         return """

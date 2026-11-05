@@ -65,7 +65,7 @@ public class TransferOpenApiConfig {
                 .build();
     }
 
-    // Gateway 없이 payment-service를 직접 호출할 때 입력하는 회원 헤더입니다.
+    /** Gateway 없이 payment-service를 직접 호출할 때 입력하는 회원 헤더(User-Id·User-Role)를 모든 API 문서에 추가합니다. */
     private static OperationCustomizer authHeaders(String sampleRole) {
         return (operation, handlerMethod) -> operation
                 .addParametersItem(new HeaderParameter()

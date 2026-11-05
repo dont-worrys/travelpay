@@ -148,6 +148,7 @@ class AdminTransferApiIntegrationTest extends TransferApiIntegrationSupport {
                 .andExpect(jsonPath("$.data.items[*].transferId", contains(first.toString(), low, high)));
     }
 
+    /** 페이지를 나눠 조회하고, 최대 크기(100)를 넘는 size는 100으로 줄여 조회하는지 확인합니다. */
     @Test
     void pagesResultsAndCapsPageSize() throws Exception {
         for (int i = 0; i < 3; i++) {
@@ -227,11 +228,15 @@ class AdminTransferApiIntegrationTest extends TransferApiIntegrationSupport {
                 createdAt);
     }
 
-    // PostgreSQL uuid 정렬은 바이트 순서이며, Java UUID.compareTo(부호 있는 비교)와 다를 수 있어 문자열로 비교합니다.
+    /**
+     * DB 정렬 기준으로 앞선 UUID를 반환합니다.
+     * PostgreSQL uuid 정렬은 바이트 순서이며, Java UUID.compareTo(부호 있는 비교)와 다를 수 있어 문자열로 비교합니다.
+     */
     private static UUID min(UUID a, UUID b) {
         return a.toString().compareTo(b.toString()) <= 0 ? a : b;
     }
 
+    /** DB 정렬 기준으로 뒤에 오는 UUID를 반환합니다({@link #min}과 같은 문자열 비교). */
     private static UUID max(UUID a, UUID b) {
         return a.toString().compareTo(b.toString()) <= 0 ? b : a;
     }
