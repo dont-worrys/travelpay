@@ -28,7 +28,7 @@ mock-bank는 충전에서 외부 은행 역할을 하는 대역 서비스입니�
 
    - 포트는 `8090`입니다(로컬·배포 설정 같음). `GET http://localhost:8090/actuator/health`로 상태를 확인합니다. actuator는 `health`·`prometheus`만 엽니다.
    - 필요한 환경 변수는 `MOCK_BANK_DB_URL`·`MOCK_BANK_DB_USERNAME`·`MOCK_BANK_DB_PASSWORD`입니다. `MOCK_BANK_DB_URL`은 `currentSchema=mock_bank`를 붙입니다(`.env.example` 참고).
-   - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다.
+   - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다. [장애 주입](#장애-재현)은 prod 프로필(`SPRING_PROFILES_ACTIVE=prod`)에서 비활성이므로 배포에서는 이 값도 함께 지정합니다.
    - compose에는 mock-bank 컨테이너가 없습니다. 로컬에서는 `bootRun`으로 실행합니다.
 
 5. 테이블과 시드 계좌는 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)).
@@ -96,7 +96,7 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 
 출금(한 DB 트랜잭션):
 
-1. 같은 `requestId` 기록이 있으면 그대로 돌려줍니다([멱등성](#멱등성)).
+1. 같은 `requestId` 기록이 있으면 같은 내용일 때 그대로 돌려주고, 유형이나 내용이 다르면 409입니다([멱등성](#멱등성)).
 2. `bankCode` + `accountNumber`로 **회원(`USER`) 계좌**를 찾습니다. 없으면 `ACCOUNT_NOT_FOUND`. 플랫폼 계좌 번호를 넣어도 `ACCOUNT_NOT_FOUND`입니다.
 3. 계좌가 `ACTIVE`가 아니면 `ACCOUNT_SUSPENDED`.
 4. 예금주가 정확히 같지 않으면 `HOLDER_MISMATCH`.
@@ -105,12 +105,12 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 
 환불(한 DB 트랜잭션):
 
-1. 같은 `requestId` 기록이 있으면 그대로 돌려줍니다.
+1. 같은 `requestId` 기록이 있으면 같은 내용일 때 그대로 돌려주고, 유형이나 내용이 다르면 409입니다.
 2. `originalTxId` 거래가 없으면 `ORIGINAL_TX_NOT_FOUND`.
 3. 원거래가 성공한 출금(`DEBIT` + `SUCCEEDED`)이 아니면 `ORIGINAL_TX_NOT_REFUNDABLE`.
 4. 금액이 원출금 금액과 다르면 `AMOUNT_MISMATCH`.
 5. 이미 성공한 환불이 있으면 `ALREADY_REFUNDED`.
-6. 원출금 계좌 잔액을 늘리고 플랫폼 계좌 잔액을 줄인 뒤 `SUCCEEDED` 기록을 저장합니다.
+6. 원출금 계좌 잔액을 늘리고 플랫폼 계좌 잔액을 줄인 뒤 `SUCCEEDED` 기록을 저장합니다. 플랫폼 계좌 잔액이 환불 금액보다 적으면 늘린 잔액을 되돌리고 `INSUFFICIENT_BALANCE`로 기록합니다.
 
 - 잔액 변경 순서는 출금·환불 모두 회원 계좌 → 플랫폼 계좌로 같게 맞춰 교착을 막습니다.
 - 업무 거절도 `FAILED` 거래로 기록합니다. 그래서 같은 `requestId`로 다시 물어도 같은 답을 줍니다.
@@ -122,7 +122,8 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 | 출금 | `ACCOUNT_NOT_FOUND` | 은행 코드·계좌번호의 회원 계좌가 없음 |
 | 출금 | `ACCOUNT_SUSPENDED` | 계좌 상태가 `ACTIVE`가 아님 |
 | 출금 | `HOLDER_MISMATCH` | 예금주 불일치(앞뒤 공백 정리 후 정확히 비교) |
-| 출금 | `INSUFFICIENT_BALANCE` | 잔액 < 금액 |
+| 출금 | `INSUFFICIENT_BALANCE` | 회원 계좌 잔액 < 금액 |
+| 환불 | `INSUFFICIENT_BALANCE` | 플랫폼 계좌 잔액 < 환불 금액 |
 | 환불 | `ORIGINAL_TX_NOT_FOUND` | 원거래 없음 |
 | 환불 | `ORIGINAL_TX_NOT_REFUNDABLE` | 원거래가 성공한 출금이 아님(실패한 출금, 환불 거래 등) |
 | 환불 | `AMOUNT_MISMATCH` | 금액이 원출금 금액과 다름 |
@@ -177,12 +178,16 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 |---|---|
 | 처음 요청, 성공 | 201 `SUCCEEDED` |
 | 처음 요청, 업무 거절 | 200 `FAILED`(실패 코드). 기록됨 |
-| 같은 `requestId`·같은 유형 재요청 | 200, 기존 기록 그대로(`SUCCEEDED`든 `FAILED`든) |
+| 같은 `requestId`·같은 유형·같은 내용 재요청 | 200, 기존 기록 그대로(`SUCCEEDED`든 `FAILED`든) |
 | 같은 `requestId`를 다른 유형에 사용(출금 ID로 환불 등) | 409 `BANK_REQUEST_ID_CONFLICT` |
+| 같은 `requestId`·같은 유형인데 내용이 다름 | 409 `BANK_REQUEST_ID_CONFLICT` |
 | 같은 `requestId` 동시 요청 | 하나만 처리되고 나머지는 롤백 후 기존 기록을 200으로 돌려줌 |
 
 - 재요청은 다시 판정하지 않습니다. 거절된 `requestId`는 잔액을 채워도 계속 같은 `FAILED`를 돌려주므로 새 시도에는 새 `requestId`가 필요합니다.
-- 재요청은 `requestId`와 유형만 비교합니다. 금액·계좌가 달라도 기존 기록을 돌려주므로 재전송은 처음과 같은 값으로 만듭니다.
+- 같은 내용인지는 거래 기록에 저장된 값으로 비교합니다.
+  - 출금: 금액, 그리고 `bankCode`+`accountNumber`로 찾은 회원 계좌가 기록의 출금 계좌와 같은지. 계좌 없음으로 거절된 기록은 지금도 회원 계좌를 찾지 못하면 같은 계좌로 봅니다.
+  - 환불: 금액, 그리고 `originalTxId`가 기록의 원거래와 같은지. 원거래 없음으로 거절된 기록은 지금도 그 거래가 없으면 같은 원거래로 봅니다.
+  - 예금주는 기록하지 않으므로 비교하지 않습니다. 계좌 없음으로 거절된 기록은 없는 계좌번호끼리 구분하지 못합니다.
 - 중복 방지는 DB `UNIQUE(request_id)`로 보장합니다.
 
 ### 응답 코드와 호출 쪽 처리 권장
@@ -192,7 +197,7 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 | 201 | 새로 성공 | 성공 처리 |
 | 200 `SUCCEEDED` | 이미 성공한 기록 | 201과 같이 성공 처리 |
 | 200 `FAILED` | 업무 거절 확정. 자금 이동 없음 | 실패로 확정. 같은 `requestId` 재전송은 같은 결과 |
-| 409 `BANK_REQUEST_ID_CONFLICT` | `requestId`가 다른 유형 거래에 이미 쓰임 | 자동 재시도 중단, ERROR 로그 |
+| 409 `BANK_REQUEST_ID_CONFLICT` | `requestId`가 다른 유형 또는 다른 내용의 거래에 이미 쓰임 | 자동 재시도 중단, ERROR 로그 |
 | 400 | 요청 형식 오류 | 재시도해도 같음. 자동 재시도 중단 |
 | 500 | 예상하지 못한 오류 또는 `LOST` 장애 주입 | 결과 모름. 같은 `requestId`로 재전송하거나 [단건 조회](#단건-조회)로 확인 |
 | 읽기 타임아웃·연결 실패 | 은행이 처리했을 수 있음 | 실패로 단정하지 않음. 같은 `requestId` 재전송(한 번만 처리됨) 또는 단건 조회 |
@@ -256,7 +261,7 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 
 ## 장애 재현
 
-`Mock-Fault` 요청 헤더로 응답 장애를 흉내 냅니다.
+`Mock-Fault` 요청 헤더로 응답 장애를 흉내 냅니다. prod 프로필(`SPRING_PROFILES_ACTIVE=prod`)에서 비활성입니다. 이때는 헤더가 와도 무시하고 정상 응답합니다.
 
 | 헤더 값 | 동작 |
 |---|---|
@@ -286,7 +291,7 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 | 400 | `COMMON_INVALID_REQUEST` | 본문 검증 실패, 필수 파라미터 누락, 시각·숫자 형식 오류, `from > to`, `page < 0`, `size < 1`, offset 한도 초과, 시각 올림 범위 초과 |
 | 404 | `BANK_TRANSACTION_NOT_FOUND` | 단건 조회에서 `requestId` 기록 없음 |
 | 404 | `COMMON_NOT_FOUND` | 없는 경로 |
-| 409 | `BANK_REQUEST_ID_CONFLICT` | 같은 `requestId`로 다른 유형의 거래가 이미 있음 |
+| 409 | `BANK_REQUEST_ID_CONFLICT` | 같은 `requestId`로 다른 유형 또는 다른 내용의 거래가 이미 있음 |
 | 500 | `COMMON_INTERNAL_SERVER_ERROR` | 예상하지 못한 오류, `Mock-Fault: LOST` |
 
 업무 거절은 이 표에 없습니다. 200 + `FAILED` + [실패 코드](#실패-코드)입니다.
@@ -331,7 +336,8 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 
 | 테스트 | 범위 |
 |---|---|
-| `BankTransactionApiIntegrationTest` | 같은 `requestId` 동시 출금 1회 처리, 업무 거절 `FAILED` 기록·재요청 같은 결과, 예금주 공백 정리, `DELAY`·`LOST`(커밋 후 적용, 재요청은 기존 결과. 지연은 `1s`로 줄여 실행), 형식 오류 400, 다른 유형 `requestId` 409, 동시 환불 1건만 성공·나머지 `ALREADY_REFUNDED`, 환불 재요청·업무 거절, 같은 계좌 출금·환불 동시 처리 교착 없음, 단건 조회 |
+| `BankTransactionApiIntegrationTest` | 같은 `requestId` 동시 출금 1회 처리, 업무 거절 `FAILED` 기록·재요청 같은 결과, 예금주 공백 정리, `DELAY`·`LOST`(커밋 후 적용, 재요청은 기존 결과. 지연은 `1s`로 줄여 실행), 형식 오류 400, 다른 유형 `requestId` 409, 같은 `requestId` 다른 내용(출금 금액·계좌, 환불 금액·원거래, 계좌 없음·원거래 없음 거절 포함) 409·같은 내용 200, 동시 환불 1건만 성공·나머지 `ALREADY_REFUNDED`, 환불 재요청·업무 거절, 플랫폼 잔액 부족 환불 `INSUFFICIENT_BALANCE`(잔액 그대로), 같은 계좌 출금·환불 동시 처리 교착 없음, 단건 조회 |
+| `BankFaultInjectionProdProfileTest` | `application-prod.yml` + prod 프로필에서 `Mock-Fault: LOST`를 무시하고 201, 장애 주입 필터 빈 없음 |
 | `BankTransactionQueryApiIntegrationTest` | 단건 필드·환불 원거래·실패 코드, 404, 반복 조회해도 거래 불변, `[from, to)` 경계, 빈 목록, 같은 시각 ID 정렬, 페이지 이어 받기, 오프셋 시각 UTC 해석, `sort` 무시, 입력 오류 400, `size` 기본 20·최대 100, offset 한도, 마이크로초 올림, 목록 응답에 계좌 정보 없음 |
 
 ## 고려 중
@@ -342,6 +348,4 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 |---|---|---|
 | `created_at` 인덱스 | `bank_transactions`에 `created_at` 인덱스가 없음. 기간 목록은 인덱스 없이 조회함 | 데이터 규모에 따라 `(created_at, id)` 인덱스 추가 |
 | 장애 비율 | 헤더를 붙인 요청에만 장애. 확률·비율로 섞는 설정 없음 | 부하 테스트용 비율 주입 필요 여부 |
-| 같은 `requestId` 다른 내용 | 유형만 비교하고 금액·계좌가 달라도 기존 기록을 돌려줌 | 내용 불일치를 409로 막을지 |
 | 계좌 관리 | 잔액·상태를 바꾸는 API 없음(시드 SQL로만 준비) | 테스트 데이터 초기화·추가 방법 |
-| prod 설정 | `application-prod.yml`에 `spring.flyway.default-schema`·`mock-bank.fault.delay`가 없음(`application.yml`에만 있음). 장애 주입 필터에 prod 차단 없음 | 배포 설정에 같은 값을 둘지, 배포에서 장애 주입을 막을지 |
