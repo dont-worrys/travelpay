@@ -103,20 +103,44 @@ public class Payment {
         return PaymentHistory.of(this.id, previous, this.status, reason, actor);
     }
 
+    // MANUAL_REVIEW 처리: 원장에 거래가 반영되어 있어 승인으로 확정합니다
+    public PaymentHistory resolveApprovedHistory(UUID ledgerId) {
+        PaymentStatus previous = changeStatus(PaymentStatus.MANUAL_REVIEW, PaymentStatus.APPROVED);
+        this.ledgerId = Objects.requireNonNull(ledgerId);
+        this.reviewReason = null;
+        return PaymentHistory.of(this.id, previous, this.status, "원장에 거래가 반영되어 있음", PaymentActor.MASTER);
+    }
+
+    // MANUAL_REVIEW 처리: 원장에서 돈이 움직이지 않아 거절로 끝냅니다
+    public PaymentHistory resolveDeclinedHistory(String reason) {
+        PaymentStatus previous = changeStatus(PaymentStatus.MANUAL_REVIEW, PaymentStatus.DECLINED);
+        this.declineReason = reason;
+        this.reviewReason = null;
+        return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.MASTER);
+    }
+
     // 남은 금액이 없으면 REFUNDED, 남아 있으면 부분 환불로 APPROVED로 되돌립니다.
     public PaymentHistory refundCompletedHistory(long refundAmount, long remainingAmount) {
+        return refundCompletedHistory(refundAmount, remainingAmount, PaymentActor.SYSTEM);
+    }
+
+    public PaymentHistory refundCompletedHistory(long refundAmount, long remainingAmount, PaymentActor actor) {
         if (remainingAmount == 0) {
             PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.REFUNDED);
-            return PaymentHistory.of(this.id, previous, this.status, null, PaymentActor.SYSTEM);
+            return PaymentHistory.of(this.id, previous, this.status, null, actor);
         }
         PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.APPROVED);
-        return PaymentHistory.of(this.id, previous, this.status, "부분 환불 완료: " + refundAmount, PaymentActor.SYSTEM);
+        return PaymentHistory.of(this.id, previous, this.status, "부분 환불 완료: " + refundAmount, actor);
     }
 
     // 환불이 거절되면 결제는 그대로 유효하므로 APPROVED로 되돌립니다. 거절 사유는 이력과 환불 내역에 남깁니다.
     public PaymentHistory refundDeclinedHistory(String reason) {
+        return refundDeclinedHistory(reason, PaymentActor.SYSTEM);
+    }
+
+    public PaymentHistory refundDeclinedHistory(String reason, PaymentActor actor) {
         PaymentStatus previous = changeStatus(PaymentStatus.REFUND_PENDING, PaymentStatus.APPROVED);
-        return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.SYSTEM);
+        return PaymentHistory.of(this.id, previous, this.status, reason, actor);
     }
 
     public boolean isOwnedBy(UUID userId) {

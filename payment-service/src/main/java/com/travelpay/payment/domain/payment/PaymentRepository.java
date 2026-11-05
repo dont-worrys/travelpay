@@ -14,6 +14,7 @@ public interface PaymentRepository {
     Optional<Payment> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
     Page<Payment> findPageByUserId(UUID userId, PaymentStatus status, Pageable pageable);
     Page<Payment> findPageByMerchantId(UUID merchantId, PaymentStatus status, Pageable pageable);
+    Page<Payment> findManualReviews(SettlementReviewReason reviewReason, Pageable pageable);
     List<Payment> findRecoveryTargets(Instant now, int limit);
     int claimForRecovery(UUID paymentId, Instant seenUpdatedAt, Instant now);
     int recordUnknownAttempt(UUID paymentId, int expectedAttempts, PaymentStatus status,

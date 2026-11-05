@@ -4,6 +4,7 @@ import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -296,6 +297,70 @@ class PaymentTest {
         assertTrue(refund.isSameRequest(PAYMENT_ID, 10_000L));
         assertFalse(refund.isSameRequest(OTHER_PAYMENT_ID, 10_000L));
         assertFalse(refund.isSameRequest(PAYMENT_ID, 3_000L));
+    }
+
+    @Test
+    void resolveApprovedMovesManualReviewToApprovedByMaster() {
+        Payment payment = manualReviewPayment();
+
+        PaymentHistory history = payment.resolveApprovedHistory(LEDGER_ID);
+
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        assertEquals(LEDGER_ID, payment.getLedgerId());
+        assertNull(payment.getReviewReason());
+        assertEquals(PaymentStatus.MANUAL_REVIEW, history.getPreviousStatus());
+        assertEquals(PaymentStatus.APPROVED, history.getCurrentStatus());
+        assertEquals("원장에 거래가 반영되어 있음", history.getReason());
+        assertEquals(PaymentActor.MASTER, history.getCreatedBy());
+    }
+
+    @Test
+    void resolveDeclinedMovesManualReviewToDeclinedByMaster() {
+        Payment payment = manualReviewPayment();
+
+        PaymentHistory history = payment.resolveDeclinedHistory("결제 처리 시간이 초과되어 취소되었습니다.");
+
+        assertEquals(PaymentStatus.DECLINED, payment.getStatus());
+        assertEquals("결제 처리 시간이 초과되어 취소되었습니다.", payment.getDeclineReason());
+        assertNull(payment.getReviewReason());
+        assertEquals(PaymentStatus.MANUAL_REVIEW, history.getPreviousStatus());
+        assertEquals(PaymentStatus.DECLINED, history.getCurrentStatus());
+        assertEquals("결제 처리 시간이 초과되어 취소되었습니다.", history.getReason());
+        assertEquals(PaymentActor.MASTER, history.getCreatedBy());
+    }
+
+    @Test
+    void resolveRejectsPaymentNotInManualReview() {
+        Payment pending = payment(10_000L);
+        Payment approved = approvedPayment();
+
+        BusinessException approve = assertThrows(BusinessException.class, () -> pending.resolveApprovedHistory(LEDGER_ID));
+        BusinessException decline = assertThrows(BusinessException.class, () -> approved.resolveDeclinedHistory("x"));
+
+        assertEquals(PaymentErrorCode.INVALID_STATUS_TRANSITION, approve.getErrorCode());
+        assertEquals(PaymentErrorCode.INVALID_STATUS_TRANSITION, decline.getErrorCode());
+        assertEquals(PaymentStatus.PENDING, pending.getStatus());
+        assertEquals(PaymentStatus.APPROVED, approved.getStatus());
+    }
+
+    @Test
+    void refundOutcomeHistoriesRecordGivenActor() {
+        Payment completed = approvedPayment();
+        completed.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        Payment declined = approvedPayment();
+        declined.refundRequestedHistory("단순 변심", PaymentActor.USER);
+
+        assertEquals(PaymentActor.MASTER,
+                completed.refundCompletedHistory(10_000L, 0L, PaymentActor.MASTER).getCreatedBy());
+        assertEquals(PaymentActor.MASTER,
+                declined.refundDeclinedHistory("환불 처리 중 오류로 취소되었습니다.", PaymentActor.MASTER).getCreatedBy());
+    }
+
+    private Payment manualReviewPayment() {
+        Payment payment = payment(10_000L);
+        ReflectionTestUtils.setField(payment, "status", PaymentStatus.MANUAL_REVIEW);
+        ReflectionTestUtils.setField(payment, "reviewReason", SettlementReviewReason.RETRY_EXHAUSTED);
+        return payment;
     }
 
     private Payment payment(long amount) {

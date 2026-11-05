@@ -1,8 +1,10 @@
 package com.travelpay.payment.infra.persistence.payment;
 
 import com.travelpay.payment.domain.payment.Refund;
+import com.travelpay.payment.domain.payment.RefundManualReview;
 import com.travelpay.payment.domain.payment.RefundStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
@@ -76,6 +78,60 @@ public interface RefundJpaRepository extends JpaRepository<Refund, UUID> {
     int markManualReview(@Param("id") UUID id,
                          @Param("reviewReason") SettlementReviewReason reviewReason,
                          @Param("now") Instant now);
+
+    // MANUAL_REVIEW 환불 목록. 고객·가맹점은 결제에서 가져옴(연관 관계가 없어 엔티티 조인)
+    @Query(value = """
+            select new com.travelpay.payment.domain.payment.RefundManualReview(
+                r.id, r.paymentId, p.userId, p.merchantId, r.userId, r.amount, r.currency,
+                r.reviewReason, r.attemptCount, r.createdAt, r.updatedAt)
+            from Refund r join Payment p on p.id = r.paymentId
+            where r.status = com.travelpay.payment.domain.payment.RefundStatus.MANUAL_REVIEW
+              and (:reviewReason is null or r.reviewReason = :reviewReason)
+            order by r.createdAt, r.id
+            """,
+            countQuery = """
+            select count(r) from Refund r
+            where r.status = com.travelpay.payment.domain.payment.RefundStatus.MANUAL_REVIEW
+              and (:reviewReason is null or r.reviewReason = :reviewReason)
+            """)
+    Page<RefundManualReview> findManualReviews(@Param("reviewReason") SettlementReviewReason reviewReason,
+                                               Pageable pageable);
+
+    // MANUAL_REVIEW 처리. 다른 처리가 먼저 끝났으면 0건
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Refund r
+            set r.status = com.travelpay.payment.domain.payment.RefundStatus.COMPLETED,
+                r.ledgerId = :ledgerId, r.reviewReason = null, r.updatedAt = :now
+            where r.id = :id
+              and r.status = com.travelpay.payment.domain.payment.RefundStatus.MANUAL_REVIEW
+            """)
+    int resolveCompleted(@Param("id") UUID id, @Param("ledgerId") UUID ledgerId, @Param("now") Instant now);
+
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Refund r
+            set r.status = com.travelpay.payment.domain.payment.RefundStatus.DECLINED,
+                r.declineReason = :declineReason, r.reviewReason = null, r.updatedAt = :now
+            where r.id = :id
+              and r.status = com.travelpay.payment.domain.payment.RefundStatus.MANUAL_REVIEW
+            """)
+    int resolveDeclined(@Param("id") UUID id, @Param("declineReason") String declineReason,
+                        @Param("now") Instant now);
+
+    // 원장에 기록이 없어 다시 시도: 시도 횟수를 0으로 되돌려 복구 스케줄러가 30초 뒤부터 다시 요청
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Refund r
+            set r.status = com.travelpay.payment.domain.payment.RefundStatus.REQUESTED,
+                r.attemptCount = 0, r.reviewReason = null, r.updatedAt = :now
+            where r.id = :id
+              and r.status = com.travelpay.payment.domain.payment.RefundStatus.MANUAL_REVIEW
+            """)
+    int resolveRetry(@Param("id") UUID id, @Param("now") Instant now);
 
     long countByStatus(RefundStatus status);
 

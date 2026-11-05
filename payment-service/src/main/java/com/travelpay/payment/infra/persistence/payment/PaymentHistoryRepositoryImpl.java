@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -23,7 +24,7 @@ public class PaymentHistoryRepositoryImpl implements PaymentHistoryRepository {
 
     @Override
     public Optional<Instant> findApprovedAt(UUID paymentId) {
-        return paymentHistoryJpaRepository.findTransitionedAt(
-                paymentId, PaymentStatus.PENDING, PaymentStatus.APPROVED);
+        return paymentHistoryJpaRepository.findApprovedAt(
+                paymentId, List.of(PaymentStatus.PENDING, PaymentStatus.MANUAL_REVIEW));
     }
 }
