@@ -5,9 +5,13 @@ import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.ledger.application.transaction.dto.RegisterTransactionCommand;
 import com.travelpay.ledger.domain.Currency;
 import com.travelpay.ledger.domain.transaction.Direction;
+import com.travelpay.ledger.domain.transaction.EntryType;
 
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 형식 검증(400). DB에 닿기 전에 확인하며, 위반이면 아무것도 기록하지 않는다.
@@ -17,6 +21,10 @@ final class TransactionCommandValidator {
 
     private static final int MIN_ENTRIES = 2;
     private static final int MAX_ENTRIES = 20;
+    /** V5 CHECK와 같은 값. 허용 밖 값이 DB CHECK(500)까지 내려가지 않게 미리 거절한다 */
+    private static final Set<String> ENTRY_TYPES = Arrays.stream(EntryType.values())
+            .map(Enum::name)
+            .collect(Collectors.toUnmodifiableSet());
 
     private TransactionCommandValidator() {
     }
@@ -41,7 +49,7 @@ final class TransactionCommandValidator {
     private static void validateEntry(RegisterTransactionCommand.Entry entry) {
         if (entry == null || entry.ownerType() == null || entry.currency() == null
                 || entry.direction() == null || entry.amount() <= 0
-                || entry.entryType() == null || entry.entryType().isBlank()) {
+                || entry.entryType() == null || !ENTRY_TYPES.contains(entry.entryType())) {
             throw invalid();
         }
         boolean validAccount = switch (entry.ownerType()) {
