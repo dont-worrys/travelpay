@@ -37,7 +37,7 @@ spring:
             - id: payment-service
               uri: lb://payment-service
               predicates:
-                - Path=/api/v1/payments/**,/api/v1/transfers/**,/api/v1/admin/transfers/**
+                - Path=/api/v1/payments/**,/api/v1/transfers/**,/api/v1/admin/payments/**,/api/v1/admin/transfers/**
               filters:
                 - RemoveRequestHeader=Cookie
             - id: exchange-service
