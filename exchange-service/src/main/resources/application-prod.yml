@@ -11,6 +11,18 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  data:
+    redis:
+      # 환율 캐시용 Redis(redis-cache 컨테이너, 내부 포트 6379)입니다. 세션 Redis와 다른 인스턴스입니다.
+      host: ${REDIS_CACHE_HOST:redis-cache}
+      port: ${REDIS_CACHE_PORT:6379}
+      password: ${REDIS_CACHE_PASSWORD}
+      # 명령 하나를 200ms까지만 기다리고 넘으면 DB로 조회한다. 빠지면 Lettuce 기본값(60초)이 되어
+      # Redis가 멈췄을 때 환율 조회·견적 발급이 60초씩 붙잡힌다
+      connect-timeout: 1s
+      timeout: 200ms
+      repositories:
+        enabled: false
   task:
     scheduling:
       pool:
@@ -71,6 +83,10 @@ eureka:
       defaultZone: http://eureka-server:8761/eureka/
 
 management:
+  health:
+    redis:
+      # 캐시 Redis가 꺼져도 DB로 조회해 서비스는 동작하므로, Redis 상태로 앱 health를 DOWN으로 만들지 않는다
+      enabled: false
   endpoints:
     web:
       exposure:
