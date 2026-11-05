@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -76,6 +77,7 @@ public class TransferAdminService {
      * </ul>
      * 원장 조회는 DB 트랜잭션 밖에서 하고, 조건부 UPDATE(MANUAL_REVIEW일 때만)와 이력 저장은 한 트랜잭션으로 묶습니다.
      * 원장 조회 실패(타임아웃·5xx 등)는 상태를 바꾸지 않고 common 규칙의 5xx로 응답합니다.
+     * 이미 확정된 송금에 같은 요청이 다시 오면 기존 결과(현재 상태)를 200으로, 다른 요청이면 409를 돌려줍니다({@link #replay}).
      */
     public AdminTransferResponse resolve(AuthenticatedUser admin, UUID transferId, AdminTransferResolveRequest request) {
         requireMaster(admin);
@@ -87,32 +89,63 @@ public class TransferAdminService {
         if (settles != (request.ledgerTransactionId() != null)) {
             throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
         }
-        Transfer transfer = transferRepository.findById(transferId)
-                .orElseThrow(() -> new BusinessException(TransferErrorCode.NOT_FOUND));
+        Transfer transfer = findTransfer(transferId);
+        String reason = request.reason().strip();
         if (transfer.getStatus() != TransferStatus.MANUAL_REVIEW) {
-            throw new BusinessException(CommonErrorCode.CONFLICT);
+            return replay(admin, transfer, request, reason);
         }
 
         Optional<LedgerTransactionResponse> ledger = ledgerReader.findTransfer(transferId);
         TransferFailureReason failureReason = verify(transfer, ledger, request);
         UUID ledgerTransactionId = ledger.map(LedgerTransactionResponse::transactionId).orElse(null);
         int attemptCount = target == TransferStatus.PROCESSING ? 0 : transfer.getAttemptCount();
-        String reason = request.reason().strip();
 
-        transactionTemplate.executeWithoutResult(status -> {
+        Boolean applied = transactionTemplate.execute(status -> {
             Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
             int updated = transferRepository.resolveManualReview(transferId, target, failureReason, attemptCount, now);
             if (updated == 0) {
-                // 조회 이후 다른 운영자가 먼저 확정했습니다.
-                throw new BusinessException(CommonErrorCode.CONFLICT);
+                return false;
             }
             historyRepository.save(TransferStatusHistory.byOperator(transferId, TransferStatus.MANUAL_REVIEW, target,
                     reason, admin.userId(), ledgerTransactionId, now));
+            return true;
         });
+        if (!Boolean.TRUE.equals(applied)) {
+            // 조회 이후 다른 요청이 먼저 확정했습니다. 같은 요청의 동시 재시도면 그 결과를, 아니면 409를 돌려줍니다.
+            return replay(admin, findTransfer(transferId), request, reason);
+        }
         log.info("관리자 송금 확정 adminId={} transferId={} reviewReason={} targetStatus={} ledgerTransactionId={}",
                 admin.userId(), transferId, transfer.getReviewReason(), target, ledgerTransactionId);
+        return AdminTransferResponse.from(findTransfer(transferId));
+    }
+
+    /**
+     * 이미 MANUAL_REVIEW가 아닌 송금에 확정 요청이 다시 온 경우를 처리합니다(응답 유실 후 재시도 등).
+     * 마지막 운영자 확정 이력이 같은 운영자·같은 targetStatus·같은 ledgerTransactionId·같은 사유이면 같은 요청의 재시도로 보고
+     * 원장을 다시 조회하지 않고 현재 송금 상태로 200을 돌려줍니다. 재처리(PROCESSING)로 돌린 뒤 복구가 끝났다면 현재 상태는 COMPLETED 등일 수 있습니다.
+     * 그 밖(확정된 적 없음, 다른 운영자·다른 내용, 이후 다른 확정이 있음)은 409입니다.
+     */
+    private AdminTransferResponse replay(AuthenticatedUser admin, Transfer transfer,
+            AdminTransferResolveRequest request, String reason) {
+        boolean sameRequest = historyRepository
+                .findFirstByTransferIdAndActorTypeOrderByCreatedAtDescIdDesc(
+                        transfer.getId(), TransferStatusHistory.ActorType.OPERATOR)
+                .filter(last -> last.getActorId().equals(admin.userId())
+                        && last.getToStatus() == request.targetStatus()
+                        && Objects.equals(last.getLedgerTransactionId(), request.ledgerTransactionId())
+                        && last.getReason().equals(reason))
+                .isPresent();
+        if (!sameRequest) {
+            throw new BusinessException(CommonErrorCode.CONFLICT);
+        }
+        log.info("관리자 송금 확정 재요청 adminId={} transferId={} targetStatus={} currentStatus={}",
+                admin.userId(), transfer.getId(), request.targetStatus(), transfer.getStatus());
+        return AdminTransferResponse.from(transfer);
+    }
+
+    /** 송금을 조회합니다. 없으면 404 TRANSFER_NOT_FOUND입니다. */
+    private Transfer findTransfer(UUID transferId) {
         return transferRepository.findById(transferId)
-                .map(AdminTransferResponse::from)
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.NOT_FOUND));
     }
 
@@ -196,12 +229,14 @@ public class TransferAdminService {
                 .orElseThrow(() -> new BusinessException(TransferErrorCode.NOT_FOUND));
     }
 
+    /** 요청자가 MASTER가 아니면 403 COMMON_FORBIDDEN입니다. */
     private static void requireMaster(AuthenticatedUser user) {
         if (user.role() != AuthRole.MASTER) {
             throw new BusinessException(CommonErrorCode.FORBIDDEN);
         }
     }
 
+    /** 목록 조회 조건 중 값이 있는 것만 AND로 묶습니다. 기간은 from 포함·to 미포함, userId는 송금인 또는 수취인입니다. */
     private static Specification<Transfer> matching(AdminTransferSearch search) {
         return (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
