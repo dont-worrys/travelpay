@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 
@@ -24,4 +25,17 @@ public interface LedgerEntryJpaRepository extends JpaRepository<LedgerEntry, UUI
             order by e.id asc
             """)
     List<LedgerEntryLine> findLinesByTransactionId(@Param("transactionId") UUID transactionId);
+
+    /** 위와 같은 JOIN을 여러 거래에 한 번에. 거래별 순서가 단건 조회와 같도록 항목 id 순 */
+    @Query("""
+            select new com.travelpay.ledger.infra.persistence.transaction.TransactionEntryLineRow(
+                e.transactionId, a.ownerType, a.walletId, a.accountType, e.currency, e.direction, e.amount,
+                e.entryType)
+            from LedgerEntry e
+            join LedgerAccount a on a.id = e.accountId
+            where e.transactionId in :transactionIds
+            order by e.id asc
+            """)
+    List<TransactionEntryLineRow> findLinesByTransactionIds(
+            @Param("transactionIds") Collection<UUID> transactionIds);
 }

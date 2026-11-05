@@ -4,10 +4,14 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.ledger.application.transaction.dto.LedgerEntryResult;
 import com.travelpay.ledger.application.transaction.dto.RegisterTransactionCommand;
 import com.travelpay.ledger.application.transaction.dto.TransactionDetailResult;
+import com.travelpay.ledger.application.transaction.dto.TransactionPeriodQuery;
+import com.travelpay.ledger.application.transaction.dto.TransactionPeriodResult;
 import com.travelpay.ledger.application.transaction.dto.TransactionResult;
 import com.travelpay.ledger.domain.LedgerErrorCode;
 import com.travelpay.ledger.domain.transaction.DuplicateReferenceException;
+import com.travelpay.ledger.domain.transaction.LedgerEntryLine;
 import com.travelpay.ledger.domain.transaction.LedgerTransaction;
+import com.travelpay.ledger.domain.transaction.LedgerTransactionPosition;
 import com.travelpay.ledger.domain.transaction.LedgerTransactionRepository;
 import com.travelpay.ledger.domain.transaction.ReferenceType;
 import lombok.RequiredArgsConstructor;
@@ -15,7 +19,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -25,6 +31,8 @@ public class LedgerTransactionService {
 
     /** DB가 느릴 때 호출자를 붙잡아 두는 상한(초) */
     private static final int TX_TIMEOUT_SECONDS = 3;
+    /** 기간 목록 한 페이지 기본·최대 건수 */
+    private static final int MAX_PAGE_SIZE = 100;
 
     private final LedgerTransactionRecorder recorder;
     private final LedgerTransactionRepository transactionRepository;
@@ -55,5 +63,62 @@ public class LedgerTransactionService {
                 .map(LedgerEntryResult::from)
                 .toList();
         return TransactionDetailResult.of(transaction, entries);
+    }
+
+    /**
+     * 기간 [from, to) 거래 목록 (createdAt, id 오름차순). from·to는 다음 마이크로초로 올린다.
+     * size + 1건을 읽어 다음 페이지 여부를 정하고, 다음 커서는 돌려주는 마지막 행으로 만든다.
+     * 항목은 페이지 거래 id를 모아 한 번에 읽는다 (거래가 없으면 읽지 않음).
+     */
+    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    public TransactionPeriodResult getByPeriod(TransactionPeriodQuery query) {
+        Objects.requireNonNull(query, "query");
+        ReferenceType referenceType = Objects.requireNonNull(query.referenceType(), "referenceType");
+        Instant from = LedgerPeriodCursor.ceilToMicros(Objects.requireNonNull(query.from(), "from"));
+        Instant to = LedgerPeriodCursor.ceilToMicros(Objects.requireNonNull(query.to(), "to"));
+        if (from.isAfter(to)) {
+            throw new BusinessException(LedgerErrorCode.LEDGER_INVALID_PERIOD);
+        }
+        int size = pageSize(query.size());
+        LedgerTransactionPosition after = null;
+        if (query.cursor() != null) {
+            LedgerPeriodCursor cursor = LedgerPeriodCursor.decode(query.cursor());
+            if (!cursor.matches(referenceType, from, to)) {
+                throw new BusinessException(LedgerErrorCode.LEDGER_CURSOR_MISMATCH);
+            }
+            after = cursor.position();
+        }
+
+        List<LedgerTransaction> rows = transactionRepository.findByPeriod(referenceType, from, to, after, size + 1);
+        boolean hasNext = rows.size() > size;
+        List<LedgerTransaction> page = hasNext ? rows.subList(0, size) : rows;
+
+        Map<UUID, List<LedgerEntryLine>> lines = page.isEmpty() ? Map.of()
+                : transactionRepository.findEntryLinesByTransactionIds(
+                        page.stream().map(LedgerTransaction::getId).toList());
+        List<TransactionDetailResult> items = page.stream()
+                .map(transaction -> TransactionDetailResult.of(transaction,
+                        lines.getOrDefault(transaction.getId(), List.of()).stream()
+                                .map(LedgerEntryResult::from)
+                                .toList()))
+                .toList();
+
+        String nextCursor = null;
+        if (hasNext) {
+            LedgerTransaction last = page.getLast();
+            nextCursor = new LedgerPeriodCursor(referenceType, from, to,
+                    new LedgerTransactionPosition(last.getCreatedAt(), last.getId())).encode();
+        }
+        return new TransactionPeriodResult(items, nextCursor);
+    }
+
+    private static int pageSize(Integer requested) {
+        if (requested == null) {
+            return MAX_PAGE_SIZE;
+        }
+        if (requested < 1) {
+            throw new BusinessException(LedgerErrorCode.LEDGER_INVALID_PAGE_SIZE);
+        }
+        return Math.min(requested, MAX_PAGE_SIZE);
     }
 }
