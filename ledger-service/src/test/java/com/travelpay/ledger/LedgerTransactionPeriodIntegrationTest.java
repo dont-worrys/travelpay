@@ -17,7 +17,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import javax.sql.DataSource;
 import java.net.URI;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -87,6 +90,9 @@ class LedgerTransactionPeriodIntegrationTest {
 
     @Autowired
     private EntityManagerFactory entityManagerFactory;
+
+    @Autowired
+    private DataSource dataSource;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
@@ -180,6 +186,72 @@ class LedgerTransactionPeriodIntegrationTest {
         assertEquals(2, statements, "100건 페이지 조회 쿼리 수 = " + statements);
         for (JsonNode item : data.get("items")) {
             assertEquals(2, item.get("entries").size());
+        }
+    }
+
+    /**
+     * 위험 5 (재현만, 해결은 대사 작업): 커밋이 늦은 거래는 커서가 그 created_at을 지나간 뒤 커밋되면
+     * 이어지는 페이지에서 누락된다. 처음부터 다시 조회하면 보인다.
+     */
+    @Test
+    void 재현_커서가_지나간_뒤_커밋된_거래는_이어지는_페이지에서_누락된다() throws Exception {
+        Instant base = dayStart.plusSeconds(3600);
+        UUID a = insertPosted("CHARGE", base, 1);
+        UUID b = insertPosted("CHARGE", base.plusSeconds(2), 2);
+        UUID c = insertPosted("CHARGE", base.plusSeconds(3), 3);
+        UUID late = UUID.randomUUID();
+        Instant lateAt = base.plusSeconds(1);
+
+        JsonNode second;
+        try (Connection other = dataSource.getConnection()) {
+            // 1) 별도 연결에서 a와 b 사이 시각의 거래를 INSERT하고 커밋하지 않는다
+            other.setAutoCommit(false);
+            insertOnConnection(other, late, lateAt, 4);
+
+            // 2) 첫 페이지(size 2): 미커밋 거래는 안 보이고, 커서가 b 위치로 lateAt을 지나간다
+            JsonNode first = periodData("CHARGE", dayStart.toString(), dayEnd.toString(), null, 2);
+            assertEquals(List.of(a.toString(), b.toString()), ids(first));
+
+            // 3) 커밋
+            other.commit();
+
+            // 4) 이어지는 페이지: 커서 이후(c)만 나오고 늦게 커밋된 거래는 빠진다
+            second = periodData("CHARGE", dayStart.toString(), dayEnd.toString(),
+                    first.get("nextCursor").asString(), 2);
+        }
+        assertEquals(List.of(c.toString()), ids(second), "커서 순회에서 늦게 커밋된 거래 누락");
+
+        // 5) 처음부터 다시 조회하면 포함된다 (DB에는 정상 저장)
+        PageWalk again = walk("CHARGE", dayStart, dayEnd, 2);
+        assertEquals(List.of(a.toString(), late.toString(), b.toString(), c.toString()), again.ids());
+    }
+
+    private void insertOnConnection(Connection connection, UUID id, Instant createdAt, long tag) throws Exception {
+        try (PreparedStatement tx = connection.prepareStatement("""
+                INSERT INTO ledger_transactions
+                    (id, reference_type, reference_id, request_hash, status, created_at)
+                VALUES (?, 'CHARGE', ?, ?, 'POSTED', ?)
+                """)) {
+            tx.setObject(1, id);
+            tx.setObject(2, UUID.randomUUID());
+            tx.setString(3, "0".repeat(64));
+            tx.setObject(4, OffsetDateTime.ofInstant(createdAt, ZoneOffset.UTC));
+            tx.executeUpdate();
+        }
+        for (String direction : List.of("DEBIT", "CREDIT")) {
+            try (PreparedStatement entry = connection.prepareStatement("""
+                    INSERT INTO ledger_entries
+                        (id, transaction_id, account_id, currency, entry_type, direction, amount, balance_after,
+                         created_at)
+                    VALUES (?, ?, ?, 'KRW', 'CHARGE_IN', ?, ?, 0, now())
+                    """)) {
+                entry.setObject(1, UUID.randomUUID());
+                entry.setObject(2, id);
+                entry.setObject(3, chargeSourceAccountId);
+                entry.setString(4, direction);
+                entry.setLong(5, tag);
+                entry.executeUpdate();
+            }
         }
     }
 
