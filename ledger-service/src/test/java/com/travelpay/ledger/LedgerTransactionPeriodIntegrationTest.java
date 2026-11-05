@@ -437,6 +437,63 @@ class LedgerTransactionPeriodIntegrationTest {
         }
     }
 
+    /** to = 9999-12-31: 첫 페이지가 size보다 많으면 nextCursor가 만들어지고 다음 페이지까지 이어진다 */
+    @Test
+    void 기간_끝이_9999년이어도_다음_커서로_끝까지_이어진다() throws Exception {
+        Instant from = Instant.parse("9999-12-30T00:00:00Z");
+        Instant to = Instant.parse("9999-12-31T00:00:00Z");
+        for (int i = 0; i < 3; i++) {
+            insertPosted("CHARGE", from.plusSeconds(60 + i).plus(7, ChronoUnit.MICROS), i + 1);
+        }
+
+        JsonNode first = periodData("CHARGE", from.toString(), to.toString(), null, 2);
+        assertEquals(2, first.get("items").size());
+        assertFalse(first.get("nextCursor").isNull(), "9999년 기간 첫 페이지 nextCursor");
+
+        PageWalk walk = walk("CHARGE", from, to, 2);
+        assertEquals(List.of(2, 1), walk.pageSizes());
+        assertSameAsDb(dbIds("CHARGE", from, to), walk);
+    }
+
+    @Test
+    void 업무_범위_경계값은_허용한다() throws Exception {
+        JsonNode data = periodData("CHARGE", "0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999Z", null, 1);
+        assertNotNull(data.get("items"));
+    }
+
+    /** 허용 범위 [0001-01-01T00:00:00Z, 9999-12-31T23:59:59.999999Z] 밖의 from·to는 400 */
+    @Test
+    void 업무_범위_밖의_시각은_400이다() throws Exception {
+        List<String[]> periods = List.of(
+                new String[] {dayStart.toString(), "+10000-01-01T00:00:00Z"},     // 범위 밖 미래 (to)
+                new String[] {"-9999-01-01T00:00:00Z", dayEnd.toString()},        // 기원전 1만 년 (from)
+                new String[] {dayStart.toString(), "9999-12-31T23:59:59.9999991Z"}, // 상한 + 1ns
+                new String[] {"0000-12-31T23:59:59.999999Z", dayEnd.toString()},  // 하한 - 1µs
+                new String[] {"+300000-01-01T00:00:00Z", "+300001-01-01T00:00:00Z"}); // 마이크로초 long 범위 밖
+
+        for (String[] period : periods) {
+            HttpResponse<String> response = period("CHARGE", period[0], period[1], null, null);
+            assertEquals(400, response.statusCode(), String.join(" ~ ", period) + " " + response.body());
+            assertEquals("LEDGER_INVALID_PERIOD", errorCode(response), String.join(" ~ ", period));
+        }
+    }
+
+    /** V6는 CONCURRENTLY로 트랜잭션 없이 적용되고, 만들어진 인덱스는 VALID여야 한다 */
+    @Test
+    void V6_인덱스는_VALID로_적용된다() {
+        Boolean valid = jdbcTemplate.queryForObject("""
+                SELECT i.indisvalid AND i.indisready
+                FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = ? AND c.relname = 'ix_ledger_transactions_reference_created'
+                """, Boolean.class, SCHEMA);
+        Boolean applied = jdbcTemplate.queryForObject(
+                "SELECT success FROM flyway_schema_history WHERE version = '6'", Boolean.class);
+
+        assertEquals(Boolean.TRUE, valid);
+        assertEquals(Boolean.TRUE, applied);
+    }
+
     @Test
     void 잘못된_커서는_400이다() throws Exception {
         Base64.Encoder b64 = Base64.getUrlEncoder().withoutPadding();
