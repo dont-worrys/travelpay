@@ -5,9 +5,9 @@ import com.travelpay.ledger.domain.Currency;
 import com.travelpay.ledger.domain.account.AccountType;
 import com.travelpay.ledger.domain.account.OwnerType;
 import com.travelpay.ledger.domain.transaction.Direction;
+import com.travelpay.ledger.domain.transaction.EntryType;
 import com.travelpay.ledger.domain.transaction.ReferenceType;
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
@@ -39,12 +39,12 @@ public record RegisterTransactionRequest(
             @NotNull(message = "방향을 입력해 주세요.") Direction direction,
             @NotNull(message = "금액을 입력해 주세요.")
             @Positive(message = "금액은 0보다 커야 합니다.") Long amount,
-            @NotBlank(message = "항목 유형을 입력해 주세요.")
-            @Size(max = 30, message = "항목 유형은 30자 이하로 입력해 주세요.") String entryType) {
+            @NotNull(message = "항목 유형을 입력해 주세요.") EntryType entryType) {
 
+        /** 엔티티·DB·요청 해시는 문자열 그대로 쓴다 (V5가 NOT VALID라 옛 값이 남은 행도 읽을 수 있게) */
         RegisterTransactionCommand.Entry toCommand() {
             return new RegisterTransactionCommand.Entry(ownerType, walletId, accountType, currency,
-                    direction, amount, entryType);
+                    direction, amount, entryType.name());
         }
     }
 }
