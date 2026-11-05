@@ -13,6 +13,9 @@ spring:
     default-schema: ledger_service
     schemas: ledger_service
     locations: classpath:db/migration
+    postgresql:
+      # 트랜잭션 advisory lock은 잠금 트랜잭션이 열린 동안 CREATE INDEX CONCURRENTLY(V6)를 멈추게 하므로 세션 잠금 사용
+      transactional-lock: false
   jpa:
     open-in-view: false
     hibernate:

@@ -27,3 +27,26 @@ dependencies {
     testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
     testImplementation 'org.testcontainers:testcontainers-postgresql'
 }
+
+// 대량 데이터 성능 측정(@Tag("performance"))은 기본 test에서 빼고 performanceTest로만 실행
+tasks.named('test') {
+    useJUnitPlatform {
+        excludeTags 'performance'
+    }
+}
+
+tasks.register('performanceTest', Test) {
+    description = '원장 성능 측정 테스트(@Tag("performance"))만 실행'
+    group = 'verification'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform {
+        includeTags 'performance'
+    }
+    // 공통 설정의 jacocoTestReport(→ test 의존)를 따라 기본 test까지 돌지 않도록 해제
+    setFinalizedBy([])
+    outputs.upToDateWhen { false }
+    testLogging {
+        showStandardStreams = true
+    }
+}
