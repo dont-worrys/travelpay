@@ -12,7 +12,7 @@ import com.travelpay.payment.transfer.domain.Transfer;
  * memo는 원장 description에 보내지 않습니다.
  * 사용자 계정은 walletId + currency로 지정합니다. userId는 거래를 발생시킨 사용자 기록용 선택값으로 송금인 ID를 보내며,
  * 원장은 계정 조회에 사용하지 않습니다(원장 담당자 확인, 2026-11-02).
- * 미확정: entryType 값(TRANSFER_OUT·TRANSFER_IN, 원장 DB CHECK 미추가).
+ * entryType TRANSFER_OUT·TRANSFER_IN은 원장 entry_type 허용 목록에 포함된 값입니다(원장 DB 확인, 2026-11-05).
  */
 public record LedgerTransactionRequest(
         String referenceType,

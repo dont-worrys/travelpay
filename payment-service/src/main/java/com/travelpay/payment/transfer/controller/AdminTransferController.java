@@ -109,13 +109,18 @@ public class AdminTransferController {
             | 원장 결과 | 허용하는 `targetStatus` | `ledgerTransactionId` |
             |---|---|---|
             | POSTED | `COMPLETED` | 원장 거래 ID와 같아야 함 |
-            | REJECTED | `FAILED`(실패 사유는 원장 거절 사유) | 원장 거래 ID와 같아야 함 |
+            | REJECTED | `FAILED`(실패 사유는 원장 거절 사유, 원장 미수락 송금은 `NOT_PROCESSED`) | 원장 거래 ID와 같아야 함 |
             | 기록 없음 | `PROCESSING`(시도 횟수 0, 자동 재처리) | 보내지 않음 |
 
-            원장이 요청을 받지 않은 송금(`reviewReason=LEDGER_REQUEST_NOT_ACCEPTED`)에 같은 reference 거래가 있으면 \
-            내용이 다를 수 있어 확정하지 않습니다(409). 확정 내용은 상태 변경 이력에 남습니다.""")
+            원장 POSTED이면 원장 항목이 송금과 같아야 하며, 다르면 409입니다. \
+            원장이 요청을 받지 않은 송금(`reviewReason=LEDGER_REQUEST_NOT_ACCEPTED`)의 원장 REJECTED는 \
+            거절 사유가 이전의 다른 요청 것일 수 있어 실패 사유를 `NOT_PROCESSED`로 둡니다. 확정 내용은 상태 변경 이력에 남습니다.
+
+            이미 확정된 송금에 같은 운영자가 같은 본문(`targetStatus`·`reason`·`ledgerTransactionId`)으로 다시 요청하면 \
+            원장을 다시 조회하지 않고 현재 송금 상태를 200으로 돌려줍니다(응답 유실 후 재시도). 다른 요청이면 409입니다.""")
     @ApiResponses({
-            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "확정 완료"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "확정 완료, 또는 같은 확정 요청의 재시도(현재 상태 반환)"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
                     description = "`COMMON_INVALID_REQUEST` 허용하지 않는 targetStatus, 사유 누락·255자 초과, "
                             + "ledgerTransactionId 누락(COMPLETED·FAILED) 또는 불필요한 값(PROCESSING)"),
@@ -126,7 +131,7 @@ public class AdminTransferController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
                     description = "`TRANSFER_NOT_FOUND` 송금 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
-                    description = "`COMMON_CONFLICT` MANUAL_REVIEW가 아님(이미 확정됨 포함), "
+                    description = "`COMMON_CONFLICT` MANUAL_REVIEW가 아님(다른 운영자·다른 내용으로 이미 확정됨 포함), "
                             + "`TRANSFER_RESOLUTION_MISMATCH` 원장 결과와 요청이 맞지 않음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "502",
                     description = "`COMMON_BAD_GATEWAY` 원장 응답 해석 불가"),

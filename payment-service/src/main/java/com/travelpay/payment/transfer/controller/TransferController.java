@@ -74,7 +74,8 @@ public class TransferController {
                     description = "`TRANSFER_IDEMPOTENCY_KEY_REUSED` 같은 키로 다른 내용의 송금 요청"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "422",
                     description = "`TRANSFER_SENDER_WALLET_UNAVAILABLE`, `TRANSFER_RECEIVER_UNAVAILABLE`, "
-                            + "`TRANSFER_INSUFFICIENT_BALANCE`·`TRANSFER_ACCOUNT_UNAVAILABLE`(원장 거절, 송금은 `FAILED`로 기록)"),
+                            + "`TRANSFER_INSUFFICIENT_BALANCE`·`TRANSFER_ACCOUNT_UNAVAILABLE`(원장 거절, 송금은 `FAILED`로 기록), "
+                            + "`TRANSFER_NOT_PROCESSED`(운영자가 실패로 확정한 송금의 재요청)"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "429",
                     description = "`COMMON_TOO_MANY_REQUESTS` 회원 서비스 수취인 조회 호출 제한 초과(송금은 기록되지 않음)"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "502",
