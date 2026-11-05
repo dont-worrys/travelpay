@@ -18,6 +18,11 @@ public interface LedgerFeignApi {
     @PostMapping("/transactions")
     ApiResponse<TransactionResponse> register(@RequestBody RegisterRequest request);
 
+    /** reference로 원장 거래 결과를 조회합니다. REJECTED도 200이며, 없으면 404 LEDGER_TRANSACTION_NOT_FOUND입니다. */
+    @GetMapping("/transactions")
+    ApiResponse<TransactionResultResponse> getTransaction(@RequestParam("referenceType") String referenceType,
+                                                          @RequestParam("referenceId") UUID referenceId);
+
     @PostMapping("/accounts")
     ApiResponse<List<AccountResponse>> openAccounts(@RequestBody OpenAccountsRequest request);
 
@@ -48,6 +53,11 @@ public interface LedgerFeignApi {
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     record TransactionResponse(UUID transactionId, String status) {
+    }
+
+    /** rejectReason은 REJECTED일 때만 있습니다. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    record TransactionResultResponse(UUID transactionId, String status, String rejectReason) {
     }
 
     record OpenAccountsRequest(UUID walletId) {

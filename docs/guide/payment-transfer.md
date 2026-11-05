@@ -230,6 +230,38 @@ user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니�
 
 원장 연동 후 새 송금은 `PROCESSING`으로 시작하므로 취소할 수 있는 송금은 연동 전에 접수된 `REQUESTED` 송금뿐입니다. 취소는 조건부 UPDATE로 처리해 동시 요청에도 한 번만 바뀝니다.
 
+## 관리자 조회
+
+| API | 설명 | 성공 |
+|---|---|---|
+| `GET /api/v1/admin/transfers` | 모든 사용자의 송금 목록 | 200 |
+| `GET /api/v1/admin/transfers/{transferId}` | 송금 상세(당사자 제한 없음) | 200 |
+| `POST /api/v1/admin/transfers/{transferId}/resolve` | `MANUAL_REVIEW` 송금 확정 | 200 |
+| `GET /api/v1/admin/transfers/{transferId}/history` | 상태 변경 이력 | 200 |
+
+- 권한: `User-Role`이 `MASTER`가 아니면 `403 COMMON_FORBIDDEN`. 경로의 `admin`은 관리 기능 영역, `MASTER`는 허용 역할입니다.
+- 목록 조건(모두 선택): `from`(포함)·`to`(미포함, ISO-8601, `from`이 `to`보다 앞서야 함), `currency`(KRW·JPY·CNY, 그 밖은 `400 TRANSFER_UNSUPPORTED_CURRENCY`), `status`, `userId`(송금인 또는 수취인), `orderType`(`LATEST` 기본 = 생성 시각 내림차순, `OLDEST` = 오름차순, 같은 시각은 ID로 같은 방향), `page`(0부터)·`size`(기본 20, 최대 100). 잘못된 값은 `400 COMMON_INVALID_REQUEST`
+- 응답: `transferId`, `senderId`, `receiverId`, `sourceWalletId`, `targetWalletId`, `amount`, `currency`, `status`, `failureReason`(`FAILED`만), `reviewReason`(`MANUAL_REVIEW`만), `attemptCount`, `memo`, `createdAt`, `updatedAt`. `direction`·멱등성 키는 없음. 없는 송금은 `404 TRANSFER_NOT_FOUND`
+- 조회 기록: 관리자 ID와 조건(목록)·송금 ID(상세)를 INFO 로그로 남깁니다.
+- Swagger 그룹: `transfer-admin`(`/v3/api-docs/transfer-admin`)
+
+### MANUAL_REVIEW 확정
+
+요청 본문 `{targetStatus, reason(필수, ≤255자), ledgerTransactionId}`. 운영자 입력을 그대로 믿지 않고, 서버가 원장 `GET /internal/v1/ledger/transactions?referenceType=TRANSFER&referenceId={송금 ID}`로 결과를 조회해 맞는 확정만 반영합니다.
+
+| 원장 결과 | 허용하는 `targetStatus` | 결과 |
+|---|---|---|
+| `POSTED` | `COMPLETED`(`ledgerTransactionId` = 원장 거래 ID) | `COMPLETED` |
+| `REJECTED` | `FAILED`(`ledgerTransactionId` = 원장 거래 ID) | `FAILED`, 실패 사유는 원장 거절 사유(`INSUFFICIENT_BALANCE` / 그 밖 `ACCOUNT_UNAVAILABLE`) |
+| 기록 없음(404 `LEDGER_TRANSACTION_NOT_FOUND`) | `PROCESSING`(`ledgerTransactionId` 없음) | 시도 횟수 0으로 되돌려 복구 스케줄러가 약 30초 뒤 같은 reference로 재전송 |
+
+- 맞지 않으면 `409 TRANSFER_RESOLUTION_MISMATCH`, `MANUAL_REVIEW`가 아니면(이미 확정 포함) `409 COMMON_CONFLICT`. 형식 오류는 `400 COMMON_INVALID_REQUEST`
+- `reviewReason=LEDGER_REQUEST_NOT_ACCEPTED`(원장 409·400) 송금에 원장 거래가 있으면 내용이 다를 수 있어 확정하지 않습니다(409). 원장 담당과 확인합니다
+- 원장 조회 실패는 상태를 바꾸지 않고 503·504·502로 응답합니다
+- 상태 변경은 `MANUAL_REVIEW`일 때만 바꾸는 조건부 UPDATE이며, 같은 트랜잭션에서 이력(`transfer_status_history`: 이전·이후 상태, 사유, 운영자 ID, 원장 거래 ID, 시각)을 저장합니다. 동시에 확정하면 한 건만 성공합니다
+- 확정 뒤 송금인의 같은 키 재요청은 확정된 상태로 응답합니다(`COMPLETED` 201, `FAILED` 처음과 같은 사유의 422)
+- Gateway에는 아직 `/api/v1/admin/**` 라우트가 없어 payment-service(8083)를 직접 호출해야 합니다.
+
 ## 송금 상태
 
 ```txt
@@ -397,7 +429,7 @@ PROCESSING ──원장 반영──▶ COMPLETED
 | 1회 최대 송금 금액 | 0보다 큰지만 검사 | 통화별(KRW·JPY·CNY 최소 단위) 한도 값과 오류 코드. 지갑·환전·결제 담당자와 함께 정함 |
 | 완료된 송금 취소(자금 복구) | `REQUESTED`만 취소, 그 밖의 상태는 409 | 취소 가능 조건·기한, 수취인 잔액 부족 시 처리, 원장 분개(referenceType·entryType, 원거래 연결), 상태와 `Idempotency-Key` 적용 여부 |
 | 원장 entryType 값 | `TRANSFER_OUT`·`TRANSFER_IN`으로 등록 | 원장 entry_type CHECK 추가 때 값 확정(원장 담당) |
-| `MANUAL_REVIEW` 처리 절차 | 원장 reference 조회로 반영 여부를 확인할 수 있음 | 확인 후 `COMPLETED`·`FAILED`로 확정하는 API 또는 운영 절차 |
+| 상태 변경 이력 범위 | 운영자 확정만 `transfer_status_history`에 기록 | 자동 처리(원장 응답·스케줄러) 전이도 기록할지 |
 | 연동 전 `REQUESTED` 송금 | 그대로 남아 있고 취소만 가능 | 그대로 둘지, 일괄 취소할지, 재처리할지 |
 | 원장 연동 롤백 시 `PROCESSING` 송금 | 원장 구현이 없으면 복구가 돌지 않아 202만 반복되고 취소도 409 | 롤백할 때 남은 건의 처리 절차 |
 | 잔액 사전 조회 | 하지 않음. 잔액 부족은 원장 거절로만 판단 | 원장 잔액 조회로 빠르게 거절할지 |

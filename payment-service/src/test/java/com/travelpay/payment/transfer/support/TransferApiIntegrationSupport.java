@@ -114,6 +114,24 @@ public abstract class TransferApiIntegrationSupport extends PostgresContainerSup
                 "$.data.transferId"));
     }
 
+    /**
+     * 상태·통화·시각을 정한 송금을 SQL로 직접 넣습니다(롤백됨). 지갑은 이 테스트의 송금인·수취인 지갑 ID를 씁니다.
+     * failureReason은 FAILED, reviewReason은 MANUAL_REVIEW일 때만 넣어야 합니다(DB CHECK).
+     */
+    protected UUID insertTransferRow(UUID sender, UUID receiver, String currency, String status, String failureReason,
+            int attemptCount, String reviewReason, Instant createdAt) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+                        insert into transfer (id, sender_id, receiver_id, source_wallet_id, target_wallet_id, amount,
+                            currency, status, failure_reason, attempt_count, review_reason, memo, idempotency_key,
+                            request_hash, created_at, updated_at)
+                        values (?, ?, ?, ?, ?, 1000, ?, ?, ?, ?, ?, 'memo', ?, ?, ?, ?)""",
+                id, sender, receiver, sourceWalletId, targetWalletId, currency, status, failureReason, attemptCount,
+                reviewReason, "it-" + id, "0".repeat(64), createdAt.atOffset(ZoneOffset.UTC),
+                createdAt.atOffset(ZoneOffset.UTC));
+        return id;
+    }
+
     protected Map<String, Object> row(UUID transferId) {
         return jdbcTemplate.queryForMap("""
                 select status, attempt_count, review_reason, failure_reason, sender_id, receiver_id,
