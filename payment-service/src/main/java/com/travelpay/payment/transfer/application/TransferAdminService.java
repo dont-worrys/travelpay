@@ -75,8 +75,10 @@ public class TransferAdminService {
      *     <li>원장 기록 없음 → PROCESSING만 허용(시도 횟수 0으로 되돌려 복구 스케줄러가 같은 reference로 재전송)</li>
      *     <li>원장 POSTED이면 원장에 기록된 항목이 이 송금의 원장 요청 항목(지갑·통화·방향·금액·entryType)과 같아야 함.
      *         다르면 같은 reference로 다른 내용이 기록된 것이라 확정하지 않음</li>
-     *     <li>원장이 요청을 받지 않은 송금(LEDGER_REQUEST_NOT_ACCEPTED)은 원장 POSTED이고 항목이 같을 때만 COMPLETED로 확정.
-     *         원장 REJECTED는 항목이 없어 내용을 확인할 수 없으므로 확정하지 않음</li>
+     *     <li>원장이 요청을 받지 않은 송금(LEDGER_REQUEST_NOT_ACCEPTED)도 원장 POSTED이고 항목이 같으면 COMPLETED로 확정
+     *         (409는 userId 등 항목 밖의 값 차이로도 나며, 잔액은 항목으로만 바뀜)</li>
+     *     <li>원장이 요청을 받지 않은 송금에 원장 REJECTED → FAILED 허용. 자금은 이동하지 않았고 재전송해도 계속 409라 처리할 방법이 없음.
+     *         원장 거절 사유는 이전의 다른 요청 것일 수 있어 쓰지 않고 실패 사유를 NOT_PROCESSED로 정함(확정 이력과 같은 트랜잭션에 저장)</li>
      * </ul>
      * 원장 조회는 DB 트랜잭션 밖에서 하고, 조건부 UPDATE(MANUAL_REVIEW일 때만)와 이력 저장은 한 트랜잭션으로 묶습니다.
      * 원장 조회 실패(타임아웃·5xx 등)는 상태를 바꾸지 않고 common 규칙의 5xx로 응답합니다.
@@ -188,12 +190,15 @@ public class TransferAdminService {
             }
             return null;
         }
-        // REJECTED 거래는 원장에 항목이 없어 내용을 대조할 수 없습니다. 요청을 받지 않은 송금은 다른 내용의 거절일 수 있어 확정하지 않습니다.
-        if (transfer.getReviewReason() == TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED) {
-            throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
-        }
         if (result.status() == LedgerTransactionResponse.Status.REJECTED
                 && request.targetStatus() == TransferStatus.FAILED) {
+            if (transfer.getReviewReason() == TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED) {
+                // 원장 거절 기록은 이전에 들어온 다른 요청의 것일 수 있어(원장은 기록을 고치지 않음) 그 사유를 쓰지 않습니다.
+                // REJECTED는 잔액을 바꾸지 않으므로 FAILED로 확정해도 자금은 맞습니다.
+                log.info("원장 미수락 송금 FAILED 확정 transferId={} ledgerTransactionId={} ledgerRejectReason={}",
+                        transfer.getId(), result.transactionId(), result.rejectReason());
+                return TransferFailureReason.NOT_PROCESSED;
+            }
             return result.rejectReason() == LedgerTransactionResponse.RejectReason.INSUFFICIENT_BALANCE
                     ? TransferFailureReason.INSUFFICIENT_BALANCE
                     : TransferFailureReason.ACCOUNT_UNAVAILABLE;

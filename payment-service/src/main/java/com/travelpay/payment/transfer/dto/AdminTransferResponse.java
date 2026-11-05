@@ -30,7 +30,7 @@ public record AdminTransferResponse(
         String currency,
         @Schema(description = "송금 상태")
         TransferStatus status,
-        @Schema(description = "원장 거절 사유. FAILED일 때만 있음", nullable = true)
+        @Schema(description = "실패 사유. FAILED일 때만 있음(NOT_PROCESSED는 원장 미수락 송금을 운영자가 실패로 확정한 경우)", nullable = true)
         TransferFailureReason failureReason,
         @Schema(description = "자동 처리 중단 사유. MANUAL_REVIEW일 때만 있음", nullable = true)
         TransferReviewReason reviewReason,

@@ -14,7 +14,8 @@ public enum TransferErrorCode implements ErrorCode {
     SENDER_WALLET_UNAVAILABLE("TRANSFER_SENDER_WALLET_UNAVAILABLE", "송금할 수 있는 지갑이 없습니다.", 422),
     RECEIVER_UNAVAILABLE("TRANSFER_RECEIVER_UNAVAILABLE", "송금할 수 없는 수취인입니다.", 422),
     INSUFFICIENT_BALANCE("TRANSFER_INSUFFICIENT_BALANCE", "잔액이 부족합니다.", 422),
-    ACCOUNT_UNAVAILABLE("TRANSFER_ACCOUNT_UNAVAILABLE", "송금할 수 없는 계정입니다.", 422);
+    ACCOUNT_UNAVAILABLE("TRANSFER_ACCOUNT_UNAVAILABLE", "송금할 수 없는 계정입니다.", 422),
+    NOT_PROCESSED("TRANSFER_NOT_PROCESSED", "송금을 처리하지 못했습니다.", 422);
 
     private final String code;
     private final String message;

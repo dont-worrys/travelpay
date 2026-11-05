@@ -165,15 +165,25 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
     }
 
     @Test
-    void refusesToSettleNotAcceptedTransferWhenLedgerRejected() throws Exception {
+    void failsNotAcceptedTransferWhenLedgerRejectedWithTransferSideReason() throws Exception {
         UUID transferId = manualReview(NOT_ACCEPTED);
         givenLedger(transferId, "REJECTED", "INSUFFICIENT_BALANCE");
 
-        // 원장은 거절 거래에 항목을 남기지 않아 같은 내용의 거절인지 확인할 수 없습니다.
-        expectMismatch(resolve(transferId, "FAILED", ledgerTransactionId));
+        // 원장 거절 기록은 다른 요청의 것일 수 있으므로 COMPLETED·PROCESSING은 허용하지 않습니다.
+        expectMismatch(resolve(transferId, "COMPLETED", ledgerTransactionId));
         expectMismatch(resolve(transferId, "PROCESSING", null));
         assertUnchanged(transferId);
-        assertThat(row(transferId).get("review_reason")).isEqualTo(NOT_ACCEPTED);
+
+        // FAILED는 허용하되 실패 사유는 원장 거절 사유(INSUFFICIENT_BALANCE)가 아니라 송금 쪽에서 정한 NOT_PROCESSED입니다.
+        resolve(transferId, "FAILED", ledgerTransactionId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("FAILED"))
+                .andExpect(jsonPath("$.data.failureReason").value("NOT_PROCESSED"))
+                .andExpect(jsonPath("$.data.reviewReason").doesNotExist());
+        assertThat(row(transferId).get("failure_reason")).isEqualTo("NOT_PROCESSED");
+        mvc.perform(asMaster(get(history(transferId))))
+                .andExpect(jsonPath("$.data[0].toStatus").value("FAILED"))
+                .andExpect(jsonPath("$.data[0].ledgerTransactionId").value(ledgerTransactionId.toString()));
     }
 
     @Test

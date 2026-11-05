@@ -109,11 +109,12 @@ public class AdminTransferController {
             | 원장 결과 | 허용하는 `targetStatus` | `ledgerTransactionId` |
             |---|---|---|
             | POSTED | `COMPLETED` | 원장 거래 ID와 같아야 함 |
-            | REJECTED | `FAILED`(실패 사유는 원장 거절 사유) | 원장 거래 ID와 같아야 함 |
+            | REJECTED | `FAILED`(실패 사유는 원장 거절 사유, 원장 미수락 송금은 `NOT_PROCESSED`) | 원장 거래 ID와 같아야 함 |
             | 기록 없음 | `PROCESSING`(시도 횟수 0, 자동 재처리) | 보내지 않음 |
 
-            원장이 요청을 받지 않은 송금(`reviewReason=LEDGER_REQUEST_NOT_ACCEPTED`)에 같은 reference 거래가 있으면 \
-            내용이 다를 수 있어 확정하지 않습니다(409). 확정 내용은 상태 변경 이력에 남습니다.
+            원장 POSTED이면 원장 항목이 송금과 같아야 하며, 다르면 409입니다. \
+            원장이 요청을 받지 않은 송금(`reviewReason=LEDGER_REQUEST_NOT_ACCEPTED`)의 원장 REJECTED는 \
+            거절 사유가 이전의 다른 요청 것일 수 있어 실패 사유를 `NOT_PROCESSED`로 둡니다. 확정 내용은 상태 변경 이력에 남습니다.
 
             이미 확정된 송금에 같은 운영자가 같은 본문(`targetStatus`·`reason`·`ledgerTransactionId`)으로 다시 요청하면 \
             원장을 다시 조회하지 않고 현재 송금 상태를 200으로 돌려줍니다(응답 유실 후 재시도). 다른 요청이면 409입니다.""")
