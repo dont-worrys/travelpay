@@ -59,7 +59,7 @@ import static org.mockito.Mockito.when;
  * 실행: ./gradlew :wallet-service:performanceTest
  */
 @Tag("performance")
-@Testcontainers(disabledWithoutDocker = true)
+@Testcontainers
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
         "travelpay.wallet.outbox.publisher.enabled=false",
@@ -361,13 +361,15 @@ class ChargeReconciliationMeasurementTest {
             // 실행·결과만 정리, 충전 원본은 유지. 결과를 참조하는 FK 사슬이 있어 TRUNCATE 대신 DELETE
             jdbcTemplate.update("DELETE FROM reconciliation_results");
             jdbcTemplate.update("DELETE FROM reconciliation_runs");
+            int buildsBefore = sources.periodCacheBuilds.get();
             long start = System.nanoTime();
             ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
             long elapsed = (System.nanoTime() - start) / 1_000_000;
             int rows = jdbcTemplate.queryForObject("SELECT count(*) FROM reconciliation_results WHERE run_id = ?",
                     Integer.class, result.runId());
-            runSummaries.add(String.format("%s %s target=%d matched=%d rows=%d %dms", round == 0 ? "준비" : "#" + round,
-                    result.status(), result.targetCount(), result.matchedCount(), rows, elapsed));
+            runSummaries.add(String.format("%s %s target=%d matched=%d rows=%d %dms 기간목록캐시생성=%d",
+                    round == 0 ? "준비" : "#" + round, result.status(), result.targetCount(), result.matchedCount(),
+                    rows, elapsed, sources.periodCacheBuilds.get() - buildsBefore));
             if (round > 0) {
                 millis.add(elapsed);
             }
@@ -754,39 +756,41 @@ class ChargeReconciliationMeasurementTest {
         final AtomicInteger ledgerPages = new AtomicInteger();
         final AtomicInteger bankSingleCalls = new AtomicInteger();
         final AtomicInteger ledgerSingleCalls = new AtomicInteger();
-        private boolean sorted;
+        /** (from, to) → 기간 내 정렬 목록. 페이지 요청마다 필터·정렬·복사하지 않도록 한 번만 만들고, 데이터가 바뀌면 비운다 */
+        private final Map<Period, List<BankTransactionDetailResponse>> bankPeriodCache = new HashMap<>();
+        private final Map<Period, List<LedgerTransactionDetailResponse>> ledgerPeriodCache = new HashMap<>();
+        /** 기간 목록 캐시를 새로 만든 횟수 (은행+원장) */
+        final AtomicInteger periodCacheBuilds = new AtomicInteger();
 
-        void addBank(BankTransactionDetailResponse r, Instant at, boolean listed) {
+        private record Period(Instant from, Instant to) {
+        }
+
+        synchronized void addBank(BankTransactionDetailResponse r, Instant at, boolean listed) {
             bank.add(new Timed<>(r, at, listed));
             bankByRequest.put(r.requestId(), r);
-            sorted = false;
+            bankPeriodCache.clear();
         }
 
-        void addLedger(LedgerTransactionDetailResponse r, Instant at, boolean listed) {
+        synchronized void addLedger(LedgerTransactionDetailResponse r, Instant at, boolean listed) {
             ledger.add(new Timed<>(r, at, listed));
             ledgerByReference.put(r.referenceId(), r);
-            sorted = false;
+            ledgerPeriodCache.clear();
         }
 
-        private synchronized void sort() {
-            if (!sorted) {
-                bank.sort(Comparator.comparing(Timed::at));
-                ledger.sort(Comparator.comparing(Timed::at));
-                sorted = true;
-            }
-        }
-
-        private static <T> List<T> inPeriod(List<Timed<T>> all, Instant from, Instant to) {
-            return all.stream().filter(t -> t.listed() && !t.at().isBefore(from) && t.at().isBefore(to))
-                    .map(Timed::item).toList();
+        private synchronized <T> List<T> inPeriod(Map<Period, List<T>> cache, List<Timed<T>> all, Instant from,
+                                                  Instant to) {
+            return cache.computeIfAbsent(new Period(from, to), k -> {
+                periodCacheBuilds.incrementAndGet();
+                return all.stream().filter(t -> t.listed() && !t.at().isBefore(from) && t.at().isBefore(to))
+                        .sorted(Comparator.comparing(Timed::at)).map(Timed::item).toList();
+            });
         }
 
         ApiResponse<PageResponse<BankTransactionDetailResponse>> bankPage(Instant from, Instant to, int page,
                                                                          int size) {
-            sort();
             bankSizes.add(size);
             bankPages.incrementAndGet();
-            List<BankTransactionDetailResponse> all = inPeriod(bank, from, to);
+            List<BankTransactionDetailResponse> all = inPeriod(bankPeriodCache, bank, from, to);
             int start = Math.min(page * size, all.size());
             int end = Math.min(start + size, all.size());
             int totalPages = (all.size() + size - 1) / size;
@@ -807,10 +811,9 @@ class ChargeReconciliationMeasurementTest {
         }
 
         ApiResponse<LedgerTransactionPeriodResponse> ledgerPage(Instant from, Instant to, String cursor, int size) {
-            sort();
             ledgerSizes.add(size);
             ledgerPages.incrementAndGet();
-            List<LedgerTransactionDetailResponse> all = inPeriod(ledger, from, to);
+            List<LedgerTransactionDetailResponse> all = inPeriod(ledgerPeriodCache, ledger, from, to);
             int start = cursor == null ? 0 : Integer.parseInt(cursor);
             int end = Math.min(start + size, all.size());
             String next = end < all.size() ? String.valueOf(end) : null;
