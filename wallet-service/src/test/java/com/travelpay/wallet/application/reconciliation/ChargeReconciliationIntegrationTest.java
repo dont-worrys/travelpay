@@ -7,6 +7,7 @@ import com.travelpay.wallet.application.reconciliation.dto.ReconciliationRunResu
 import com.travelpay.wallet.application.reconciliation.dto.SourceLookup;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationAlreadyRunningException;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunStatus;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,6 +49,7 @@ import static org.mockito.Mockito.when;
         "eureka.client.enabled=false",
         "travelpay.wallet.outbox.publisher.enabled=false",
         "travelpay.wallet.charge.recovery.enabled=false",
+        "travelpay.wallet.charge.reconciliation.enabled=false",
         "travelpay.wallet.charge.saga.consumer.enabled=false",
         "spring.kafka.admin.auto-create=false"
 })
@@ -118,7 +120,7 @@ class ChargeReconciliationIntegrationTest {
         bankList.add(refund(refunded, "SUCCEEDED", AMOUNT));
         ledgerList.add(rejected(refunded));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(ReconciliationRunStatus.COMPLETED, result.status());
         assertCounts(result, 3, 3, 0, 0);
@@ -134,7 +136,7 @@ class ChargeReconciliationIntegrationTest {
         bankList.add(new BankTransactionRecord(failed.bankRequestId(), UUID.randomUUID(), "DEBIT", "SUCCEEDED",
                 AMOUNT));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         // 출금 성공 기록이 있는데 bank_tx_id가 비어 있으므로 ID 불일치도 함께
         assertEquals(List.of("BANK_DEBIT_WITHOUT_CREDIT", "STATUS_MISMATCH"), types(result.runId(), failed.id()));
@@ -147,7 +149,7 @@ class ChargeReconciliationIntegrationTest {
         Charge completed = charge("COMPLETED", null, null, UUID.randomUUID());
         ledgerList.add(posted(completed, AMOUNT, "KRW"));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(List.of("CREDIT_WITHOUT_BANK_DEBIT"), types(result.runId(), completed.id()));
         verify(bankClient, times(1)).findTransaction(completed.bankRequestId());
@@ -160,7 +162,7 @@ class ChargeReconciliationIntegrationTest {
         ledgerList.add(posted(completed, AMOUNT, "KRW"));
         bankList.add(refund(completed, "SUCCEEDED", AMOUNT));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         List<String> types = types(result.runId(), completed.id());
         assertTrue(types.contains("CREDIT_AND_REFUND_BOTH"), types.toString());
@@ -180,7 +182,7 @@ class ChargeReconciliationIntegrationTest {
         bankList.add(debit(refundDiffers, "SUCCEEDED", AMOUNT));
         bankList.add(refund(refundDiffers, "SUCCEEDED", AMOUNT - 2));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertTrue(detail(result.runId(), debitDiffers.id(), "AMOUNT_MISMATCH").contains("은행 출금 금액(9999)"));
         String ledgerDetail = detail(result.runId(), ledgerDiffers.id(), "AMOUNT_MISMATCH");
@@ -195,7 +197,7 @@ class ChargeReconciliationIntegrationTest {
         Charge failed = charge("FAILED", null, null, null);
         ledgerList.add(rejected(failed));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(List.of("STATUS_MISMATCH"), types(result.runId(), failed.id()));
         assertTrue(detail(result.runId(), failed.id(), "STATUS_MISMATCH").startsWith("상태가 사실과 다름"));
@@ -209,7 +211,7 @@ class ChargeReconciliationIntegrationTest {
                 AMOUNT));
         ledgerList.add(posted(completed, AMOUNT, "KRW"));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(List.of("STATUS_MISMATCH"), types(result.runId(), completed.id()));
         assertTrue(detail(result.runId(), completed.id(), "STATUS_MISMATCH").startsWith("저장된 ID와 다름: bank_tx_id"));
@@ -228,7 +230,7 @@ class ChargeReconciliationIntegrationTest {
                 UUID.randomUUID(), List.of());
         ledgerList.add(orphanLedger);
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
                 SELECT source_type, source_key, mismatch_type, charge_id FROM reconciliation_results
@@ -247,7 +249,7 @@ class ChargeReconciliationIntegrationTest {
         Charge review = charge("MANUAL_REVIEW", UUID.randomUUID(), null, null);
         bankList.add(debit(review, "SUCCEEDED", AMOUNT));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(List.of("REVIEW_REQUIRED"), types(result.runId(), review.id()));
         String snapshot = snapshot(result.runId(), review.id(), "REVIEW_REQUIRED");
@@ -262,7 +264,7 @@ class ChargeReconciliationIntegrationTest {
             bankList.add(debit(inProgress, "SUCCEEDED", AMOUNT));
         }
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(ReconciliationRunStatus.COMPLETED, result.status());
         assertCounts(result, 0, 0, 0, 0);
@@ -276,7 +278,7 @@ class ChargeReconciliationIntegrationTest {
         when(ledgerClient.findChargeTransaction(completed.id()))
                 .thenReturn(SourceLookup.found(posted(completed, AMOUNT, "KRW")));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertCounts(result, 1, 1, 0, 0);
         assertEquals(0, resultCount(result.runId()));
@@ -291,7 +293,7 @@ class ChargeReconciliationIntegrationTest {
         when(ledgerClient.findChargeTransaction(before.id()))
                 .thenReturn(SourceLookup.found(posted(before, AMOUNT, "KRW")));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertTrue(types(result.runId(), before.id()).contains("CREDIT_AND_REFUND_BOTH"));
         assertEquals(0, jdbcTemplate.queryForObject(
@@ -312,7 +314,7 @@ class ChargeReconciliationIntegrationTest {
         when(bankClient.findTransaction(onlyUnavailable.bankRequestId()))
                 .thenReturn(SourceLookup.unavailable("feign.FeignException$ServiceUnavailable status=503"));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(ReconciliationRunStatus.PARTIAL, result.status());
         assertRunRow(result.runId(), "PARTIAL");
@@ -338,7 +340,7 @@ class ChargeReconciliationIntegrationTest {
         when(ledgerClient.listChargeTransactions(any(), any()))
                 .thenThrow(new ReconciliationSourceException("원장 거래 목록 조회 실패 page=1: x"));
 
-        ReconciliationRunResult result = service.run(FROM, TO);
+        ReconciliationRunResult result = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertEquals(ReconciliationRunStatus.FAILED, result.status());
         Map<String, Object> run = runRow(result.runId());
@@ -352,7 +354,7 @@ class ChargeReconciliationIntegrationTest {
     void 예상하지_못한_오류도_실행을_FAILED로_끝내고_다시_던짐() {
         when(bankClient.listTransactions(any(), any())).thenThrow(new IllegalStateException("boom"));
 
-        assertThrows(IllegalStateException.class, () -> service.run(FROM, TO));
+        assertThrows(IllegalStateException.class, () -> service.run(FROM, TO, null, ReconciliationRunType.MANUAL));
 
         Map<String, Object> run = jdbcTemplate.queryForMap("SELECT status, failure_reason FROM reconciliation_runs");
         assertEquals("FAILED", run.get("status"));
@@ -362,11 +364,12 @@ class ChargeReconciliationIntegrationTest {
     @Test
     void RUNNING_실행이_있으면_새_실행을_거절() {
         jdbcTemplate.update("""
-                INSERT INTO reconciliation_runs (id, period_from, period_to, status, started_at)
-                VALUES (?, ?::timestamptz, ?::timestamptz, 'RUNNING', now())
+                INSERT INTO reconciliation_runs (id, period_from, period_to, status, started_at, run_type)
+                VALUES (?, ?::timestamptz, ?::timestamptz, 'RUNNING', now(), 'AUTO')
                 """, UUID.randomUUID(), FROM.toString(), TO.toString());
 
-        assertThrows(ReconciliationAlreadyRunningException.class, () -> service.run(FROM, TO));
+        assertThrows(ReconciliationAlreadyRunningException.class,
+                () -> service.run(FROM, TO, null, ReconciliationRunType.MANUAL));
 
         assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM reconciliation_runs", Integer.class));
         verify(bankClient, never()).listTransactions(any(), any());
@@ -377,10 +380,10 @@ class ChargeReconciliationIntegrationTest {
         Charge failed = charge("FAILED", null, null, null);
         bankList.add(debit(failed, "SUCCEEDED", AMOUNT));
 
-        ReconciliationRunResult first = service.run(FROM, TO);
+        ReconciliationRunResult first = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
         List<Map<String, Object>> firstRows = resultRows(first.runId());
 
-        ReconciliationRunResult second = service.run(FROM, TO);
+        ReconciliationRunResult second = service.run(FROM, TO, null, ReconciliationRunType.MANUAL);
 
         assertTrue(!first.runId().equals(second.runId()));
         assertEquals(2, jdbcTemplate.queryForObject("SELECT count(*) FROM reconciliation_runs", Integer.class));
