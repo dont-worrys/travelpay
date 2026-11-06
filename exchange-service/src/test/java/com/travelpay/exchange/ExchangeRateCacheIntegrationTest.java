@@ -5,6 +5,16 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
 
 import com.travelpay.exchange.application.rate.ExchangeRateCollector;
@@ -16,6 +26,7 @@ import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
 import com.travelpay.exchange.infrastructure.cache.rate.RedisLatestRateCache;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,6 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -105,6 +117,9 @@ class ExchangeRateCacheIntegrationTest {
 
     @Autowired
     private WebApplicationContext context;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
@@ -205,6 +220,58 @@ class ExchangeRateCacheIntegrationTest {
         Map<String, Object> quote = jdbcTemplate.queryForMap("SELECT rate_id, applied_rate FROM " + SCHEMA + ".exchange_quotes");
         assertEquals(cachedJpy.getId(), quote.get("rate_id"));
         assertEquals(0, cachedJpy.getMidRate().compareTo((BigDecimal) quote.get("applied_rate")));
+    }
+
+    /**
+     * 수집과 조회가 동시에 계속 돌 때: 수집(DB 커밋 + 캐시 갱신)이 끝난 뒤 시작한 조회는 그 회차보다 오래된 환율을 받지 않는다.
+     * 그리고 조회가 받은 환율은 모두 DB에 커밋된 행이다(롤백된·없는 행이 나가지 않음).
+     * 수집 중간(커밋 후 캐시 갱신 전)에 시작한 조회는 직전 회차를 받을 수 있는데, 그 회차도 커밋된 정상 값이라 허용한다.
+     */
+    @Test
+    void readsNeverGoBehindFinishedCollectionWhileCollectingConcurrently() throws Exception {
+        collectOnce();
+        AtomicReference<Instant> finishedRound = new AtomicReference<>(clock.instant());
+        AtomicBoolean collecting = new AtomicBoolean(true);
+        Queue<String> violations = new ConcurrentLinkedQueue<>();
+        Set<UUID> returnedIds = ConcurrentHashMap.newKeySet();
+        AtomicInteger reads = new AtomicInteger();
+        double hitsBefore = meterRegistry.get("exchange.rate.cache.lookups").tag("result", "hit").counter().count();
+
+        ExecutorService readers = Executors.newFixedThreadPool(4);
+        try {
+            for (int i = 0; i < 4; i++) {
+                readers.submit(() -> {
+                    while (collecting.get()) {
+                        Instant mustBeAtLeast = finishedRound.get();
+                        for (ExchangeRate rate : queryService.findLatest(List.of(ForeignCurrency.values()))) {
+                            returnedIds.add(rate.getId());
+                            if (rate.getCollectedAt().isBefore(mustBeAtLeast)) {
+                                violations.add(rate.getCurrency() + " " + rate.getCollectedAt() + " < " + mustBeAtLeast);
+                            }
+                        }
+                        reads.incrementAndGet();
+                    }
+                    return null;
+                });
+            }
+            for (int round = 0; round < 100; round++) {
+                collectOnce();
+                finishedRound.set(clock.instant());
+            }
+        } finally {
+            collecting.set(false);
+            readers.shutdown();
+            assertTrue(readers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+
+        double hits = meterRegistry.get("exchange.rate.cache.lookups").tag("result", "hit").counter().count() - hitsBefore;
+        System.out.println("[정합성] 수집 100회 동안 조회 " + reads.get() + "번, 캐시 hit " + (long) hits + "건, 위반 " + violations.size());
+        assertTrue(reads.get() > 100, "수집 중에 조회가 충분히 겹쳐야 의미가 있음: " + reads.get());
+        assertTrue(hits > 0, "캐시 경로를 실제로 지나야 함");
+        assertEquals(List.of(), List.copyOf(violations));
+        Long notInDb = jdbcTemplate.queryForObject("SELECT count(*) FROM unnest(?::uuid[]) AS ids(id) WHERE id NOT IN (SELECT exchange_rate_id FROM "
+                + SCHEMA + ".exchange_rates)", Long.class, (Object) returnedIds.toArray(UUID[]::new));
+        assertEquals(0L, notInDb, "조회가 준 환율은 모두 DB에 있는 행");
     }
 
     /** 캐시를 거치지 않고 DB에만 더 새로운 MOCK 행을 넣습니다. 캐시 값과 DB 값을 구분하는 데 씁니다. */
