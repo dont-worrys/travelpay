@@ -3,7 +3,6 @@ package com.travelpay.bank.application.transaction;
 import com.travelpay.bank.application.transaction.dto.BankTransactionResult;
 import com.travelpay.bank.application.transaction.dto.BankWithdrawalCommand;
 import com.travelpay.bank.domain.transaction.BankDuplicateRequestException;
-import com.travelpay.bank.domain.transaction.BankTransactionType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -22,7 +21,7 @@ public class BankWithdrawalService {
         try {
             result = withdrawalTransaction.withdraw(command);
         } catch (BankDuplicateRequestException e) {
-            result = replayer.replay(command.requestId(), BankTransactionType.DEBIT);
+            result = replayer.replayDebit(command);
         }
         log.info("출금 처리 requestId={}, status={}, failureCode={}, created={}",
                 result.requestId(), result.status(), result.failureCode(), result.created());

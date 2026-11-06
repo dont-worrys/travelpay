@@ -81,14 +81,15 @@ travelpay:
         fixed-delay: 10s
         batch-size: 10
   client:
-    # 배포는 Eureka에서 서비스 이름으로 찾으므로 주소를 비워 둔다
+    # ledger·user는 주소를 비우면 Eureka로 찾습니다.
+    # bank는 Mock 은행이 Eureka에 등록되지 않아 MOCK_BANK_URL로 직접 주소를 받습니다(필수).
     # 은행 장애 주입(fault-injection)은 로컬 검증 전용이라 넣지 않는다
     bank:
-      url: ""
+      url: ${MOCK_BANK_URL}
     ledger:
-      url: ""
+      url: ${LEDGER_SERVICE_URL:}
     user:
-      url: ""
+      url: ${USER_SERVICE_URL:}
 
 server:
   port: 8080

@@ -44,6 +44,9 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -245,6 +248,36 @@ class ChargeRecoverySchedulerIntegrationTest {
     }
 
     @Test
+    void 환불_단계에_출금_거래_ID가_없으면_바로_MANUAL_REVIEW가_되고_다시_선택되지_않는다() {
+        UUID chargeId = newCharge(ChargeStatus.REFUND_PROCESSING, 0, 3600);
+        jdbcTemplate.update("UPDATE charge_requests SET failure_code = 'LEDGER_REJECTED' WHERE id = ?", chargeId);
+        int historyBefore = historyCount(chargeId);
+
+        scheduler.recover();
+
+        assertEquals("MANUAL_REVIEW", status(chargeId));
+        assertEquals(0, attemptCount(chargeId));
+        assertEquals("LEDGER_REJECTED", jdbcTemplate.queryForObject(
+                "SELECT failure_code FROM charge_requests WHERE id = ?", String.class, chargeId));
+        assertEquals("refund bankTxId missing", jdbcTemplate.queryForObject(
+                "SELECT last_error FROM charge_requests WHERE id = ?", String.class, chargeId));
+        assertEquals(historyBefore + 1, historyCount(chargeId));
+        Integer history = jdbcTemplate.queryForObject("""
+                SELECT count(*) FROM charge_status_history
+                 WHERE charge_id = ? AND from_status = 'REFUND_PROCESSING' AND to_status = 'MANUAL_REVIEW'
+                   AND reason_code IS NULL AND reason_detail = 'refund bankTxId missing'
+                   AND trace_id LIKE 'recovery-%'
+                """, Integer.class, chargeId);
+        assertEquals(1, history);
+        verify(bankClient, never()).refund(anyString(), any(), anyLong());
+
+        pushBack(chargeId, 3600);
+        assertTrue(recoverySteps.findTargets(10).isEmpty());
+        scheduler.recover();
+        verify(executor, times(1)).execute(eq(chargeId), anyString());
+    }
+
+    @Test
     void 종료_상태는_조회되지_않는다() {
         for (ChargeStatus status : List.of(ChargeStatus.COMPLETED, ChargeStatus.FAILED, ChargeStatus.REFUNDED,
                 ChargeStatus.MANUAL_REVIEW)) {
@@ -277,6 +310,11 @@ class ChargeRecoverySchedulerIntegrationTest {
 
     private int attemptCount(UUID chargeId) {
         return jdbcTemplate.queryForObject("SELECT attempt_count FROM charge_requests WHERE id = ?",
+                Integer.class, chargeId);
+    }
+
+    private int historyCount(UUID chargeId) {
+        return jdbcTemplate.queryForObject("SELECT count(*) FROM charge_status_history WHERE charge_id = ?",
                 Integer.class, chargeId);
     }
 

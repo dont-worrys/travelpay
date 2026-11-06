@@ -199,6 +199,83 @@ class BankTransactionApiIntegrationTest {
         assertEquals(1, transactionCount());
     }
 
+    @Test
+    void 같은_requestId로_내용이_다른_출금이면_409() throws Exception {
+        String debitId = succeededDebit("w-diff", 1_000);
+
+        Resp same = post("/withdrawals", withdrawal("w-diff", "004", "12340101234567", "유재석", 1_000), null);
+        Resp otherAmount = post("/withdrawals", withdrawal("w-diff", "004", "12340101234567", "유재석", 2_000), null);
+        Resp otherAccount = post("/withdrawals", withdrawal("w-diff", "020", "1002123456789", "유재석", 1_000), null);
+
+        assertEquals(200, same.status());
+        assertEquals(debitId, same.data().get("bankTxId"));
+        assertEquals(409, otherAmount.status());
+        assertEquals("BANK_REQUEST_ID_CONFLICT", errorCode(otherAmount));
+        assertEquals(409, otherAccount.status());
+        assertEquals("BANK_REQUEST_ID_CONFLICT", errorCode(otherAccount));
+        assertEquals(NORMAL_SEED - 1_000, balance(NORMAL));
+        assertEquals(5_000, balance(POOR));
+        assertEquals(1, transactionCount());
+    }
+
+    @Test
+    void 계좌_없음으로_거절된_출금은_같은_내용이면_기존_결과_다르면_409() throws Exception {
+        String body = withdrawal("w-nf-diff", "004", "0000000000", "유재석", 1_000);
+        Resp first = post("/withdrawals", body, null);
+
+        Resp same = post("/withdrawals", body, null);
+        Resp otherAmount = post("/withdrawals", withdrawal("w-nf-diff", "004", "0000000000", "유재석", 2_000), null);
+        Resp existingAccount = post("/withdrawals",
+                withdrawal("w-nf-diff", "004", "12340101234567", "유재석", 1_000), null);
+
+        assertEquals("ACCOUNT_NOT_FOUND", first.data().get("failureCode"));
+        assertEquals(200, same.status());
+        assertEquals(first.data().get("bankTxId"), same.data().get("bankTxId"));
+        assertEquals(409, otherAmount.status());
+        assertEquals(409, existingAccount.status());
+        assertEquals(NORMAL_SEED, balance(NORMAL));
+        assertEquals(1, transactionCount());
+    }
+
+    @Test
+    void 같은_requestId로_내용이_다른_환불이면_409() throws Exception {
+        String debitId = succeededDebit("w-r-diff", 5_000);
+        String otherDebitId = succeededDebit("w-r-diff-2", 5_000);
+        Resp first = post("/refunds", refund("r-diff", debitId, 5_000), null);
+
+        Resp same = post("/refunds", refund("r-diff", debitId, 5_000), null);
+        Resp otherAmount = post("/refunds", refund("r-diff", debitId, 4_000), null);
+        Resp otherOriginal = post("/refunds", refund("r-diff", otherDebitId, 5_000), null);
+
+        assertEquals(201, first.status());
+        assertEquals(200, same.status());
+        assertEquals(first.data().get("bankTxId"), same.data().get("bankTxId"));
+        assertEquals(409, otherAmount.status());
+        assertEquals(409, otherOriginal.status());
+        assertEquals(NORMAL_SEED - 5_000, balance(NORMAL));
+        assertEquals(5_000, balance(PLATFORM));
+        assertEquals(3, transactionCount());
+    }
+
+    @Test
+    void 원거래_없음으로_거절된_환불은_같은_내용이면_기존_결과_다르면_409() throws Exception {
+        String debitId = succeededDebit("w-r-nf", 5_000);
+        String missingId = UUID.randomUUID().toString();
+        Resp first = post("/refunds", refund("r-nf-diff", missingId, 5_000), null);
+
+        Resp same = post("/refunds", refund("r-nf-diff", missingId, 5_000), null);
+        Resp otherAmount = post("/refunds", refund("r-nf-diff", missingId, 4_000), null);
+        Resp existingOriginal = post("/refunds", refund("r-nf-diff", debitId, 5_000), null);
+
+        assertEquals("ORIGINAL_TX_NOT_FOUND", first.data().get("failureCode"));
+        assertEquals(200, same.status());
+        assertEquals(first.data().get("bankTxId"), same.data().get("bankTxId"));
+        assertEquals(409, otherAmount.status());
+        assertEquals(409, existingOriginal.status());
+        assertEquals(NORMAL_SEED - 5_000, balance(NORMAL));
+        assertEquals(2, transactionCount());
+    }
+
     // ---------- 환불 ----------
 
     @Test
@@ -258,6 +335,27 @@ class BankTransactionApiIntegrationTest {
         List.of(notFound, notRefundable, mismatch).forEach(r -> assertEquals(200, r.status()));
         assertEquals(NORMAL_SEED - 10_000, balance(NORMAL));
         assertEquals(10_000, balance(PLATFORM));
+    }
+
+    @Test
+    void 플랫폼_잔액이_부족하면_환불을_INSUFFICIENT_BALANCE로_기록한다() throws Exception {
+        String debitId = succeededDebit("w-platform-poor", 10_000);
+        jdbcTemplate.update("UPDATE bank_accounts SET balance = 3000 WHERE id = ?", PLATFORM);
+        String body = refund("r-platform-poor", debitId, 10_000);
+
+        Resp first = post("/refunds", body, null);
+        Resp second = post("/refunds", body, null);
+
+        assertEquals(200, first.status());
+        assertEquals("FAILED", first.data().get("status"));
+        assertEquals("INSUFFICIENT_BALANCE", first.data().get("failureCode"));
+        assertEquals(debitId, first.data().get("originalTxId"));
+        assertEquals(200, second.status());
+        assertEquals(first.data().get("bankTxId"), second.data().get("bankTxId"));
+        assertEquals(NORMAL_SEED - 10_000, balance(NORMAL));
+        assertEquals(3_000, balance(PLATFORM));
+        assertEquals(1, count("type = 'REFUND' AND failure_code = 'INSUFFICIENT_BALANCE'"));
+        assertEquals(2, transactionCount());
     }
 
     @Test
@@ -385,6 +483,11 @@ class BankTransactionApiIntegrationTest {
 
     private long count(String where) {
         return jdbcTemplate.queryForObject("SELECT count(*) FROM bank_transactions WHERE " + where, Long.class);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object errorCode(Resp resp) {
+        return ((Map<String, Object>) resp.body().get("error")).get("code");
     }
 
     private record Resp(int status, Map<String, Object> body) {

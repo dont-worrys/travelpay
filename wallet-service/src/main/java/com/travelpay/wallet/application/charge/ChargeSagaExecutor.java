@@ -139,10 +139,12 @@ public class ChargeSagaExecutor {
     }
 
     private Optional<ChargeStatus> refund(ChargeRequest charge, String eventId) {
+        // 환불할 원거래가 없으면 재시도로 풀리지 않는다. failure_code(LEDGER_REJECTED)는 유지하고 사유는 last_error에 남긴다
         if (charge.getBankTxId() == null) {
-            log.error("환불할 출금 거래 ID 없음 chargeId={} bankRequestId={} eventId={}",
+            log.error("환불할 출금 거래 ID 없음으로 수동 확인 전환 chargeId={} bankRequestId={} eventId={}",
                     charge.getId(), charge.getBankRequestId(), eventId);
-            return Optional.empty();
+            return advance(charge, REFUND_PROCESSING, MANUAL_REVIEW,
+                    ChargeStepResult.failed(null, "refund bankTxId missing"), eventId);
         }
         BankResult result = bankClient.refund(charge.getRefundRequestId(), charge.getBankTxId(), charge.getAmount());
         return switch (result) {
