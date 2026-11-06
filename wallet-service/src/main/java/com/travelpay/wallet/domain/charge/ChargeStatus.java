@@ -38,6 +38,21 @@ public enum ChargeStatus {
         return nextStatuses().contains(to);
     }
 
+    /**
+     * 운영자 보정으로만 갈 수 있는 상태. SAGA 전이표(nextStatuses)와 분리해 SAGA는 MANUAL_REVIEW에서 나가지 못한다.
+     * MANUAL_REVIEW → 종료 상태 확정 또는 기존 SAGA 단계로 재개
+     */
+    public Set<ChargeStatus> resolutionTargets() {
+        if (this == MANUAL_REVIEW) {
+            return EnumSet.of(COMPLETED, FAILED, REFUNDED, CREDIT_PROCESSING, REFUND_PROCESSING);
+        }
+        return EnumSet.noneOf(ChargeStatus.class);
+    }
+
+    public boolean canResolveTo(ChargeStatus to) {
+        return resolutionTargets().contains(to);
+    }
+
     /** 같은 멱등 키 재요청 시: 처리 중이면 202, 아니면 200 */
     public boolean isInProgress() {
         return displayStatus == ChargeDisplayStatus.PROCESSING;

@@ -69,6 +69,24 @@ public class ChargeRequestRepositoryImpl implements ChargeRequestRepository {
     }
 
     @Override
+    public boolean lockManualReview(UUID chargeId) {
+        return !jpaRepository.lockManualReview(chargeId).isEmpty();
+    }
+
+    @Override
+    public int resolveFromManualReview(UUID chargeId, ChargeStatus to, boolean resume, ChargeFailureCode failureCode,
+                                       UUID bankTxId, UUID ledgerRef, UUID refundBankTxId, Instant now) {
+        if (resume && failureCode != null) {
+            throw new IllegalArgumentException("재개는 failure_code를 비운다: " + failureCode);
+        }
+        return resume
+                ? jpaRepository.resumeResolution(chargeId, ChargeStatus.MANUAL_REVIEW, to,
+                        bankTxId, ledgerRef, refundBankTxId, now)
+                : jpaRepository.confirmResolution(chargeId, ChargeStatus.MANUAL_REVIEW, to, failureCode,
+                        bankTxId, ledgerRef, refundBankTxId, now);
+    }
+
+    @Override
     public OptionalInt increaseAttempt(UUID chargeId, ChargeStatus status, String lastError, Instant now) {
         if (jpaRepository.increaseAttempt(chargeId, status, lastError, now) == 0) {
             return OptionalInt.empty();

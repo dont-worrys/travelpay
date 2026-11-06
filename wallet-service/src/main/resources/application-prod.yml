@@ -88,6 +88,8 @@ travelpay:
         max-period: 1d
         running-timeout: 30m
         initial-from: "2026-11-01T00:00:00Z"
+      resolution:
+        not-found-confirm-after: 10m
   client:
     # ledger·user는 주소를 비우면 Eureka로 찾습니다.
     # bank는 Mock 은행이 Eureka에 등록되지 않아 MOCK_BANK_URL로 직접 주소를 받습니다(필수).

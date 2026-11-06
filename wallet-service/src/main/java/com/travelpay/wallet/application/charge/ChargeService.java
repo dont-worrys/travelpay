@@ -58,7 +58,7 @@ public class ChargeService {
      * 같은 멱등 키의 기존 충전은 지갑 확인·외부 호출보다 먼저 찾아, 내용이 같으면 그 결과를, 다르면 409를 돌려준다.
      */
     public ChargeAcceptedResult requestCharge(RequestChargeCommand command) {
-        UUID idempotencyKey = parseIdempotencyKey(command.idempotencyKey());
+        UUID idempotencyKey = IdempotencyKeys.parse(command.idempotencyKey());
         if (command.currency() != CHARGE_CURRENCY) {
             throw new BusinessException(WalletErrorCode.CHARGE_CURRENCY_NOT_SUPPORTED);
         }
@@ -181,24 +181,5 @@ public class ChargeService {
                     e.getCause() != null ? e.getCause().getClass().getName() : e.getClass().getName());
             throw e;
         }
-    }
-
-    /** 표준 UUID 표기만 받는다. 형식 오류는 DB 조회 전에 400 */
-    private static UUID parseIdempotencyKey(String value) {
-        if (value == null || value.isBlank()) {
-            throw new BusinessException(WalletErrorCode.CHARGE_INVALID_IDEMPOTENCY_KEY);
-        }
-        String normalized = value.strip();
-        UUID parsed;
-        try {
-            parsed = UUID.fromString(normalized);
-        } catch (IllegalArgumentException e) {
-            throw new BusinessException(WalletErrorCode.CHARGE_INVALID_IDEMPOTENCY_KEY);
-        }
-        // UUID.fromString이 허용하는 축약형까지 받아들이지 않도록 표준 표기와 비교
-        if (!parsed.toString().equalsIgnoreCase(normalized)) {
-            throw new BusinessException(WalletErrorCode.CHARGE_INVALID_IDEMPOTENCY_KEY);
-        }
-        return parsed;
     }
 }

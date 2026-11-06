@@ -67,6 +67,66 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
                       @Param("refundBankTxId") UUID refundBankTxId,
                       @Param("now") Instant now);
 
+    /**
+     * 운영자 보정 반영 전 행 잠금. MANUAL_REVIEW일 때만 잠그고 id를 돌려준다 (READ COMMITTED에서 대기 후 조건을 다시 본다).
+     * 보정 기록 INSERT의 FK 확인(KEY SHARE)과 UNIQUE 칸을 바꾸는 UPDATE(키 갱신 잠금)가 동시 보정끼리 교착되지 않도록
+     * 트랜잭션 첫 단계에서 잠근다
+     */
+    @Query(nativeQuery = true, value = """
+            select id from charge_requests
+             where id = :id
+               and status = 'MANUAL_REVIEW'
+               for update
+            """)
+    List<UUID> lockManualReview(@Param("id") UUID id);
+
+    /**
+     * 운영자 보정(확정): 현재 상태가 from(MANUAL_REVIEW)일 때만 to로 바꾼다. failure_code는 넘긴 값으로 바꾸고(null이면 비움)
+     * attempt_count는 그대로. 거래 ID는 비어 있을 때만 확인한 값으로 채운다 (기존 값과 다른지는 호출자가 먼저 확인)
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ChargeRequest c
+               set c.status = :to,
+                   c.failureCode = :failureCode,
+                   c.bankTxId = coalesce(c.bankTxId, :bankTxId),
+                   c.ledgerRef = coalesce(c.ledgerRef, :ledgerRef),
+                   c.refundBankTxId = coalesce(c.refundBankTxId, :refundBankTxId),
+                   c.updatedAt = :now
+             where c.id = :id
+               and c.status = :from
+            """)
+    int confirmResolution(@Param("id") UUID id,
+                          @Param("from") ChargeStatus from,
+                          @Param("to") ChargeStatus to,
+                          @Param("failureCode") ChargeFailureCode failureCode,
+                          @Param("bankTxId") UUID bankTxId,
+                          @Param("ledgerRef") UUID ledgerRef,
+                          @Param("refundBankTxId") UUID refundBankTxId,
+                          @Param("now") Instant now);
+
+    /** 운영자 보정(재개): confirmResolution에 더해 attempt_count를 0, failure_code를 비운다 */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ChargeRequest c
+               set c.status = :to,
+                   c.failureCode = null,
+                   c.attemptCount = 0,
+                   c.bankTxId = coalesce(c.bankTxId, :bankTxId),
+                   c.ledgerRef = coalesce(c.ledgerRef, :ledgerRef),
+                   c.refundBankTxId = coalesce(c.refundBankTxId, :refundBankTxId),
+                   c.updatedAt = :now
+             where c.id = :id
+               and c.status = :from
+            """)
+    int resumeResolution(@Param("id") UUID id,
+                         @Param("from") ChargeStatus from,
+                         @Param("to") ChargeStatus to,
+                         @Param("bankTxId") UUID bankTxId,
+                         @Param("ledgerRef") UUID ledgerRef,
+                         @Param("refundBankTxId") UUID refundBankTxId,
+                         @Param("now") Instant now);
+
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
             update ChargeRequest c
