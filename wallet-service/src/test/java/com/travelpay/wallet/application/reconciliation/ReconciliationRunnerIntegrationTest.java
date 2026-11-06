@@ -97,7 +97,7 @@ class ReconciliationRunnerIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".reconciliation_results, " + SCHEMA + ".reconciliation_runs");
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".reconciliation_results, " + SCHEMA + ".reconciliation_runs CASCADE");
         when(bankClient.listTransactions(any(), any())).thenReturn(List.of());
         when(ledgerClient.listChargeTransactions(any(), any())).thenReturn(List.of());
         when(bankClient.findTransaction(anyString())).thenReturn(SourceLookup.notFound());

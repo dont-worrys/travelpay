@@ -35,6 +35,22 @@ public interface ChargeRequestRepository {
                       UUID bankTxId, UUID ledgerRef, UUID refundBankTxId, Instant now);
 
     /**
+     * 운영자 보정 반영 전 행 잠금(FOR UPDATE). MANUAL_REVIEW면 잠그고 true, 아니면 false.
+     * 다른 트랜잭션이 잠그고 있으면 커밋까지 기다린 뒤 다시 판단한다. 트랜잭션 안에서만 사용
+     */
+    boolean lockManualReview(UUID chargeId);
+
+    /**
+     * 운영자 보정: 현재 상태가 MANUAL_REVIEW일 때만 to로 바꾸고 updated_at을 갱신한다. 반환값은 바뀐 행 수(0 또는 1).
+     * failure_code는 failureCode로 바꾸고(null이면 비움), resume이면 attempt_count를 0으로 초기화한다.
+     * failureCode는 정상 흐름에서 to 상태에 도달했을 때와 같은 값이다.
+     * MANUAL_REVIEW 진입 원인은 상태 이력·보정 기록에만 남는다.
+     * bankTxId·ledgerRef·refundBankTxId는 컬럼이 비어 있을 때만 채운다(null이면 그대로). 트랜잭션 안에서만 사용
+     */
+    int resolveFromManualReview(UUID chargeId, ChargeStatus to, boolean resume, ChargeFailureCode failureCode,
+                                UUID bankTxId, UUID ledgerRef, UUID refundBankTxId, Instant now);
+
+    /**
      * 결과 모름 기록: 현재 상태가 status일 때만 attempt_count +1, last_error 갱신.
      * 바뀐 뒤의 attempt_count를 돌려주고, 상태가 달라 바꾸지 않았으면 empty. 트랜잭션 안에서만 사용
      */

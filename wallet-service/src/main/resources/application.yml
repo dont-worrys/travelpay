@@ -99,6 +99,9 @@ travelpay:
         running-timeout: 30m
         # 직전 실행(COMPLETED·PARTIAL)이 없을 때 시작점
         initial-from: "2026-11-01T00:00:00Z"
+      resolution:
+        # 운영자 보정: MANUAL_REVIEW 전환(updated_at) 후 이 시간이 지난 은행·원장 NotFound만 "없음"으로 인정한다
+        not-found-confirm-after: 10m
   client:
     bank:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 mock-bank를 찾는다

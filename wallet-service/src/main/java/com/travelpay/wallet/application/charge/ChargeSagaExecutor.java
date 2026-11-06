@@ -49,13 +49,6 @@ public class ChargeSagaExecutor {
             CREDIT_PROCESSING, EnumSet.of(COMPLETED, REFUND_PROCESSING, REFUNDED, MANUAL_REVIEW),
             REFUND_PROCESSING, EnumSet.of(REFUNDED, MANUAL_REVIEW));
 
-    /** 은행 출금 실패 코드 → 충전 실패 코드. 없는 코드는 BANK_REJECTED */
-    private static final Map<String, ChargeFailureCode> WITHDRAW_FAILURES = Map.of(
-            "ACCOUNT_NOT_FOUND", ChargeFailureCode.BANK_ACCOUNT_NOT_FOUND,
-            "ACCOUNT_SUSPENDED", ChargeFailureCode.BANK_ACCOUNT_SUSPENDED,
-            "HOLDER_MISMATCH", ChargeFailureCode.BANK_HOLDER_MISMATCH,
-            "INSUFFICIENT_BALANCE", ChargeFailureCode.BANK_INSUFFICIENT_BALANCE);
-
     private final ChargeSagaSteps steps;
     private final BankClient bankClient;
     private final LedgerTransactionClient ledgerClient;
@@ -160,11 +153,11 @@ public class ChargeSagaExecutor {
     }
 
     private static ChargeStepResult withdrawFailure(String bankFailureCode) {
-        ChargeFailureCode mapped = bankFailureCode == null ? null : WITHDRAW_FAILURES.get(bankFailureCode);
-        if (mapped != null) {
+        ChargeFailureCode mapped = BankWithdrawFailures.toChargeFailureCode(bankFailureCode);
+        if (BankWithdrawFailures.isMapped(bankFailureCode)) {
             return ChargeStepResult.failed(mapped, null);
         }
-        return ChargeStepResult.failed(ChargeFailureCode.BANK_REJECTED, "bank failureCode=" + bankFailureCode);
+        return ChargeStepResult.failed(mapped, "bank failureCode=" + bankFailureCode);
     }
 
     private Optional<ChargeStatus> advance(ChargeRequest charge, ChargeStatus from, ChargeStatus to,

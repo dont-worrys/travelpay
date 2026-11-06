@@ -13,7 +13,8 @@ import java.util.UUID;
 @Table(name = "charge_status_history")
 public class ChargeStatusHistory {
 
-    private static final int REASON_DETAIL_MAX = 500;
+    /** reason_detail 길이. 보정 사유 입력 한도도 이 값이다 */
+    public static final int REASON_DETAIL_MAX = 500;
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
@@ -41,6 +42,10 @@ public class ChargeStatusHistory {
     @Column(name = "trace_id", updatable = false, length = 64)
     private String traceId;
 
+    /** 운영자 보정으로 바뀐 줄만 가진다 */
+    @Column(name = "resolution_id", updatable = false)
+    private UUID resolutionId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -48,7 +53,7 @@ public class ChargeStatusHistory {
     }
 
     private ChargeStatusHistory(UUID chargeId, ChargeStatus fromStatus, ChargeStatus toStatus,
-                                String reasonCode, String reasonDetail, String traceId) {
+                                String reasonCode, String reasonDetail, String traceId, UUID resolutionId) {
         this.chargeId = Objects.requireNonNull(chargeId, "chargeId");
         this.fromStatus = fromStatus;
         this.toStatus = Objects.requireNonNull(toStatus, "toStatus");
@@ -59,13 +64,21 @@ public class ChargeStatusHistory {
         this.reasonCode = reasonCode;
         this.reasonDetail = truncate(reasonDetail);
         this.traceId = traceId;
+        this.resolutionId = resolutionId;
         this.createdAt = Instant.now();
     }
 
     public static ChargeStatusHistory record(UUID chargeId, ChargeStatus fromStatus, ChargeStatus toStatus,
                                              String reasonCode, String reasonDetail, String traceId) {
         return new ChargeStatusHistory(chargeId, fromStatus, toStatus,
-                reasonCode, reasonDetail, traceId);
+                reasonCode, reasonDetail, traceId, null);
+    }
+
+    /** 운영자 보정 이력. reasonDetail(사유)은 호출자가 길이를 검증해 넘긴다 */
+    public static ChargeStatusHistory resolved(UUID chargeId, ChargeStatus fromStatus, ChargeStatus toStatus,
+                                               String reasonCode, String reasonDetail, UUID resolutionId) {
+        return new ChargeStatusHistory(chargeId, fromStatus, toStatus,
+                reasonCode, reasonDetail, null, Objects.requireNonNull(resolutionId, "resolutionId"));
     }
 
     private static String truncate(String value) {

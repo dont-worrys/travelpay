@@ -93,7 +93,7 @@ public class BankTransactionQueryAdapter implements BankTransactionQueryClient {
             return null;
         }
         return new BankTransactionRecord(item.requestId(), item.bankTxId(), item.type(), item.status(),
-                item.amount());
+                item.amount(), item.failureCode());
     }
 
     private static String describe(FeignException e) {

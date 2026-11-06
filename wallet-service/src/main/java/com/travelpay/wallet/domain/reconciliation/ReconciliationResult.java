@@ -57,6 +57,10 @@ public class ReconciliationResult {
     @Column(name = "resolution_status", nullable = false, length = 20)
     private ResolutionStatus resolutionStatus;
 
+    /** RESOLVED일 때 처리한 보정 ID. 조건부 UPDATE로만 바꾼다 */
+    @Column(name = "resolution_id")
+    private UUID resolutionId;
+
     protected ReconciliationResult() {
     }
 

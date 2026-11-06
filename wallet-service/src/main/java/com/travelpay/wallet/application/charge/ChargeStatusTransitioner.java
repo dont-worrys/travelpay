@@ -97,6 +97,34 @@ public class ChargeStatusTransitioner {
         return UnknownRecord.EXHAUSTED;
     }
 
+    /**
+     * 운영자 보정 전이. SAGA 전이표가 아니라 ChargeStatus.resolutionTargets로 허용 여부를 확인하고,
+     * 현재 상태가 MANUAL_REVIEW일 때만 조건부 UPDATE한 뒤 보정 ID를 담은 이력을 남긴다.
+     * failure_code는 failureCode로 바꾼다(null이면 비움). 값은 정상 흐름에서 to 상태에 도달했을 때와 같은 것이다.
+     * 재개(CREDIT_PROCESSING·REFUND_PROCESSING)면 attempt_count도 0으로 초기화한다.
+     * 전이했으면 true, 이미 MANUAL_REVIEW가 아니어서 바꾸지 않았으면 false
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean resolve(UUID chargeId, ChargeStatus to, ChargeFailureCode failureCode,
+                           UUID bankTxId, UUID ledgerRef, UUID refundBankTxId,
+                           String reasonCode, String reasonDetail, UUID resolutionId) {
+        Objects.requireNonNull(chargeId, "chargeId");
+        Objects.requireNonNull(to, "to");
+        Objects.requireNonNull(resolutionId, "resolutionId");
+        if (!ChargeStatus.MANUAL_REVIEW.canResolveTo(to)) {
+            throw new IllegalChargeTransitionException(ChargeStatus.MANUAL_REVIEW, to);
+        }
+        boolean resume = to.isInProgress();
+        int updated = chargeRequestRepository.resolveFromManualReview(chargeId, to, resume, failureCode,
+                bankTxId, ledgerRef, refundBankTxId, Instant.now());
+        if (updated == 0) {
+            return false;
+        }
+        historyRepository.save(ChargeStatusHistory.resolved(chargeId, ChargeStatus.MANUAL_REVIEW, to,
+                reasonCode, reasonDetail, resolutionId));
+        return true;
+    }
+
     private boolean recordHistory(int updated, UUID chargeId, ChargeStatus from, ChargeStatus to,
                                   ChargeFailureCode failureCode, String lastError, String traceId) {
         if (updated == 0) {
