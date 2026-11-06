@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.util.List;
 
 import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
+import com.travelpay.exchange.application.rate.ExchangeRateStore;
 import com.travelpay.exchange.domain.rate.CollectedRate;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
@@ -32,7 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * 환율 조회가 DB를 몇 번 오가는지 실제 Postgres의 pg_stat_statements로 셉니다.
  * 여러 통화 조회는 쿼리 1번이고 BEGIN·COMMIT이 없어야 합니다(트랜잭션 없이 자동 커밋).
- * 같은 방법으로 트랜잭션이 있는 경로를 세어, 이 검사가 BEGIN을 실제로 잡는지도 확인합니다. Docker가 없으면 건너뜁니다.
+ * 같은 방법으로 트랜잭션이 있는 경로를 세어, 이 검사가 BEGIN을 실제로 잡는지도 확인합니다.
+ * 캐시는 테스트 기본 설정으로 꺼져 있어(항상 미스) DB 경로만 셉니다. Docker가 없으면 건너뜁니다.
  */
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
@@ -61,6 +63,9 @@ class ExchangeRateQueryRoundTripIntegrationTest {
 
     @Autowired
     private ExchangeRateQueryService queryService;
+
+    @Autowired
+    private ExchangeRateStore store;
 
     @Autowired
     private ExchangeRateRepository repository;
@@ -94,12 +99,22 @@ class ExchangeRateQueryRoundTripIntegrationTest {
         assertEquals(0, calls("commit%"), "트랜잭션 없음 (COMMIT 0번)");
     }
 
-    /** 이 검사가 BEGIN을 실제로 셀 수 있는지: 읽기 전용 트랜잭션이 있는 한 통화 조회는 BEGIN이 잡혀야 합니다. */
+    /** 한 통화 조회도 트랜잭션 없이 쿼리 1번입니다. 트랜잭션이 있으면 캐시에서 읽을 때도 DB 연결과 BEGIN을 씁니다. */
     @Test
-    void detectsTransactionOnPathThatStillHasOne() {
+    void readsOneCurrencyWithoutTransaction() {
         resetStatements();
 
         queryService.findLatest(ForeignCurrency.JPY);
+
+        assertEquals(0, calls("begin%"), "트랜잭션 없음 (BEGIN 0번)");
+    }
+
+    /** 이 검사가 BEGIN을 실제로 셀 수 있는지: 읽기 전용 트랜잭션이 있는 수집 판단 조회는 BEGIN이 잡혀야 합니다. */
+    @Test
+    void detectsTransactionOnPathThatHasOne() {
+        resetStatements();
+
+        store.latestRateDate(RateSource.KOREAEXIM);
 
         assertTrue(calls("begin%") >= 1, "읽기 전용 트랜잭션이 있는 경로는 BEGIN이 보여야 함");
     }

@@ -1,6 +1,7 @@
 package com.travelpay.exchange.infrastructure.external.koreaexim;
 
 import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
+import com.travelpay.exchange.application.rate.LatestRateCache;
 import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
@@ -18,6 +19,7 @@ class RateModeSelectionTest {
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withConfiguration(UserConfigurations.of(KoreaEximRateConfiguration.class))
             .withBean(ExchangeRateRepository.class, () -> mock(ExchangeRateRepository.class))
+            .withBean(LatestRateCache.class, () -> mock(LatestRateCache.class))
             .withBean(ExchangeRateQueryService.class);
 
     @Test

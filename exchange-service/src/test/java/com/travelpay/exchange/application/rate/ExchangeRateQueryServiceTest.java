@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import com.travelpay.exchange.domain.rate.CollectedRate;
@@ -24,36 +25,75 @@ import static org.mockito.Mockito.when;
 class ExchangeRateQueryServiceTest {
 
     private static final LocalDate DATE = LocalDate.of(2026, 10, 28);
+    private static final List<ForeignCurrency> ALL = List.of(ForeignCurrency.JPY, ForeignCurrency.CNY);
 
     private final ExchangeRateRepository repository = mock(ExchangeRateRepository.class);
     private final ExchangeRateProvider provider = mock(ExchangeRateProvider.class);
+    private final LatestRateCache cache = mock(LatestRateCache.class);
 
-    /** 여러 통화는 현재 모드 출처로 쿼리 하나에 맡깁니다. 통화별 최신 고르기·빠지는 통화는 저장소 통합 테스트가 확인합니다. */
+    /** 모든 통화가 캐시에 있으면 DB를 읽지 않습니다. */
     @Test
-    void readsAllRequestedCurrenciesInOneQueryFromActiveSource() {
+    void readsOnlyCacheWhenEveryCurrencyIsCached() {
+        ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
+        ExchangeRate jpy = rate(ForeignCurrency.JPY);
+        ExchangeRate cny = rate(ForeignCurrency.CNY);
+        when(cache.findAll(RateSource.MOCK, ALL)).thenReturn(Map.of(ForeignCurrency.JPY, jpy, ForeignCurrency.CNY, cny));
+
+        assertEquals(List.of(jpy, cny), service.findLatest(ALL));
+        verify(repository, never()).findLatestOfEach(any(), any());
+    }
+
+    /** 캐시에 없는 통화만 DB 쿼리 한 번으로 읽고, 요청한 통화 순서대로 합칩니다. */
+    @Test
+    void readsOnlyMissingCurrenciesFromDbAndKeepsRequestedOrder() {
+        ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
+        ExchangeRate jpyFromDb = rate(ForeignCurrency.JPY);
+        ExchangeRate cnyFromCache = rate(ForeignCurrency.CNY);
+        when(cache.findAll(RateSource.MOCK, ALL)).thenReturn(Map.of(ForeignCurrency.CNY, cnyFromCache));
+        when(repository.findLatestOfEach(RateSource.MOCK, List.of(ForeignCurrency.JPY))).thenReturn(List.of(jpyFromDb));
+
+        assertEquals(List.of(jpyFromDb, cnyFromCache), service.findLatest(ALL));
+        verify(repository).findLatestOfEach(RateSource.MOCK, List.of(ForeignCurrency.JPY));
+    }
+
+    /** 캐시가 비어 있으면 요청한 통화 전부를 DB 쿼리 한 번으로 읽습니다. */
+    @Test
+    void readsAllFromDbWhenCacheIsEmpty() {
         ExchangeRateQueryService service = serviceWithSource(RateSource.KOREAEXIM);
         ExchangeRate jpy = rate(ForeignCurrency.JPY);
         ExchangeRate cny = rate(ForeignCurrency.CNY);
-        List<ForeignCurrency> all = List.of(ForeignCurrency.values());
-        when(repository.findLatestOfEach(RateSource.KOREAEXIM, all)).thenReturn(List.of(jpy, cny));
+        when(cache.findAll(RateSource.KOREAEXIM, ALL)).thenReturn(Map.of());
+        when(repository.findLatestOfEach(RateSource.KOREAEXIM, ALL)).thenReturn(List.of(jpy, cny));
 
-        assertEquals(List.of(jpy, cny), service.findLatest(all));
+        assertEquals(List.of(jpy, cny), service.findLatest(ALL));
+    }
+
+    /** 캐시에도 DB에도 없는(아직 수집 안 된) 통화는 목록에서 빠집니다. */
+    @Test
+    void leavesOutCurrencyCollectedNowhere() {
+        ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
+        ExchangeRate jpy = rate(ForeignCurrency.JPY);
+        when(cache.findAll(RateSource.MOCK, ALL)).thenReturn(Map.of(ForeignCurrency.JPY, jpy));
+        when(repository.findLatestOfEach(RateSource.MOCK, List.of(ForeignCurrency.CNY))).thenReturn(List.of());
+
+        assertEquals(List.of(jpy), service.findLatest(ALL));
+    }
+
+    @Test
+    void readsOneCurrencyFromCacheWithoutDb() {
+        ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
+        ExchangeRate jpy = rate(ForeignCurrency.JPY);
+        when(cache.find(RateSource.MOCK, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
+
+        assertEquals(Optional.of(jpy), service.findLatest(ForeignCurrency.JPY));
         verify(repository, never()).findLatest(any(), any());
     }
 
     @Test
-    void passesOnlyRequestedCurrency() {
-        ExchangeRateQueryService service = serviceWithSource(RateSource.KOREAEXIM);
-        ExchangeRate cny = rate(ForeignCurrency.CNY);
-        when(repository.findLatestOfEach(RateSource.KOREAEXIM, List.of(ForeignCurrency.CNY))).thenReturn(List.of(cny));
-
-        assertEquals(List.of(cny), service.findLatest(List.of(ForeignCurrency.CNY)));
-    }
-
-    @Test
-    void findsLatestRateOfOneCurrency() {
+    void readsOneCurrencyFromDbOnCacheMiss() {
         ExchangeRateQueryService service = serviceWithSource(RateSource.KOREAEXIM);
         ExchangeRate jpy = rate(ForeignCurrency.JPY);
+        when(cache.find(any(), any())).thenReturn(Optional.empty());
         when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
         when(repository.findLatest(RateSource.KOREAEXIM, ForeignCurrency.CNY)).thenReturn(Optional.empty());
 
@@ -61,22 +101,25 @@ class ExchangeRateQueryServiceTest {
         assertEquals(Optional.empty(), service.findLatest(ForeignCurrency.CNY));
     }
 
+    /** 캐시와 DB 모두 현재 모드의 출처만 읽고, 외부 API는 부르지 않습니다. */
     @Test
     void readsOnlyFromCurrentModeSourceAndNeverCallsExternalApi() {
         ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
-        List<ForeignCurrency> all = List.of(ForeignCurrency.values());
+        when(cache.findAll(any(), any())).thenReturn(Map.of());
         when(repository.findLatestOfEach(any(), any())).thenReturn(List.of());
 
-        service.findLatest(all);
+        service.findLatest(ALL);
 
-        verify(repository).findLatestOfEach(RateSource.MOCK, all);
-        verify(repository, never()).findLatestOfEach(RateSource.KOREAEXIM, all);
+        verify(cache).findAll(RateSource.MOCK, ALL);
+        verify(repository).findLatestOfEach(RateSource.MOCK, ALL);
+        verify(cache, never()).findAll(RateSource.KOREAEXIM, ALL);
+        verify(repository, never()).findLatestOfEach(RateSource.KOREAEXIM, ALL);
         verify(provider, never()).fetch(any());
     }
 
     private ExchangeRateQueryService serviceWithSource(RateSource source) {
         when(provider.source()).thenReturn(source);
-        return new ExchangeRateQueryService(repository, provider);
+        return new ExchangeRateQueryService(repository, provider, cache);
     }
 
     private static ExchangeRate rate(ForeignCurrency currency) {
