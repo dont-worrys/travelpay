@@ -120,9 +120,13 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         if ($3 > actMax) actMax = $3
         if (n == 1) { c0 = $4; s0 = $5 }
         c1 = $4; s1 = $5
-        # 캐시 지표도 세 개가 다 있을 때만 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 계산돼 hit 비율이 틀어짐
+        # 캐시 지표도 세 개가 다 있을 때만 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 계산돼 hit 비율이 틀어짐.
+        # 하나라도 보이면 캐시를 쓰는 jar라는 뜻이라(cacheSeen), 아래에서 측정 구간을 다 덮었는지 검사한다
+        if ($8 != "" || $9 != "" || $10 != "") cacheSeen++
         if ($8 != "" && $9 != "" && $10 != "") {
-            if (k == 0) { hit0 = $8; miss0 = $9; err0 = $10 }
+            if (k == 0) { k0 = $1; hit0 = $8; miss0 = $9; err0 = $10 }
+            else if ($1 - k1 > kGap) kGap = $1 - k1
+            k1 = $1
             k++; hit1 = $8; miss1 = $9; err1 = $10
         }
     }
@@ -150,6 +154,12 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         }
         if (hGap > gap || dGap > gap) {
             printf "측정 구간 중간에 표본이 빠졌습니다: 가장 긴 틈 커넥션 풀 %d초, DB 세션 %d초 (허용 %d초)\n", hGap, dGap, gap > "/dev/stderr"
+            exit 1
+        }
+        # 캐시를 쓰는 jar면 캐시 표본(세 값이 모두 있는 행)도 같은 기준으로 구간을 다 덮어야 한다.
+        # 끝 무렵 표본이 빠지면 그 뒤 조회가 hit·miss 차이에서 빠져 hit 비율이 틀어지기 때문이다
+        if (cacheSeen > 0 && (k == 0 || k0 > from + gap || k1 < to - gap || kGap > gap)) {
+            printf "캐시 지표 표본이 측정 구간(%d~%d)을 다 덮지 못했습니다: %d~%d, 가장 긴 틈 %d초 (허용 %d초)\n", from, to, k0, k1, kGap, gap > "/dev/stderr"
             exit 1
         }
         acqAvgMs = (c1 > c0) ? (s1 - s0) / (c1 - c0) * 1000 : 0
