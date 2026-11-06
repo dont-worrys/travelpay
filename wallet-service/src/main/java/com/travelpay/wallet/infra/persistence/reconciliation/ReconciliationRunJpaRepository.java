@@ -2,6 +2,7 @@ package com.travelpay.wallet.infra.persistence.reconciliation;
 
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRun;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunStatus;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunType;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -16,8 +17,8 @@ import java.util.UUID;
 
 public interface ReconciliationRunJpaRepository extends JpaRepository<ReconciliationRun, UUID> {
 
-    Optional<ReconciliationRun> findFirstByStatusInOrderByPeriodToDescStartedAtDesc(
-            Collection<ReconciliationRunStatus> statuses);
+    Optional<ReconciliationRun> findFirstByRunTypeAndStatusInOrderByPeriodToDescStartedAtDesc(
+            ReconciliationRunType runType, Collection<ReconciliationRunStatus> statuses);
 
     boolean existsByStatus(ReconciliationRunStatus status);
 

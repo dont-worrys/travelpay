@@ -8,6 +8,7 @@ import com.travelpay.wallet.domain.reconciliation.ReconciliationResultRepository
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRun;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunNotRunningException;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunRepository;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -39,8 +40,8 @@ public class ReconciliationTransactionSteps {
 
     /** RUNNING 실행을 만든다. 이미 RUNNING이 있으면 ReconciliationAlreadyRunningException */
     @Transactional(timeout = TX_TIMEOUT_SECONDS)
-    public UUID start(Instant from, Instant to, Instant overlapFrom) {
-        return runRepository.saveNew(ReconciliationRun.start(from, to, overlapFrom, Instant.now())).getId();
+    public UUID start(Instant from, Instant to, Instant overlapFrom, ReconciliationRunType runType) {
+        return runRepository.saveNew(ReconciliationRun.start(from, to, overlapFrom, runType, Instant.now())).getId();
     }
 
     /** 결과 없이 FAILED로 끝낸다. 이미 RUNNING이 아니면 바꾸지 않고 현재 상태를 돌려준다 */
@@ -97,8 +98,8 @@ public class ReconciliationTransactionSteps {
     }
 
     @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
-    public Optional<ReconciliationRun> findLatestClosed() {
-        return runRepository.findLatestClosed();
+    public Optional<ReconciliationRun> findLatestClosedAuto() {
+        return runRepository.findLatestClosedAuto();
     }
 
     private ReconciliationRun load(UUID runId) {

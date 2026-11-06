@@ -36,6 +36,11 @@ public class ReconciliationSettings {
             throw new IllegalStateException(PREFIX + "overlap은 0 이상이어야 합니다: " + overlap);
         }
         this.maxPeriod = positive("max-period", maxPeriod);
+        // from = 직전 period_to − overlap, to ≤ from + max-period 이므로 overlap ≥ max-period면 위치가 멈추거나 뒤로 간다
+        if (this.overlap.compareTo(this.maxPeriod) >= 0) {
+            throw new IllegalStateException(PREFIX + "overlap은 max-period보다 작아야 합니다: overlap=" + overlap
+                    + ", max-period=" + maxPeriod);
+        }
         this.runningTimeout = positive("running-timeout", runningTimeout);
         this.initialFrom = instant(initialFrom);
     }

@@ -30,6 +30,11 @@ public class ReconciliationRun {
     @Column(name = "overlap_from", updatable = false)
     private Instant overlapFrom;
 
+    /** AUTO: 기간 계산으로 정한 실행, MANUAL: 기간 지정 수동 실행 (다음 기간 계산에서 빠짐) */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "run_type", nullable = false, updatable = false, length = 10)
+    private ReconciliationRunType runType;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "status", nullable = false, length = 20)
     private ReconciliationRunStatus status;
@@ -58,24 +63,26 @@ public class ReconciliationRun {
     protected ReconciliationRun() {
     }
 
-    private ReconciliationRun(Instant periodFrom, Instant periodTo, Instant overlapFrom, Instant startedAt) {
+    private ReconciliationRun(Instant periodFrom, Instant periodTo, Instant overlapFrom, ReconciliationRunType runType,
+                              Instant startedAt) {
         this.periodFrom = Objects.requireNonNull(periodFrom, "periodFrom");
         this.periodTo = Objects.requireNonNull(periodTo, "periodTo");
         if (!periodFrom.isBefore(periodTo)) {
             throw new IllegalArgumentException("대사 기간 시작이 종료보다 앞서야 합니다.");
         }
         this.overlapFrom = overlapFrom;
+        this.runType = Objects.requireNonNull(runType, "runType");
         this.startedAt = Objects.requireNonNull(startedAt, "startedAt");
         this.status = ReconciliationRunStatus.RUNNING;
     }
 
-    public static ReconciliationRun start(Instant periodFrom, Instant periodTo, Instant now) {
-        return start(periodFrom, periodTo, null, now);
-    }
-
-    /** overlapFrom: 이전 기간과 겹쳐 다시 보는 시작 시각 (계산한 기간만, 지정 기간이면 null) */
-    public static ReconciliationRun start(Instant periodFrom, Instant periodTo, Instant overlapFrom, Instant now) {
-        return new ReconciliationRun(periodFrom, periodTo, overlapFrom, now);
+    /**
+     * overlapFrom: 이전 기간과 겹쳐 다시 보는 시작 시각 (계산한 기간만, 지정 기간이면 null).
+     * runType은 생략할 수 없다: AUTO만 다음 기간 계산의 기준이 된다
+     */
+    public static ReconciliationRun start(Instant periodFrom, Instant periodTo, Instant overlapFrom,
+                                          ReconciliationRunType runType, Instant now) {
+        return new ReconciliationRun(periodFrom, periodTo, overlapFrom, runType, now);
     }
 
     /**

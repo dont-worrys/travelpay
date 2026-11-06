@@ -11,6 +11,7 @@ import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.domain.reconciliation.MismatchType;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationResult;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunNotRunningException;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunType;
 import com.travelpay.wallet.domain.reconciliation.SourceType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -52,13 +53,12 @@ public class ChargeReconciliationService {
      * RUNNING 실행이 이미 있으면 ReconciliationAlreadyRunningException (실행 기록을 만들지 않음).
      * 기간 목록을 끝까지 받지 못하면 FAILED(실패 사유만 저장). 예상하지 못한 예외도 FAILED로 끝내고 다시 던진다.
      */
-    public ReconciliationRunResult run(Instant from, Instant to) {
-        return run(from, to, null);
-    }
-
-    /** overlapFrom: 이전 기간과 겹쳐 다시 보는 시작 시각 (계산한 기간만 기록, 지정 기간이면 null) */
-    public ReconciliationRunResult run(Instant from, Instant to, Instant overlapFrom) {
-        UUID runId = steps.start(from, to, overlapFrom);
+    /**
+     * overlapFrom: 이전 기간과 겹쳐 다시 보는 시작 시각 (계산한 기간만 기록, 지정 기간이면 null).
+     * runType: 기간 계산으로 정했으면 AUTO, 기간을 지정했으면 MANUAL (다음 기간 계산은 AUTO만 기준)
+     */
+    public ReconciliationRunResult run(Instant from, Instant to, Instant overlapFrom, ReconciliationRunType runType) {
+        UUID runId = steps.start(from, to, overlapFrom, runType);
         try {
             return reconcile(runId, from, to);
         } catch (RuntimeException | Error e) {

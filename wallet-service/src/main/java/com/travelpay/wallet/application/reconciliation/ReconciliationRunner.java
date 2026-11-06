@@ -6,6 +6,7 @@ import com.travelpay.wallet.application.reconciliation.dto.ReconciliationPeriod;
 import com.travelpay.wallet.application.reconciliation.dto.ReconciliationRunResult;
 import com.travelpay.wallet.domain.WalletErrorCode;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationAlreadyRunningException;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -45,7 +46,7 @@ public class ReconciliationRunner {
         }
         ReconciliationPeriod p = period.get();
         try {
-            return Optional.of(reconciliationService.run(p.from(), p.to(), p.overlapFrom()));
+            return Optional.of(reconciliationService.run(p.from(), p.to(), p.overlapFrom(), p.runType()));
         } catch (ReconciliationAlreadyRunningException e) {
             log.info("충전 대사 건너뜀: 다른 실행이 먼저 시작함");
             return Optional.empty();
@@ -70,7 +71,7 @@ public class ReconciliationRunner {
                     .orElseThrow(() -> new BusinessException(WalletErrorCode.RECONCILIATION_PERIOD_NOT_READY));
         }
         try {
-            return reconciliationService.run(period.from(), period.to(), period.overlapFrom());
+            return reconciliationService.run(period.from(), period.to(), period.overlapFrom(), period.runType());
         } catch (ReconciliationAlreadyRunningException e) {
             throw new BusinessException(WalletErrorCode.RECONCILIATION_ALREADY_RUNNING);
         }
@@ -93,7 +94,7 @@ public class ReconciliationRunner {
                 || Duration.between(f, t).compareTo(settings.maxPeriod()) > 0) {
             throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
         }
-        return new ReconciliationPeriod(f, t, null);
+        return new ReconciliationPeriod(f, t, null, ReconciliationRunType.MANUAL);
     }
 
     private static Instant ceilToMicros(Instant instant) {

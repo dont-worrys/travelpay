@@ -4,6 +4,7 @@ import com.travelpay.wallet.domain.reconciliation.ReconciliationAlreadyRunningEx
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRun;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunRepository;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunStatus;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunType;
 import lombok.RequiredArgsConstructor;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -45,8 +46,9 @@ public class ReconciliationRunRepositoryImpl implements ReconciliationRunReposit
     }
 
     @Override
-    public Optional<ReconciliationRun> findLatestClosed() {
-        return jpaRepository.findFirstByStatusInOrderByPeriodToDescStartedAtDesc(CLOSED);
+    public Optional<ReconciliationRun> findLatestClosedAuto() {
+        return jpaRepository.findFirstByRunTypeAndStatusInOrderByPeriodToDescStartedAtDesc(
+                ReconciliationRunType.AUTO, CLOSED);
     }
 
     @Override

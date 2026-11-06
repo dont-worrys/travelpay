@@ -14,8 +14,8 @@ public interface ReconciliationRunRepository {
 
     Optional<ReconciliationRun> findById(UUID runId);
 
-    /** COMPLETED·PARTIAL 중 period_to가 가장 늦은 실행 (FAILED·RUNNING 제외) */
-    Optional<ReconciliationRun> findLatestClosed();
+    /** AUTO 실행 중 COMPLETED·PARTIAL에서 period_to가 가장 늦은 실행 (FAILED·RUNNING·MANUAL 제외) */
+    Optional<ReconciliationRun> findLatestClosedAuto();
 
     boolean existsRunning();
 
