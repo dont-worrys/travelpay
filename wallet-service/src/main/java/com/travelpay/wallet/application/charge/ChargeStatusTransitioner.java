@@ -100,8 +100,8 @@ public class ChargeStatusTransitioner {
     /**
      * 운영자 보정 전이. SAGA 전이표가 아니라 ChargeStatus.resolutionTargets로 허용 여부를 확인하고,
      * 현재 상태가 MANUAL_REVIEW일 때만 조건부 UPDATE한 뒤 보정 ID를 담은 이력을 남긴다.
-     * 재개(CREDIT_PROCESSING·REFUND_PROCESSING)면 attempt_count 0·failure_code를 비우고(failureCode는 null이어야 함),
-     * 확정이면 failure_code를 failureCode로 바꾼다(null이면 비움).
+     * failure_code는 failureCode로 바꾼다(null이면 비움). 값은 정상 흐름에서 to 상태에 도달했을 때와 같은 것이다.
+     * 재개(CREDIT_PROCESSING·REFUND_PROCESSING)면 attempt_count도 0으로 초기화한다.
      * 전이했으면 true, 이미 MANUAL_REVIEW가 아니어서 바꾸지 않았으면 false
      */
     @Transactional(propagation = Propagation.MANDATORY)

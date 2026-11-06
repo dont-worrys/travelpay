@@ -42,7 +42,8 @@ public interface ChargeRequestRepository {
 
     /**
      * 운영자 보정: 현재 상태가 MANUAL_REVIEW일 때만 to로 바꾸고 updated_at을 갱신한다. 반환값은 바뀐 행 수(0 또는 1).
-     * resume이면 attempt_count 0·failure_code NULL, 아니면 failure_code를 failureCode로 바꾼다(null이면 비움).
+     * failure_code는 failureCode로 바꾸고(null이면 비움), resume이면 attempt_count를 0으로 초기화한다.
+     * failureCode는 정상 흐름에서 to 상태에 도달했을 때와 같은 값이다.
      * MANUAL_REVIEW 진입 원인은 상태 이력·보정 기록에만 남는다.
      * bankTxId·ledgerRef·refundBankTxId는 컬럼이 비어 있을 때만 채운다(null이면 그대로). 트랜잭션 안에서만 사용
      */

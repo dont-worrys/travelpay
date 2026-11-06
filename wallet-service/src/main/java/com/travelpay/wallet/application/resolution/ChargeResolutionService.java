@@ -133,15 +133,17 @@ public class ChargeResolutionService {
 
     /**
      * 보정 후 충전 failure_code. MANUAL_REVIEW 진입 원인(RETRY_EXHAUSTED 등)은 남기지 않는다 (상태 이력·보정 기록에만 있음).
-     * - CONFIRM_COMPLETED·RESUME_*: 비움
+     * 원칙: 정상 흐름에서 그 상태에 도달했을 때와 같은 값.
+     * - CONFIRM_COMPLETED·RESUME_CREDIT: 비움
      * - CONFIRM_FAILED: 출금 FAILED면 SAGA와 같은 은행 실패 매핑(없는 코드는 BANK_REJECTED), 출금 없음이면 BANK_NOT_PROCESSED
-     * - CONFIRM_REFUNDED: 정상 환불 흐름과 같은 LEDGER_REJECTED
+     * - CONFIRM_REFUNDED·RESUME_REFUND: LEDGER_REJECTED (정상 흐름은 원장 거절로 REFUND_PROCESSING에 들어올 때 넣고
+     *   환불 성공까지 유지한다. 두 조치 모두 원장 REJECTED 또는 없음을 확인해야 허용된다)
      */
     private static ChargeFailureCode resultFailureCode(ResolutionAction action,
                                                        SourceLookup<BankTransactionRecord> debit) {
         return switch (action) {
-            case CONFIRM_COMPLETED, RESUME_CREDIT, RESUME_REFUND -> null;
-            case CONFIRM_REFUNDED -> ChargeFailureCode.LEDGER_REJECTED;
+            case CONFIRM_COMPLETED, RESUME_CREDIT -> null;
+            case CONFIRM_REFUNDED, RESUME_REFUND -> ChargeFailureCode.LEDGER_REJECTED;
             case CONFIRM_FAILED -> debit instanceof SourceLookup.Found<BankTransactionRecord> found
                     ? BankWithdrawFailures.toChargeFailureCode(found.record().failureCode())
                     : ChargeFailureCode.BANK_NOT_PROCESSED;

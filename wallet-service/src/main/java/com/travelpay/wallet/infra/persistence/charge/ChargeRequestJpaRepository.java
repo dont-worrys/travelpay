@@ -105,12 +105,15 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
                           @Param("refundBankTxId") UUID refundBankTxId,
                           @Param("now") Instant now);
 
-    /** 운영자 보정(재개): confirmResolution에 더해 attempt_count를 0, failure_code를 비운다 */
+    /**
+     * 운영자 보정(재개): confirmResolution에 더해 attempt_count를 0으로 초기화한다.
+     * failure_code는 정상 흐름에서 그 단계에 들어올 때의 값(넘긴 값, null이면 비움)
+     */
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
             update ChargeRequest c
                set c.status = :to,
-                   c.failureCode = null,
+                   c.failureCode = :failureCode,
                    c.attemptCount = 0,
                    c.bankTxId = coalesce(c.bankTxId, :bankTxId),
                    c.ledgerRef = coalesce(c.ledgerRef, :ledgerRef),
@@ -122,6 +125,7 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
     int resumeResolution(@Param("id") UUID id,
                          @Param("from") ChargeStatus from,
                          @Param("to") ChargeStatus to,
+                         @Param("failureCode") ChargeFailureCode failureCode,
                          @Param("bankTxId") UUID bankTxId,
                          @Param("ledgerRef") UUID ledgerRef,
                          @Param("refundBankTxId") UUID refundBankTxId,
