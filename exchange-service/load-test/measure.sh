@@ -120,7 +120,8 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         if ($3 > actMax) actMax = $3
         if (n == 1) { c0 = $4; s0 = $5 }
         c1 = $4; s1 = $5
-        if ($8 != "") {
+        # 캐시 지표도 세 개가 다 있을 때만 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 계산돼 hit 비율이 틀어짐
+        if ($8 != "" && $9 != "" && $10 != "") {
             if (k == 0) { hit0 = $8; miss0 = $9; err0 = $10 }
             k++; hit1 = $8; miss1 = $9; err1 = $10
         }
