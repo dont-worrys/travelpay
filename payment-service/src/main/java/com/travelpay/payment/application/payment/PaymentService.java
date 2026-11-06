@@ -115,7 +115,7 @@ public class PaymentService {
         }
 
         // 거래 원장에 요청 전달, 결제 요청 승인·거절 결과 저장, 모르면 PENDING 유지
-        Payment settledPayment = settlePayment(Objects.requireNonNull(savedPayment));
+        Payment settledPayment = settlePayment(Objects.requireNonNull(savedPayment), merchant.getLedgerWalletId());
 
         if (settledPayment.getStatus() == PaymentStatus.DECLINED) {
             throw new PaymentDeclinedException(PaymentErrorCode.DECLINED, settledPayment.getDeclineReason());
@@ -170,7 +170,8 @@ public class PaymentService {
 
     public PaymentResult refundRequest(RefundCommand command) {
         // 환불할 결제 확인 (가맹점 주인 또는 MASTER)
-        Payment payment = findRefundablePayment(command);
+        RefundTarget target = findRefundTarget(command);
+        Payment payment = target.payment();
 
         // 환불 요청 기록 중복 확인
         Optional<Refund> existing = refundRepository.findByUserIdAndIdempotencyKey(
@@ -192,17 +193,18 @@ public class PaymentService {
         try {
             started = transactionOperations.execute(status -> startRefund(command));
         } catch (OptimisticLockingFailureException e) {
-            findRefundablePayment(command).validateRefundable();
+            reloadPayment(command.paymentId()).validateRefundable();
             throw new BusinessException(CommonErrorCode.CONFLICT);
         } catch (DataIntegrityViolationException e) {
             Refund existingRefund = refundRepository.findByUserIdAndIdempotencyKey(
                             command.userId(), command.idempotencyKey())
                     .orElseThrow(() -> e);
-            return replayRefund(existingRefund, findRefundablePayment(command), command.amount());
+            return replayRefund(existingRefund, reloadPayment(command.paymentId()), command.amount());
         }
 
         // 원장에 환불 요청 전송, 환불 요청 승인·거절 결과 저장, 모르면 REFUND_PENDING 유지
-        RefundProgress settled = settleRefund(Objects.requireNonNull(started).payment(), started.refund());
+        RefundProgress settled = settleRefund(Objects.requireNonNull(started).payment(), started.refund(),
+                target.merchantWalletId());
 
         if (settled.refund().getStatus() == RefundStatus.DECLINED) {
             throw new PaymentDeclinedException(PaymentErrorCode.REFUND_DECLINED, settled.refund().getDeclineReason());
@@ -220,7 +222,7 @@ public class PaymentService {
                     // 다른 인스턴스가 먼저 선점했거나 그 사이 결과가 반영됨
                     continue;
                 }
-                unknown = isResultUnknown(settlePayment(target));
+                unknown = isResultUnknown(settlePayment(target, findMerchantWalletId(target.getMerchantId())));
             } catch (RuntimeException e) {
                 log.warn("처리 중 결제 복구 실패 paymentId={}", target.getId(), e);
                 unknown = true;
@@ -245,7 +247,8 @@ public class PaymentService {
                 }
                 Payment payment = paymentRepository.findById(target.getPaymentId())
                         .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
-                unknown = isResultUnknown(settleRefund(payment, target).refund());
+                unknown = isResultUnknown(
+                        settleRefund(payment, target, findMerchantWalletId(payment.getMerchantId())).refund());
             } catch (RuntimeException e) {
                 log.warn("처리 중 환불 복구 실패 refundId={}", target.getId(), e);
                 unknown = true;
@@ -288,12 +291,12 @@ public class PaymentService {
     }
 
     // PENDING 결제를 원장 결과로 확정. 결과를 모르면 시도 횟수를 기록하고(한도면 MANUAL_REVIEW), 받아들이지 않으면 MANUAL_REVIEW
-    private Payment settlePayment(Payment payment) {
+    private Payment settlePayment(Payment payment, UUID merchantWalletId) {
         PaymentLedgerResult paymentLedgerResult = ledgerClient.createTransaction(new PaymentLedgerTransactionCommand(
                 payment.getId(),
                 payment.getUserId(),
                 payment.getUserWalletId(),
-                findMerchantWalletId(payment.getMerchantId()),
+                merchantWalletId,
                 payment.getCurrency(),
                 payment.getAmount()));
 
@@ -370,13 +373,13 @@ public class PaymentService {
 
     // 환불 요청(REQUESTED)을 원장 결과로 확정.
     // 환불이 MANUAL_REVIEW가 되어도 결제는 REFUND_PENDING 유지
-    private RefundProgress settleRefund(Payment payment, Refund refund) {
+    private RefundProgress settleRefund(Payment payment, Refund refund, UUID merchantWalletId) {
         PaymentLedgerResult paymentLedgerResult = ledgerClient.refundTransaction(new PaymentLedgerRefundCommand(
                 refund.getId(),
                 payment.getLedgerId(),
                 payment.getUserId(),
                 payment.getUserWalletId(),
-                findMerchantWalletId(payment.getMerchantId()),
+                merchantWalletId,
                 refund.getCurrency(),
                 refund.getAmount()));
 
@@ -473,7 +476,7 @@ public class PaymentService {
     }
 
     private RefundProgress startRefund(RefundCommand command) {
-        Payment payment = findRefundablePayment(command);
+        Payment payment = reloadPayment(command.paymentId());
         PaymentActor actor = command.role() == AuthRole.MASTER ? PaymentActor.MASTER : PaymentActor.USER;
         PaymentHistory history = payment.refundRequestedHistory(command.reason(), actor);
 
@@ -537,13 +540,26 @@ public class PaymentService {
     }
 
     // 환불은 결제한 가맹점의 주인 또는 MASTER만 가능, 아니면 결제가 없는 것처럼 404
-    private Payment findRefundablePayment(RefundCommand command) {
-        return paymentRepository.findById(command.paymentId())
-                .filter(payment -> command.role() == AuthRole.MASTER
-                        || merchantRepository.findById(payment.getMerchantId())
-                        .map(merchant -> merchant.getOwnerUserId().equals(command.userId()))
-                        .orElse(false))
+    private RefundTarget findRefundTarget(RefundCommand command) {
+        Payment payment = reloadPayment(command.paymentId());
+        Optional<Merchant> merchant = merchantRepository.findById(payment.getMerchantId());
+        if (command.role() != AuthRole.MASTER
+                && !merchant.map(found -> found.getOwnerUserId().equals(command.userId())).orElse(false)) {
+            throw new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND);
+        }
+        // 결제 시 ledgerWalletId가 있는 가맹점만 통과하므로, 없으면 데이터 이상
+        UUID merchantWalletId = merchant.map(Merchant::getLedgerWalletId)
+                .orElseThrow(() -> new IllegalStateException(
+                        "가맹점 원장 지갑을 찾을 수 없습니다. merchantId=" + payment.getMerchantId()));
+        return new RefundTarget(payment, merchantWalletId);
+    }
+
+    private Payment reloadPayment(UUID paymentId) {
+        return paymentRepository.findById(paymentId)
                 .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+    }
+
+    private record RefundTarget(Payment payment, UUID merchantWalletId) {
     }
 
     private record RefundProgress(Payment payment, Refund refund) {
