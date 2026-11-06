@@ -7,6 +7,7 @@ import com.travelpay.wallet.application.charge.ChargeRecoverySteps;
 import com.travelpay.wallet.application.charge.ChargeSagaExecutor;
 import com.travelpay.wallet.application.charge.ChargeTransactionSteps;
 import com.travelpay.wallet.application.charge.LedgerTransactionClient;
+import com.travelpay.wallet.application.charge.dto.BankResult;
 import com.travelpay.wallet.application.charge.dto.LedgerPostResult;
 import com.travelpay.wallet.application.reconciliation.BankTransactionQueryClient;
 import com.travelpay.wallet.application.reconciliation.LedgerTransactionQueryClient;
@@ -67,6 +68,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -346,7 +348,8 @@ class ChargeResolutionIntegrationTest {
         Map<String, Object> row = chargeRow(chargeId);
         assertEquals("REFUND_PROCESSING", row.get("status"));
         assertEquals(0, row.get("attempt_count"));
-        assertNull(row.get("failure_code"));
+        // 정상 흐름에서 원장 거절로 REFUND_PROCESSING에 들어올 때와 같은 값
+        assertEquals("LEDGER_REJECTED", row.get("failure_code"));
         assertEquals(bankTxId, row.get("bank_tx_id"));
         assertResolved(chargeId, ResolutionAction.RESUME_REFUND, "REFUND_PROCESSING");
     }
@@ -474,6 +477,50 @@ class ChargeResolutionIntegrationTest {
         assertEquals(ledgerTxId, row.get("ledger_ref"));
         verify(ledgerClient).postCharge(chargeId, userId, walletId, AMOUNT);
         verify(bankClient, never()).refund(anyString(), any(), anyLong());
+    }
+
+    @Test
+    void RESUME_REFUND_후_복구_스케줄러가_확인한_출금_ID로_환불해_REFUNDED_bank_tx_id_비어_있음() throws Exception {
+        assertResumeRefundRecovers(false);
+    }
+
+    @Test
+    void RESUME_REFUND_후_복구_스케줄러가_확인한_출금_ID로_환불해_REFUNDED_bank_tx_id_같은_값_있음() throws Exception {
+        assertResumeRefundRecovers(true);
+    }
+
+    private void assertResumeRefundRecovers(boolean bankTxIdRecorded) throws Exception {
+        UUID chargeId = manualReview(CONFIRMED_MINUTES_AGO);
+        UUID bankTxId = UUID.randomUUID();
+        if (bankTxIdRecorded) {
+            jdbcTemplate.update("UPDATE charge_requests SET bank_tx_id = ? WHERE id = ?", bankTxId, chargeId);
+        }
+        assertEquals(bankTxIdRecorded ? bankTxId : null, chargeRow(chargeId).get("bank_tx_id"));
+        stub(chargeId, debitSucceeded(chargeId, bankTxId, AMOUNT), notFound(), rejected(chargeId));
+
+        resolve(chargeId, UUID.randomUUID(), ResolutionAction.RESUME_REFUND, "환불 재개", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.resultStatus").value("REFUND_PROCESSING"));
+        Map<String, Object> resumed = chargeRow(chargeId);
+        assertEquals("REFUND_PROCESSING", resumed.get("status"));
+        assertEquals(bankTxId, resumed.get("bank_tx_id"));
+
+        String refundRequestId = jdbcTemplate.queryForObject(
+                "SELECT refund_request_id FROM charge_requests WHERE id = ?", String.class, chargeId);
+        UUID refundTxId = UUID.randomUUID();
+        when(bankClient.refund(anyString(), any(), anyLong())).thenReturn(new BankResult.Succeeded(refundTxId));
+        // 복구 대기 시간(30초)이 지난 것으로 둔다
+        jdbcTemplate.update("UPDATE charge_requests SET updated_at = now() - interval '31 seconds' WHERE id = ?",
+                chargeId);
+
+        new ChargeRecoveryScheduler(recoverySteps, executor, 10, "10s").recover();
+
+        verify(bankClient, times(1)).refund(anyString(), any(), anyLong());
+        verify(bankClient).refund(refundRequestId, bankTxId, AMOUNT);
+        Map<String, Object> row = chargeRow(chargeId);
+        assertEquals("REFUNDED", row.get("status"));
+        assertEquals(refundTxId, row.get("refund_bank_tx_id"));
+        assertEquals("LEDGER_REJECTED", row.get("failure_code"));
     }
 
     // ---------------------------------------------------------------- 동시성
