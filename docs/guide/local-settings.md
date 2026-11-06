@@ -51,17 +51,24 @@ docker compose up -d postgres redis-session kafka
 docker compose ps
 ```
 
+환전을 확인할 때는 캐시 Redis도 실행합니다. 환전은 충전한 지갑으로 확인하므로 충전에 필요한 인프라와 함께 띄웁니다.
+
+```bash
+docker compose up -d postgres redis-session kafka redis-cache
+docker compose ps
+```
+
 | 인프라 | 호스트의 기본 주소 | 컨테이너 내부 주소 |
 |---|---|---|
 | PostgreSQL | `localhost:5432` | `postgres:5432` |
 | 세션 Redis | `localhost:16379` | `redis-session:6379` |
-| 캐시 Redis·선택 구성 | `localhost:16380` | `redis-cache:6379` |
+| 캐시 Redis·환전 | `localhost:16380` | `redis-cache:6379` |
 | Kafka | `localhost:9092` | `kafka:29092` |
 | Kafka UI·선택 실행 | `localhost:8989` | `kafka-ui:8080` |
 
 Kafka UI가 필요하면 `docker compose up -d kafka-ui`로 추가합니다. 포트를 바꿨다면 `.env`와 해당 앱의 연결 설정도 함께 맞춥니다. 인프라의 호스트 포트는 로컬 루프백에 바인딩됩니다.
 
-캐시 Redis는 Compose에 준비된 선택 구성입니다. 현재 Exchange는 견적을 PostgreSQL에 저장하고 Redis 연결을 사용하지 않으므로, 환전 실행을 위해 추가로 켤 필요는 없습니다.
+캐시 Redis는 Exchange가 사용합니다. 환율 조회와 견적 발급에서 최신 환율을 캐시 Redis에서 먼저 읽고, 연결 정보는 `.env`의 `REDIS_CACHE_HOST`·`REDIS_CACHE_PORT`·`REDIS_CACHE_PASSWORD`를 씁니다. 견적은 지금처럼 PostgreSQL에 저장합니다. 캐시 Redis가 꺼져 있어도 환전은 DB에서 환율을 읽어 정상 동작합니다. 대신 시작할 때 한 번, 이후 환율 조회·수집이 캐시를 쓰려다 실패하면 1분에 한 번 경고 로그가 남습니다.
 
 ## IntelliJ에서 애플리케이션 실행
 
