@@ -181,7 +181,6 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 | 같은 `requestId`·같은 유형·같은 내용 재요청 | 200, 기존 기록 그대로(`SUCCEEDED`든 `FAILED`든) |
 | 같은 `requestId`를 다른 유형에 사용(출금 ID로 환불 등) | 409 `BANK_REQUEST_ID_CONFLICT` |
 | 같은 `requestId`·같은 유형인데 내용이 다름 | 409 `BANK_REQUEST_ID_CONFLICT` |
-| 같은 `requestId` 동시 요청 | 하나만 처리되고 나머지는 롤백 후 기존 기록을 200으로 돌려줌 |
 
 - 재요청은 다시 판정하지 않습니다. 거절된 `requestId`는 잔액을 채워도 계속 같은 `FAILED`를 돌려주므로 새 시도에는 새 `requestId`가 필요합니다.
 - 같은 내용인지는 거래 기록에 저장된 값으로 비교합니다.
