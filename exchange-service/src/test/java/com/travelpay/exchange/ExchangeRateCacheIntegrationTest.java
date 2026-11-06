@@ -1,6 +1,7 @@
 package com.travelpay.exchange;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -162,6 +163,54 @@ class ExchangeRateCacheIntegrationTest {
         UUID latestInDb = repository.findLatest(RateSource.MOCK, ForeignCurrency.JPY).orElseThrow().getId();
         assertNotEquals(first, latestInDb);
         assertEquals(latestInDb, cachedId(ForeignCurrency.JPY));
+    }
+
+    /**
+     * 시나리오 5: DB 저장은 됐는데 캐시 갱신만 실패하면, 이전 값은 유효 시간(TTL) 동안만 남고 그 뒤에는 DB 값으로 회복된다.
+     * Redis는 살아 있고 쓰기만 실패하는 상황을 만들려고, 메모리 상한을 아주 작게 하고 넘치면 쓰기를 거절하게(noeviction) 바꿉니다.
+     * TTL(30초)을 기다리는 대신 키 만료를 앞당겨 "TTL이 지난 뒤"를 만듭니다.
+     */
+    @Test
+    void failedCacheUpdateKeepsOldValueOnlyUntilTtlThenRecoversFromDb() {
+        collectOnce();
+        UUID cachedBefore = cachedId(ForeignCurrency.JPY);
+
+        setRedisConfig("maxmemory-policy", "noeviction");
+        setRedisConfig("maxmemory", "1");
+        try {
+            collectOnce(); // DB 저장은 성공, 캐시 쓰기는 OOM으로 거절됨 (수집은 실패하지 않음)
+        } finally {
+            setRedisConfig("maxmemory", "0");
+        }
+        UUID newestInDb = repository.findLatest(RateSource.MOCK, ForeignCurrency.JPY).orElseThrow().getId();
+        assertNotEquals(cachedBefore, newestInDb, "DB에는 새 회차가 저장됨");
+
+        // 갱신에 실패한 동안은 이전 값이 남아 있다. 남는 시간은 TTL(30초)이 상한이다
+        String key = "exchange:rate:latest:MOCK:JPY";
+        assertEquals(cachedBefore, queryService.findLatest(ForeignCurrency.JPY).orElseThrow().getId());
+        Long ttl = redis.getExpire(key);
+        assertTrue(ttl != null && ttl > 0 && ttl <= 30, "이전 값의 남은 수명이 TTL 안: " + ttl);
+
+        // TTL이 지난 뒤: 키가 사라지고 DB의 최신 값으로 응답한다
+        redis.expire(key, Duration.ofMillis(1));
+        waitUntilGone(key);
+        assertEquals(newestInDb, queryService.findLatest(ForeignCurrency.JPY).orElseThrow().getId());
+        assertEquals(newestInDb, queryService.findLatest(List.of(ForeignCurrency.JPY)).get(0).getId());
+    }
+
+    private void setRedisConfig(String name, String value) {
+        redis.execute(connection -> {
+            connection.serverCommands().setConfig(name, value);
+            return null;
+        }, true);
+    }
+
+    private void waitUntilGone(String key) {
+        long deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (Boolean.TRUE.equals(redis.hasKey(key))) {
+            assertTrue(System.nanoTime() < deadline, "키가 만료되지 않음: " + key);
+            Thread.onSpinWait();
+        }
     }
 
     /**

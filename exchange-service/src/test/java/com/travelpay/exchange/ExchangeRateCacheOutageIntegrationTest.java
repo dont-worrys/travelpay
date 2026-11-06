@@ -117,10 +117,10 @@ class ExchangeRateCacheOutageIntegrationTest {
         assertEquals(hitsBefore + ALL.size(), lookups("hit"));
     }
 
-    /** 응답 없음: 명령 타임아웃(200ms)까지 기다린 뒤 DB 값으로 응답한다. 다시 답하면 캐시를 쓴다. */
+    /** 응답 없음: 환율 조회·견적 발급 모두 명령 타임아웃(200ms)까지 기다린 뒤 DB 값으로 처리한다. 다시 답하면 캐시를 쓴다. */
     @Test
     @Order(2)
-    void fallsBackToDbAfterCommandTimeoutWhenRedisHangs() {
+    void fallsBackToDbAfterCommandTimeoutWhenRedisHangs() throws Exception {
         REDIS.getDockerClient().pauseContainerCmd(REDIS.getContainerId()).exec();
         try {
             double errorsBefore = lookups("error");
@@ -134,6 +134,12 @@ class ExchangeRateCacheOutageIntegrationTest {
             assertTrue(took.compareTo(Duration.ofMillis(200)) >= 0, "타임아웃까지 기다림: " + took);
             assertTrue(took.compareTo(Duration.ofSeconds(2)) < 0, "타임아웃 뒤 바로 DB로: " + took);
             assertEquals(errorsBefore + ALL.size(), lookups("error"));
+
+            // 견적 발급도 응답 없는 Redis를 200ms만 기다리고 DB의 환율로 발급한다
+            issueQuote();
+            UUID quotedRateId = jdbcTemplate.queryForObject("SELECT rate_id FROM " + SCHEMA
+                    + ".exchange_quotes ORDER BY created_at DESC LIMIT 1", UUID.class);
+            assertEquals(repository.findLatest(RateSource.MOCK, ForeignCurrency.JPY).orElseThrow().getId(), quotedRateId);
         } finally {
             REDIS.getDockerClient().unpauseContainerCmd(REDIS.getContainerId()).exec();
         }
@@ -169,14 +175,19 @@ class ExchangeRateCacheOutageIntegrationTest {
 
         MockMvc mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
         mockMvc.perform(get("/api/v1/exchange-rates")).andExpect(status().isOk());
-        mockMvc.perform(post("/api/v1/exchange-quotes")
+        issueQuote();
+        mockMvc.perform(get("/actuator/health")).andExpect(status().isOk());
+    }
+
+    private void issueQuote() throws Exception {
+        MockMvcBuilders.webAppContextSetup(context).build()
+                .perform(post("/api/v1/exchange-quotes")
                         .header("User-Id", OWNER).header("User-Role", "USER")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"fromCurrency":"KRW","toCurrency":"JPY","amount":"100000"}
                                 """))
                 .andExpect(status().isCreated());
-        mockMvc.perform(get("/actuator/health")).andExpect(status().isOk());
     }
 
     private void assertSameAsDb(List<ExchangeRate> latest) {
