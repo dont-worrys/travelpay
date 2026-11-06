@@ -11,6 +11,8 @@ import com.travelpay.exchange.application.rate.LatestRateCache;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.connection.RedisStringCommands.SetOption;
@@ -41,10 +43,24 @@ public class RedisLatestRateCache implements LatestRateCache {
     /** 캐시 형식이 웹 응답의 JSON 설정 변경에 따라 바뀌지 않도록 전용 매퍼를 씁니다. */
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
-    private final StringRedisTemplate redis;
+    /** 조회한 통화(키) 하나마다 캐시에 있었는지 셉니다. Prometheus: exchange_rate_cache_lookups_total{result="hit"|"miss"} */
+    static final String LOOKUPS_METRIC = "exchange.rate.cache.lookups";
 
-    public RedisLatestRateCache(StringRedisTemplate redis) {
+    private final StringRedisTemplate redis;
+    private final Counter hits;
+    private final Counter misses;
+
+    public RedisLatestRateCache(StringRedisTemplate redis, MeterRegistry meterRegistry) {
         this.redis = redis;
+        this.hits = lookups(meterRegistry, "hit");
+        this.misses = lookups(meterRegistry, "miss");
+    }
+
+    private static Counter lookups(MeterRegistry meterRegistry, String result) {
+        return Counter.builder(LOOKUPS_METRIC)
+                .description("최신 환율 캐시 조회 수 (통화 하나당 1)")
+                .tag("result", result)
+                .register(meterRegistry);
     }
 
     @Override
@@ -61,7 +77,7 @@ public class RedisLatestRateCache implements LatestRateCache {
         }
         for (int i = 0; i < values.size(); i++) {
             ForeignCurrency currency = currencies.get(i);
-            read(keys.get(i), values.get(i)).ifPresent(rate -> found.put(currency, rate));
+            lookup(keys.get(i), values.get(i)).ifPresent(rate -> found.put(currency, rate));
         }
         return found;
     }
@@ -69,7 +85,7 @@ public class RedisLatestRateCache implements LatestRateCache {
     @Override
     public Optional<ExchangeRate> find(RateSource source, ForeignCurrency currency) {
         String key = key(source, currency);
-        return read(key, redis.opsForValue().get(key));
+        return lookup(key, redis.opsForValue().get(key));
     }
 
     /** 통화가 수천 개로 늘면 한 번에 보내는 양을 나눠야 하지만, 지원 통화는 많아야 수십 개라 한 번에 보냅니다. */
@@ -97,6 +113,13 @@ public class RedisLatestRateCache implements LatestRateCache {
 
     private static byte[] bytes(String value) {
         return value.getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** 읽은 값을 환율로 바꾸고 hit/miss를 셉니다. 읽을 수 없는 값도 miss입니다(DB에서 읽게 되므로). */
+    private Optional<ExchangeRate> lookup(String key, String value) {
+        Optional<ExchangeRate> rate = read(key, value);
+        (rate.isPresent() ? hits : misses).increment();
+        return rate;
     }
 
     /** 값이 없거나 읽을 수 없는 형식(배포 중 형식이 바뀐 경우 등)이면 캐시에 없는 것으로 봅니다. */

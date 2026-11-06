@@ -14,6 +14,7 @@ import com.travelpay.exchange.domain.rate.CollectedRate;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -44,7 +45,8 @@ class RedisLatestRateCacheIntegrationTest {
     private static LettuceConnectionFactory connectionFactory;
     private static StringRedisTemplate redis;
 
-    private final RedisLatestRateCache cache = new RedisLatestRateCache(redis);
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final RedisLatestRateCache cache = new RedisLatestRateCache(redis, meterRegistry);
 
     @BeforeAll
     static void connect() {
@@ -170,6 +172,24 @@ class RedisLatestRateCacheIntegrationTest {
 
         assertEquals(1, commandCalls("mget"));
         assertEquals(0, commandCalls("get"));
+    }
+
+    /** 조회한 통화 하나마다 hit 또는 miss를 셉니다. 읽을 수 없는 값도 DB에서 읽게 되므로 miss입니다. */
+    @Test
+    void countsHitAndMissPerCurrency() {
+        cache.putAll(List.of(rate(ForeignCurrency.JPY, "2026-11-06T01:00:00Z")));
+
+        cache.findAll(RateSource.MOCK, List.of(ForeignCurrency.JPY, ForeignCurrency.CNY));
+        cache.find(RateSource.MOCK, ForeignCurrency.JPY);
+        redis.opsForValue().set(RedisLatestRateCache.key(RateSource.MOCK, ForeignCurrency.CNY), "not-json");
+        cache.find(RateSource.MOCK, ForeignCurrency.CNY);
+
+        assertEquals(2.0, lookups("hit"));
+        assertEquals(2.0, lookups("miss"));
+    }
+
+    private double lookups(String result) {
+        return meterRegistry.get(RedisLatestRateCache.LOOKUPS_METRIC).tag("result", result).counter().count();
     }
 
     /** 배포 중 형식이 바뀌는 등 읽을 수 없는 값은 캐시에 없는 것으로 보고 DB 조회로 넘깁니다. */
