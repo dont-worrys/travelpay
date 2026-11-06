@@ -43,17 +43,22 @@ public class RedisLatestRateCache implements LatestRateCache {
     /** 캐시 형식이 웹 응답의 JSON 설정 변경에 따라 바뀌지 않도록 전용 매퍼를 씁니다. */
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
-    /** 조회한 통화(키) 하나마다 캐시에 있었는지 셉니다. Prometheus: exchange_rate_cache_lookups_total{result="hit"|"miss"} */
+    /**
+     * 조회한 통화(키) 하나마다 결과를 셉니다. Prometheus: exchange_rate_cache_lookups_total{result="hit"|"miss"|"error"}
+     * error는 Redis에 연결하지 못했거나 시간 안에 답이 없어 읽지 못한 경우입니다(호출한 쪽이 DB로 대신 읽음).
+     */
     static final String LOOKUPS_METRIC = "exchange.rate.cache.lookups";
 
     private final StringRedisTemplate redis;
     private final Counter hits;
     private final Counter misses;
+    private final Counter errors;
 
     public RedisLatestRateCache(StringRedisTemplate redis, MeterRegistry meterRegistry) {
         this.redis = redis;
         this.hits = lookups(meterRegistry, "hit");
         this.misses = lookups(meterRegistry, "miss");
+        this.errors = lookups(meterRegistry, "error");
     }
 
     private static Counter lookups(MeterRegistry meterRegistry, String result) {
@@ -70,7 +75,13 @@ public class RedisLatestRateCache implements LatestRateCache {
             return found;
         }
         List<String> keys = currencies.stream().map(currency -> key(source, currency)).toList();
-        List<String> values = redis.opsForValue().multiGet(keys);
+        List<String> values;
+        try {
+            values = redis.opsForValue().multiGet(keys);
+        } catch (RuntimeException e) {
+            errors.increment(keys.size());
+            throw e;
+        }
         if (values == null) {
             // 파이프라인·트랜잭션 안에서만 null이 오며, 이 클래스는 그렇게 호출하지 않습니다.
             return found;
@@ -85,7 +96,14 @@ public class RedisLatestRateCache implements LatestRateCache {
     @Override
     public Optional<ExchangeRate> find(RateSource source, ForeignCurrency currency) {
         String key = key(source, currency);
-        return lookup(key, redis.opsForValue().get(key));
+        String value;
+        try {
+            value = redis.opsForValue().get(key);
+        } catch (RuntimeException e) {
+            errors.increment();
+            throw e;
+        }
+        return lookup(key, value);
     }
 
     /** 통화가 수천 개로 늘면 한 번에 보내는 양을 나눠야 하지만, 지원 통화는 많아야 수십 개라 한 번에 보냅니다. */

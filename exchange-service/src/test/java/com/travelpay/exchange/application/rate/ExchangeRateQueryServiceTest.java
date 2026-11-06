@@ -1,8 +1,10 @@
 package com.travelpay.exchange.application.rate;
 
 import java.math.BigDecimal;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -101,6 +103,29 @@ class ExchangeRateQueryServiceTest {
         assertEquals(Optional.empty(), service.findLatest(ForeignCurrency.CNY));
     }
 
+    /** 캐시가 실패하면(Redis 꺼짐·응답 없음) 예외 없이 요청한 통화 전부를 DB에서 읽습니다. */
+    @Test
+    void readsAllFromDbWhenCacheFails() {
+        ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
+        ExchangeRate jpy = rate(ForeignCurrency.JPY);
+        ExchangeRate cny = rate(ForeignCurrency.CNY);
+        when(cache.findAll(any(), any())).thenThrow(new IllegalStateException("redis down"));
+        when(repository.findLatestOfEach(RateSource.MOCK, ALL)).thenReturn(List.of(jpy, cny));
+
+        assertEquals(List.of(jpy, cny), service.findLatest(ALL));
+    }
+
+    /** 견적용 한 통화 조회도 캐시가 실패하면 DB에서 읽습니다. 캐시 장애로 견적 발급이 막히지 않습니다. */
+    @Test
+    void readsOneCurrencyFromDbWhenCacheFails() {
+        ExchangeRateQueryService service = serviceWithSource(RateSource.MOCK);
+        ExchangeRate jpy = rate(ForeignCurrency.JPY);
+        when(cache.find(any(), any())).thenThrow(new IllegalStateException("redis down"));
+        when(repository.findLatest(RateSource.MOCK, ForeignCurrency.JPY)).thenReturn(Optional.of(jpy));
+
+        assertEquals(Optional.of(jpy), service.findLatest(ForeignCurrency.JPY));
+    }
+
     /** 캐시와 DB 모두 현재 모드의 출처만 읽고, 외부 API는 부르지 않습니다. */
     @Test
     void readsOnlyFromCurrentModeSourceAndNeverCallsExternalApi() {
@@ -119,7 +144,8 @@ class ExchangeRateQueryServiceTest {
 
     private ExchangeRateQueryService serviceWithSource(RateSource source) {
         when(provider.source()).thenReturn(source);
-        return new ExchangeRateQueryService(repository, provider, cache);
+        return new ExchangeRateQueryService(repository, provider, cache,
+                new CacheFailureLog(Clock.fixed(Instant.parse("2026-10-28T03:00:00Z"), ZoneOffset.UTC)));
     }
 
     private static ExchangeRate rate(ForeignCurrency currency) {

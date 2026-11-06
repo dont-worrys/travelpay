@@ -5,6 +5,7 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
@@ -24,12 +25,14 @@ public class ExchangeRateQueryService {
 
     private final ExchangeRateRepository repository;
     private final LatestRateCache cache;
+    private final CacheFailureLog failureLog;
     private final RateSource activeSource;
 
     public ExchangeRateQueryService(ExchangeRateRepository repository, ExchangeRateProvider provider,
-                                    LatestRateCache cache) {
+                                    LatestRateCache cache, CacheFailureLog failureLog) {
         this.repository = repository;
         this.cache = cache;
+        this.failureLog = failureLog;
         // Provider에서는 현재 모드의 출처만 확인하고, fetch(외부 호출)는 하지 않습니다.
         this.activeSource = provider.source();
     }
@@ -41,7 +44,7 @@ public class ExchangeRateQueryService {
      * DB 쿼리는 하나라 트랜잭션 없이(자동 커밋) 실행해 BEGIN·COMMIT 왕복을 줄입니다.
      */
     public List<ExchangeRate> findLatest(List<ForeignCurrency> currencies) {
-        Map<ForeignCurrency, ExchangeRate> cached = cache.findAll(activeSource, currencies);
+        Map<ForeignCurrency, ExchangeRate> cached = readCache(() -> cache.findAll(activeSource, currencies), Map.of());
         List<ForeignCurrency> missing = currencies.stream()
                 .filter(currency -> !cached.containsKey(currency))
                 .toList();
@@ -68,7 +71,21 @@ public class ExchangeRateQueryService {
      * 견적 발급처럼 이미 트랜잭션 안에서 부르면 DB 조회는 그 트랜잭션에서 실행됩니다.
      */
     public Optional<ExchangeRate> findLatest(ForeignCurrency currency) {
-        return cache.find(activeSource, currency)
+        return readCache(() -> cache.find(activeSource, currency), Optional.<ExchangeRate>empty())
                 .or(() -> repository.findLatest(activeSource, currency));
+    }
+
+    /**
+     * 캐시를 읽다 실패하면(Redis 꺼짐·응답 없음) 캐시에 없는 것으로 보고 DB에서 읽게 합니다.
+     * 캐시는 빠르게 하려는 보조 수단이라, 캐시 장애로 환율 조회·견적 발급이 실패하지 않게 합니다.
+     * 연결이 끊긴 동안은 Lettuce가 명령을 바로 거절해(REJECT_COMMANDS) 기다리지 않고, 응답이 없으면 명령 타임아웃(200ms)까지만 기다립니다.
+     */
+    private <T> T readCache(Supplier<T> read, T whenFailed) {
+        try {
+            return read.get();
+        } catch (RuntimeException e) {
+            failureLog.warn("조회", e);
+            return whenFailed;
+        }
     }
 }
