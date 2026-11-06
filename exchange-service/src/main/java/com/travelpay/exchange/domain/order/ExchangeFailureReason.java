@@ -10,28 +10,41 @@ import com.travelpay.common.error.ErrorCode;
  */
 public enum ExchangeFailureReason {
     /** 지갑 잔액이 수수료 포함 금액보다 적음 */
-    INSUFFICIENT_BALANCE(ExchangeOrderErrorCode.LEDGER_REJECTED_INSUFFICIENT_BALANCE),
+    INSUFFICIENT_BALANCE(ExchangeOrderErrorCode.LEDGER_REJECTED_INSUFFICIENT_BALANCE, true),
     /** 원장 계정이 정지됨 */
-    WALLET_SUSPENDED(ExchangeOrderErrorCode.LEDGER_REJECTED_WALLET_SUSPENDED),
+    WALLET_SUSPENDED(ExchangeOrderErrorCode.LEDGER_REJECTED_WALLET_SUSPENDED, true),
     /** 원장 계정을 찾지 못함 */
-    ACCOUNT_NOT_FOUND(ExchangeOrderErrorCode.LEDGER_REJECTED_ACCOUNT_NOT_FOUND);
+    ACCOUNT_NOT_FOUND(ExchangeOrderErrorCode.LEDGER_REJECTED_ACCOUNT_NOT_FOUND, true),
+    /** 원장에 기록이 없어 관리자 확인 후 시간 초과로 취소됨 */
+    NOT_PROCESSED(ExchangeOrderErrorCode.NOT_PROCESSED, false),
+    /** 모르는 원장 거절 사유나 원장 충돌 등으로 관리자 확인 후 오류로 취소됨 */
+    PROCESSING_ERROR(ExchangeOrderErrorCode.PROCESSING_ERROR, false);
 
     private static final String LEDGER_REJECT_PREFIX = "LEDGER_REJECTED_";
 
     private final ExchangeOrderErrorCode errorCode;
+    private final boolean ledgerRejection;
 
-    ExchangeFailureReason(ExchangeOrderErrorCode errorCode) {
+    ExchangeFailureReason(ExchangeOrderErrorCode errorCode, boolean ledgerRejection) {
         this.errorCode = errorCode;
+        this.ledgerRejection = ledgerRejection;
     }
 
-    /** 원장 거절 코드에 해당하는 사유입니다. 원장이 나중에 추가한, 우리가 모르는 사유면 empty입니다. */
+    /** 원장 등록 거절 오류 코드(LEDGER_REJECTED_*)에 해당하는 사유입니다. 모르는 사유면 empty입니다. */
     public static Optional<ExchangeFailureReason> fromLedgerRejectCode(String rejectCode) {
         if (rejectCode == null || !rejectCode.startsWith(LEDGER_REJECT_PREFIX)) {
             return Optional.empty();
         }
-        String name = rejectCode.substring(LEDGER_REJECT_PREFIX.length());
+        return fromLedgerRejectReason(rejectCode.substring(LEDGER_REJECT_PREFIX.length()));
+    }
+
+    /** 원장 단건 조회의 rejectReason 값에 해당하는 사유입니다. 아는 원장 거절 사유(3종)가 아니면 empty입니다. */
+    public static Optional<ExchangeFailureReason> fromLedgerRejectReason(String rejectReason) {
+        if (rejectReason == null) {
+            return Optional.empty();
+        }
         for (ExchangeFailureReason reason : values()) {
-            if (reason.name().equals(name)) {
+            if (reason.ledgerRejection && reason.name().equals(rejectReason)) {
                 return Optional.of(reason);
             }
         }

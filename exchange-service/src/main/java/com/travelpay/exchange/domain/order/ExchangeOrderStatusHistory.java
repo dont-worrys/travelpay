@@ -51,17 +51,32 @@ public class ExchangeOrderStatusHistory extends BaseCreatedEntity {
     @Column(name = "changed_by_type", length = 20, nullable = false, updatable = false)
     private ChangedByType changedByType;
 
+    @Column(name = "changed_by_id", updatable = false)
+    private UUID changedById;
+
+    @Column(name = "ledger_transaction_id", updatable = false)
+    private UUID ledgerTransactionId;
+
+    @Column(name = "memo", length = 255, updatable = false)
+    private String memo;
+
+    private static final int MAX_MEMO_LENGTH = 255;
+
     private ExchangeOrderStatusHistory(UUID orderId, ExchangeOrderStatus fromStatus, ExchangeOrderStatus toStatus,
-                                       String reason, ChangedByType changedByType) {
+                                       String reason, ChangedByType changedByType, UUID changedById,
+                                       UUID ledgerTransactionId, String memo) {
         this.orderId = orderId;
         this.fromStatus = fromStatus;
         this.toStatus = toStatus;
         this.reason = reason;
         this.changedByType = changedByType;
+        this.changedById = changedById;
+        this.ledgerTransactionId = ledgerTransactionId;
+        this.memo = memo;
     }
 
     /**
-     * 상태 변경 한 건을 기록합니다.
+     * 회원(USER) 또는 시스템(SYSTEM)에 의한 상태 변경 한 건을 기록합니다.
      *
      * @param fromStatus 이전 상태. 주문 생성이면 null입니다.
      * @param reason     실패 사유 등. 없으면 null입니다.
@@ -72,6 +87,32 @@ public class ExchangeOrderStatusHistory extends BaseCreatedEntity {
         Objects.requireNonNull(orderId, "orderId");
         Objects.requireNonNull(toStatus, "toStatus");
         Objects.requireNonNull(changedByType, "changedByType");
-        return new ExchangeOrderStatusHistory(orderId, fromStatus, toStatus, reason, changedByType);
+        if (changedByType == ChangedByType.MASTER) {
+            throw new IllegalArgumentException("MASTER history requires changedById; use byMaster()");
+        }
+        return new ExchangeOrderStatusHistory(orderId, fromStatus, toStatus, reason, changedByType, null, null, null);
+    }
+
+    /**
+     * 관리자(MASTER)가 MANUAL_REVIEW 주문을 처리한 이력을 기록합니다.
+     *
+     * @param reason              시스템이 남기는 처리 근거 (LEDGER_POSTED / LEDGER_REJECTED / LEDGER_NOT_FOUND)
+     * @param changedById         처리한 관리자 회원 ID (필수)
+     * @param ledgerTransactionId 근거가 된 원장 거래 ID (기록 없음이면 null)
+     * @param memo                관리자 비고 (선택, 255자 이하)
+     */
+    public static ExchangeOrderStatusHistory byMaster(UUID orderId, ExchangeOrderStatus fromStatus,
+                                                      ExchangeOrderStatus toStatus, String reason,
+                                                      UUID changedById, UUID ledgerTransactionId, String memo) {
+        Objects.requireNonNull(orderId, "orderId");
+        Objects.requireNonNull(fromStatus, "fromStatus");
+        Objects.requireNonNull(toStatus, "toStatus");
+        Objects.requireNonNull(reason, "reason");
+        Objects.requireNonNull(changedById, "changedById");
+        if (memo != null && memo.length() > MAX_MEMO_LENGTH) {
+            throw new IllegalArgumentException("memo must be at most " + MAX_MEMO_LENGTH + " characters");
+        }
+        return new ExchangeOrderStatusHistory(orderId, fromStatus, toStatus, reason, ChangedByType.MASTER,
+                changedById, ledgerTransactionId, memo);
     }
 }

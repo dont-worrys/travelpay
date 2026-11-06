@@ -5,5 +5,7 @@ public enum ChangedByType {
     /** 회원의 환전 신청 */
     USER,
     /** 원장 결과 반영·복구 스케줄러 */
-    SYSTEM
+    SYSTEM,
+    /** MANUAL_REVIEW 관리자 처리 */
+    MASTER
 }
