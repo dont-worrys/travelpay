@@ -30,6 +30,31 @@ services:
       timeout: 3s
       retries: 15
 
+  # 측정 전용 캐시 Redis. 팀 공용 redis-cache와 같은 이미지·설정(128MB, 가득 차면 덜 쓴 키부터 제거, 디스크 저장 안 함).
+  # Redis를 쓰지 않는 jar(v0·v0.5)를 잴 때도 함께 띄워, 버전끼리 jar 말고는 환경이 같게 합니다.
+  measure-redis:
+    image: ${REDIS_IMAGE:-redis:8.2.11-bookworm}
+    command:
+      - redis-server
+      - --requirepass
+      - load-test-only
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    environment:
+      # redis-cli가 이 비밀번호를 씀 (명령줄에 비밀번호를 쓰지 않게)
+      REDISCLI_AUTH: load-test-only
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
   # 측정 대상 환전 서비스(mock 모드). 저장소 루트에서 빌드한 jar를 그대로 실행합니다.
   # k6·앱·DB를 모두 같은 Docker 네트워크에 둡니다. 앱을 PC에 띄우면 앱↔DB, k6↔앱 요청이 전부
   # Docker Desktop의 포트 전달(PC↔Docker 경계)을 지나는데, 부하 중 그 왕복이 0.05ms → 2.7ms로 느려지고
@@ -41,6 +66,8 @@ services:
     profiles: ["app"]
     depends_on:
       measure-postgres:
+        condition: service_healthy
+      measure-redis:
         condition: service_healthy
     command:
       - java
@@ -57,6 +84,10 @@ services:
       EXCHANGE_DB_USERNAME: exchange_app
       EXCHANGE_DB_PASSWORD: load-test-only
       EXCHANGE_RATE_MODE: mock
+      # 환율 캐시(v1부터 사용). Redis를 쓰지 않는 jar는 이 값을 읽지 않음
+      REDIS_CACHE_HOST: measure-redis
+      REDIS_CACHE_PORT: "6379"
+      REDIS_CACHE_PASSWORD: load-test-only
     ports:
       # 손으로 확인할 때만 쓰는 PC 쪽 포트. 측정(k6·지표 수집)은 Docker 네트워크 안에서 app:18084/18085로 요청함
       - "127.0.0.1:18084:18084"
