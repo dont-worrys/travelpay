@@ -4,6 +4,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -59,4 +60,13 @@ public interface ChargeRequestRepository {
 
     /** 전체 충전 목록(관리자). 모든 조건이 null이면 조건 없음. 기간은 createdAt 기준 [from, to) */
     Page<ChargeRequest> search(UUID userId, ChargeStatus status, Instant from, Instant to, Pageable pageable);
+
+    /** 대사 후보: created_at이 [from, to)인 충전 전체 (상태 무관) */
+    List<ChargeRequest> findCreatedBetween(Instant from, Instant to);
+
+    /** 대사: bank_request_id 또는 refund_request_id가 requestIds 중 하나인 충전 */
+    List<ChargeRequest> findByBankOrRefundRequestIds(Collection<String> requestIds);
+
+    /** 대사: id가 chargeIds 중 하나인 충전 */
+    List<ChargeRequest> findAllByIds(Collection<UUID> chargeIds);
 }

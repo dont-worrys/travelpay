@@ -11,6 +11,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -156,4 +157,16 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
                                @Param("from") Instant from,
                                @Param("to") Instant to,
                                Pageable pageable);
+
+    /** 대사 후보. ix_charge_requests_created 범위 스캔 */
+    @Query("select c from ChargeRequest c where c.createdAt >= :from and c.createdAt < :to")
+    List<ChargeRequest> findCreatedBetween(@Param("from") Instant from, @Param("to") Instant to);
+
+    /** 은행 requestId로 충전 찾기. 두 컬럼 모두 UNIQUE 인덱스가 있다 */
+    @Query("""
+            select c from ChargeRequest c
+             where c.bankRequestId in :requestIds
+                or c.refundRequestId in :requestIds
+            """)
+    List<ChargeRequest> findByBankOrRefundRequestIds(@Param("requestIds") Collection<String> requestIds);
 }
