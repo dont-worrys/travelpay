@@ -3,6 +3,7 @@ package com.travelpay.exchange.domain.rate;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.UUID;
 
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
@@ -56,6 +57,29 @@ class ExchangeRateTest {
     @Test
     void rejectsCurrencyOfOtherRate() {
         assertThrows(IllegalArgumentException.class, () -> JPY.convertAtMidRate(new Money(Currency.CNY, 100)));
+    }
+
+    /** 캐시에서 다시 만든 환율은 저장 때의 ID를 그대로 가져 견적 근거로 쓸 수 있습니다. */
+    @Test
+    void restoresSavedRateWithItsId() {
+        UUID id = UUID.randomUUID();
+        CollectedRate collected = new CollectedRate(ForeignCurrency.JPY, 100,
+                new BigDecimal("838.3"), new BigDecimal("846.68"), new BigDecimal("829.91"), DATE, RateSource.KOREAEXIM);
+
+        ExchangeRate restored = ExchangeRate.restore(id, collected, COLLECTED_AT);
+
+        assertEquals(id, restored.getId());
+        assertEquals("KRW", restored.getPriceCurrency());
+        assertEquals(COLLECTED_AT, restored.getCollectedAt());
+        assertEquals(new Money(Currency.KRW, 8383), restored.convertAtMidRate(new Money(Currency.JPY, 1000)));
+    }
+
+    @Test
+    void cannotRestoreWithoutId() {
+        CollectedRate collected = new CollectedRate(ForeignCurrency.CNY, 1,
+                new BigDecimal("198.69"), new BigDecimal("198.69"), new BigDecimal("198.69"), DATE, RateSource.KOREAEXIM);
+
+        assertThrows(NullPointerException.class, () -> ExchangeRate.restore(null, collected, COLLECTED_AT));
     }
 
     private static ExchangeRate rate(ForeignCurrency currency, int unit, String midRate) {
