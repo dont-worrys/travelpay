@@ -12,7 +12,10 @@ public enum WalletErrorCode implements ErrorCode {
     CHARGE_IDEMPOTENCY_CONFLICT("CHARGE_IDEMPOTENCY_CONFLICT", "같은 Idempotency-Key로 다른 충전을 요청할 수 없습니다.", 409),
     CHARGE_CURRENCY_NOT_SUPPORTED("CHARGE_CURRENCY_NOT_SUPPORTED", "원화(KRW)만 충전할 수 있습니다.", 400),
     CHARGE_USER_NOT_ACTIVE("CHARGE_USER_NOT_ACTIVE", "충전할 수 없는 회원 상태입니다.", 409),
-    WALLET_LEDGER_UNAVAILABLE("WALLET_LEDGER_UNAVAILABLE", "잔액 정보를 일시적으로 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503);
+    WALLET_LEDGER_UNAVAILABLE("WALLET_LEDGER_UNAVAILABLE", "잔액 정보를 일시적으로 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503),
+    RECONCILIATION_ALREADY_RUNNING("RECONCILIATION_ALREADY_RUNNING", "이미 실행 중인 충전 대사가 있습니다.", 409),
+    RECONCILIATION_PERIOD_NOT_READY("RECONCILIATION_PERIOD_NOT_READY", "대사할 닫힌 기간이 아직 없습니다.", 409),
+    RECONCILIATION_RUN_NOT_FOUND("RECONCILIATION_RUN_NOT_FOUND", "충전 대사 실행을 찾을 수 없습니다.", 404);
 
     private final String code;
     private final String message;

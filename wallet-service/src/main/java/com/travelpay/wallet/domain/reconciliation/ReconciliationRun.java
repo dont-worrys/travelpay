@@ -58,43 +58,37 @@ public class ReconciliationRun {
     protected ReconciliationRun() {
     }
 
-    private ReconciliationRun(Instant periodFrom, Instant periodTo, Instant startedAt) {
+    private ReconciliationRun(Instant periodFrom, Instant periodTo, Instant overlapFrom, Instant startedAt) {
         this.periodFrom = Objects.requireNonNull(periodFrom, "periodFrom");
         this.periodTo = Objects.requireNonNull(periodTo, "periodTo");
         if (!periodFrom.isBefore(periodTo)) {
             throw new IllegalArgumentException("대사 기간 시작이 종료보다 앞서야 합니다.");
         }
+        this.overlapFrom = overlapFrom;
         this.startedAt = Objects.requireNonNull(startedAt, "startedAt");
         this.status = ReconciliationRunStatus.RUNNING;
     }
 
     public static ReconciliationRun start(Instant periodFrom, Instant periodTo, Instant now) {
-        return new ReconciliationRun(periodFrom, periodTo, now);
+        return start(periodFrom, periodTo, null, now);
     }
 
-    /** 판정 완료. unverifiableCount가 0보다 크면 PARTIAL, 아니면 COMPLETED */
-    public void finish(int targetCount, int matchedCount, int mismatchCount, int unverifiableCount, Instant now) {
-        requireRunning();
-        this.targetCount = targetCount;
-        this.matchedCount = matchedCount;
-        this.mismatchCount = mismatchCount;
-        this.unverifiableCount = unverifiableCount;
-        this.status = unverifiableCount > 0 ? ReconciliationRunStatus.PARTIAL : ReconciliationRunStatus.COMPLETED;
-        this.finishedAt = Objects.requireNonNull(now, "now");
+    /** overlapFrom: 이전 기간과 겹쳐 다시 보는 시작 시각 (계산한 기간만, 지정 기간이면 null) */
+    public static ReconciliationRun start(Instant periodFrom, Instant periodTo, Instant overlapFrom, Instant now) {
+        return new ReconciliationRun(periodFrom, periodTo, overlapFrom, now);
     }
 
-    /** 결과 없이 실패로 끝냄 */
-    public void fail(String reason, Instant now) {
-        requireRunning();
-        this.status = ReconciliationRunStatus.FAILED;
-        this.failureReason = truncate(reason);
-        this.finishedAt = Objects.requireNonNull(now, "now");
+    /**
+     * 판정을 마친 실행의 상태: unverifiableCount가 0보다 크면 PARTIAL, 아니면 COMPLETED.
+     * 종료는 오래된 RUNNING 정리와 겹칠 수 있어 엔티티 변경이 아니라 저장소의 조건부 UPDATE(status = RUNNING)로 한다
+     */
+    public static ReconciliationRunStatus finishedStatus(int unverifiableCount) {
+        return unverifiableCount > 0 ? ReconciliationRunStatus.PARTIAL : ReconciliationRunStatus.COMPLETED;
     }
 
-    private void requireRunning() {
-        if (status != ReconciliationRunStatus.RUNNING) {
-            throw new IllegalStateException("RUNNING 실행만 끝낼 수 있습니다: " + status);
-        }
+    /** 실패 사유를 컬럼 길이에 맞춘다 */
+    public static String failureReasonOf(String reason) {
+        return truncate(reason);
     }
 
     private static String truncate(String value) {

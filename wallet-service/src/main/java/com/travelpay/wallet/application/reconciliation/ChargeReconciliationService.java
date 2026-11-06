@@ -10,6 +10,7 @@ import com.travelpay.wallet.domain.charge.ChargeRequest;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.domain.reconciliation.MismatchType;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationResult;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunNotRunningException;
 import com.travelpay.wallet.domain.reconciliation.SourceType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -52,7 +53,12 @@ public class ChargeReconciliationService {
      * 기간 목록을 끝까지 받지 못하면 FAILED(실패 사유만 저장). 예상하지 못한 예외도 FAILED로 끝내고 다시 던진다.
      */
     public ReconciliationRunResult run(Instant from, Instant to) {
-        UUID runId = steps.start(from, to);
+        return run(from, to, null);
+    }
+
+    /** overlapFrom: 이전 기간과 겹쳐 다시 보는 시작 시각 (계산한 기간만 기록, 지정 기간이면 null) */
+    public ReconciliationRunResult run(Instant from, Instant to, Instant overlapFrom) {
+        UUID runId = steps.start(from, to, overlapFrom);
         try {
             return reconcile(runId, from, to);
         } catch (RuntimeException | Error e) {
@@ -112,7 +118,14 @@ public class ChargeReconciliationService {
         results.addAll(orphans);
         mismatched += orphans.size();
 
-        ReconciliationRunResult result = steps.complete(runId, results, target, matched, mismatched, unverifiable);
+        ReconciliationRunResult result;
+        try {
+            result = steps.complete(runId, results, target, matched, mismatched, unverifiable);
+        } catch (ReconciliationRunNotRunningException e) {
+            // 도중에 오래된 RUNNING으로 정리됨: 결과는 롤백됐고 정리된 상태·사유를 그대로 둔다
+            log.warn("충전 대사 실행이 도중에 정리되어 결과를 저장하지 않음 runId={}", runId);
+            return steps.current(runId);
+        }
         log.info("충전 대사 완료 runId={} status={} target={} matched={} mismatch={} unverifiable={}",
                 runId, result.status(), target, matched, mismatched, unverifiable);
         return result;

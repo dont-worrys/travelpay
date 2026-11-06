@@ -38,8 +38,8 @@ spring:
   task:
     scheduling:
       pool:
-        # 기본 1스레드면 복구 배치(외부 호출)가 길어질 때 Outbox 발행이 막힌다
-        size: 2
+        # 복구·Outbox 발행·충전 대사가 각자 스레드를 쓴다 (외부 호출이 긴 배치가 다른 스케줄러를 막지 않게)
+        size: 3
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -84,6 +84,21 @@ travelpay:
         # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
         fixed-delay: 10s
         batch-size: 10
+      reconciliation:
+        # 은행·충전·원장 3자 대사 스케줄러. 끄면 스케줄러만 등록되지 않고 관리자 수동 실행은 그대로 된다 (테스트용)
+        enabled: true
+        # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
+        fixed-delay: 10m
+        # 닫힌 기간의 끝 = 지금 − grace. 은행·원장 기록이 늦게 남는 시간을 기다린다
+        grace: 5m
+        # 다음 기간 시작 = 직전 실행 period_to − overlap (경계 근처 기록을 다시 본다)
+        overlap: 10m
+        # 실행 한 번의 최대 기간. 밀린 기간은 다음 주기들이 따라잡는다. 수동 실행이 넘으면 400
+        max-period: 1d
+        # 이보다 오래된 RUNNING은 새 실행 전에 FAILED로 정리한다
+        running-timeout: 30m
+        # 직전 실행(COMPLETED·PARTIAL)이 없을 때 시작점
+        initial-from: "2026-11-01T00:00:00Z"
   client:
     bank:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 mock-bank를 찾는다

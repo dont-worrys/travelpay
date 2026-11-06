@@ -38,8 +38,8 @@ spring:
   task:
     scheduling:
       pool:
-        # 기본 1스레드면 복구 배치(외부 호출)가 길어질 때 Outbox 발행이 막힌다
-        size: 2
+        # 복구·Outbox 발행·충전 대사가 각자 스레드를 쓴다 (외부 호출이 긴 배치가 다른 스케줄러를 막지 않게)
+        size: 3
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS}
     producer:
@@ -80,6 +80,14 @@ travelpay:
         enabled: true
         fixed-delay: 10s
         batch-size: 10
+      reconciliation:
+        enabled: true
+        fixed-delay: 10m
+        grace: 5m
+        overlap: 10m
+        max-period: 1d
+        running-timeout: 30m
+        initial-from: "2026-11-01T00:00:00Z"
   client:
     # ledger·user는 주소를 비우면 Eureka로 찾습니다.
     # bank는 Mock 은행이 Eureka에 등록되지 않아 MOCK_BANK_URL로 직접 주소를 받습니다(필수).
