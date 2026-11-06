@@ -63,8 +63,8 @@ done
 {
     # 스크립트별 열: 환율 조회는 오래된 환율 응답 비율, 견적 발급은 저장된 견적 수 / 성공 응답 수 (예열 포함, 회차 합. 같아야 함)
     if [ "$SCRIPT" = quote-issue.js ]; then extra_column="견적 저장 / 성공 응답 (합)"; else extra_column="오래된 응답 %%"; fi
-    printf "| 동시 요청 | TPS | P50 | P95 | P99 | 연결 대기 | 연결 얻는 ms | DB 활성 세션 | ${extra_column} | 실패율 %% (최대) | 4xx / 5xx / 응답 없음 (합) | CPU 전체 %% | 앱 CPU %% | TPS(회차별) |\n"
-    printf "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    printf "| 동시 요청 | TPS | P50 | P95 | P99 | 연결 대기 | 연결 얻는 ms | DB 활성 세션 | 캐시 hit %% | ${extra_column} | 실패율 %% (최대) | 4xx / 5xx / 응답 없음 (합) | CPU 전체 %% | 앱 CPU %% | TPS(회차별) |\n"
+    printf "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
     for vus in $STAGES; do
         k6=() db=()
         for rep in $(seq 1 "$REPS"); do
@@ -80,7 +80,15 @@ done
                 awk -v s="$(value "$f" staleResponses)" -v r="$(value "$f" requests)" 'BEGIN { printf "%.2f\n", r ? s / r * 100 : 0 }'
             done | median)
         fi
-        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" "$vus" \
+        # 캐시 hit 비율 = hit / (hit + miss + error). 캐시를 쓰지 않는 jar면 "-"
+        cache_hit=$(for f in "${db[@]}"; do
+            h=$(nested "$f" cacheLookups hit || true)
+            if [ -n "$h" ]; then
+                awk -v h="$h" -v m="$(nested "$f" cacheLookups miss)" -v e="$(nested "$f" cacheLookups error)" \
+                    'BEGIN { t = h + m + e; printf "%.2f\n", t ? h / t * 100 : 0 }'
+            fi
+        done | median)
+        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" "$vus" \
             "$(echo "$tps" | median)" \
             "$(for f in "${k6[@]}"; do nested "$f" latencyMs p50; done | median)" \
             "$(for f in "${k6[@]}"; do nested "$f" latencyMs p95; done | median)" \
@@ -88,6 +96,7 @@ done
             "$(for f in "${db[@]}"; do nested "$f" hikariPending avg; done | median)" \
             "$(for f in "${db[@]}"; do value "$f" acquireMsAvg; done | median)" \
             "$(for f in "${db[@]}"; do nested "$f" dbActiveSessions avg; done | median)" \
+            "$cache_hit" \
             "$extra" \
             "$(for f in "${k6[@]}"; do value "$f" failureRate; done | sort -n | tail -1)" \
             "$(sum '4xx' "${k6[@]}") / $(sum '5xx' "${k6[@]}") / $(sum noResponse "${k6[@]}")" \

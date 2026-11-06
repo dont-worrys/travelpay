@@ -5,8 +5,8 @@ DB만 쓸 때와 Redis를 쓸 때를 같은 방법으로 재서 비교합니다(
 
 | 측정 대상 | k6 스크립트 | 보는 것 |
 | --- | --- | --- |
-| 환율 조회 | `rate-query.js` (기본) | 읽기만 하는 API. 최신 환율 SELECT 2번 |
-| 견적 발급 | `quote-issue.js` | 최신 환율 SELECT 2번 + 견적 INSERT + 커밋. 연결을 쥐는 시간이 더 김 |
+| 환율 조회 | `rate-query.js` (기본) | 읽기만 하는 API. 최신 환율 읽기 (v0: SELECT 2번 / v0.5: LATERAL 1번 / v1: Redis MGET 1번) |
+| 견적 발급 | `quote-issue.js` | 외화 한 통화의 최신 환율 읽기 + 견적 INSERT + 커밋. 연결을 쥐는 시간이 더 김 |
 
 견적 발급은 세 시점을 같은 방법으로 재서 단계별 효과를 나눠 봅니다: ① 환율·견적 모두 DB → ② 환율만 Redis → ③ 환율·견적 모두 Redis.
 설계와 측정 결과는 [환율 Redis 캐싱 설계·측정 기록](https://claude.ai/artifact/APBg2irhYAYYukDLjHWSA1)에 남깁니다.
@@ -15,7 +15,7 @@ DB만 쓸 때와 Redis를 쓸 때를 같은 방법으로 재서 비교합니다(
 
 | 파일 | 하는 일 |
 | --- | --- |
-| `compose.yaml` | 측정 전용 Postgres(5439, pg_stat_statements 켬), 환전 서비스(app, mock 모드), k6(부하 생성기)를 같은 Docker 네트워크에 띄움 |
+| `compose.yaml` | 측정 전용 Postgres(5439, pg_stat_statements 켬), 캐시 Redis(measure-redis, 팀 redis-cache와 같은 설정), 환전 서비스(app, mock 모드), k6(부하 생성기)를 같은 Docker 네트워크에 띄움 |
 | `init/01-extensions.sql` | 측정 DB를 처음 만들 때 pg_stat_statements 확장 생성 |
 | `seed-rate-history.sql` | 측정 전에 환율 테이블을 표준 상태로 맞춤 (공식 30일 + 가짜 이력, 쿼리 통계 초기화) |
 | `k6-common.js` | 두 k6 스크립트가 함께 쓰는 부분: 예열·측정 한 시나리오 설정, 응답 집계, 결과 표·JSON |
@@ -73,7 +73,9 @@ docker compose --profile app up -d --wait app   # 측정 DB도 함께 뜸. 준�
 
 ### 버전별 jar로 비교 (코드만 다르고 나머지는 같게)
 
-DB만 쓸 때와 Redis를 쓸 때는 **코드만 달라야** 합니다. 그래서 캐시를 끄는 설정을 따로 만들지 않고, **커밋별로 jar를 빌드해 같은 날 같은 PC 조건에서 jar만 바꿔 끼워** 연달아 잽니다. 캐시를 끈 코드는 트랜잭션 구조 등이 원래 DB 코드와 달라 비교를 흐릴 수 있기 때문입니다.
+DB만 쓸 때와 Redis를 쓸 때는 **코드만 달라야** 합니다. 그래서 **커밋별로 jar를 빌드해 같은 날 같은 PC 조건에서 jar만 바꿔 끼워** 연달아 잽니다. v1에는 캐시를 끄는 설정(`exchange.rate.cache.enabled=false`)이 있지만 비교에 쓰지 않습니다. 캐시를 끈 v1은 트랜잭션 구조 등이 원래 DB 코드(v0, v0.5)와 달라 비교를 흐릴 수 있기 때문입니다.
+
+캐시 Redis(`measure-redis`)는 Redis를 쓰지 않는 jar를 잴 때도 함께 띄워 둡니다(jar 말고는 환경이 같게). `measure.sh`는 이력 적재 직후 Redis를 비웁니다. 적재 SQL이 환율 표를 비우고 새로 채우므로, 앱이 시작하며 캐시에 넣은 환율은 DB에 없는 행이 되어 다음 수집(최대 5초) 전까지 견적이 외래 키에 막히기 때문입니다. 결과 JSON의 `cacheLookups`(측정 구간의 hit/miss/error, 통화 하나당 1)와 요약 표의 `캐시 hit %`로 캐시로 응답했는지 확인합니다(캐시를 쓰지 않는 jar는 `null` / `-`).
 
 저장소 루트에서 시작합니다. 비교할 커밋은 저장소 옆 폴더(`../travelpay-v0`)에 꺼냅니다.
 
@@ -94,7 +96,7 @@ git worktree remove ../../../travelpay-v0
 
 | 비교 | jar | 언제 |
 | --- | --- | --- |
-| 환율 조회: DB / Redis | v0(Redis 캐싱 전) / v1(환율 캐싱 후) | 환율 Redis 캐싱 이슈가 끝난 뒤 |
+| 환율 조회: v0 / v0.5 / v1 | v0 `0865bb5`(쿼리 최적화 전) / v0.5 `c40186c`(LATERAL 쿼리) / v1(환율 Redis 캐싱 후) | 환율 Redis 캐싱 이슈가 끝난 뒤 (셋을 같은 날) |
 | 견적 발급: ① / ② / ③ | v0 / v1 / v2(견적 저장소 Redis 전환 후) | 견적 저장소 Redis 전환 이슈가 끝난 뒤 (셋을 같은 날) |
 
 측정 기록에는 jar를 빌드한 **커밋 해시**를 함께 남깁니다.

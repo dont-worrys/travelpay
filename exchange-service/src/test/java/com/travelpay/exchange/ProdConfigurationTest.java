@@ -21,12 +21,19 @@ class ProdConfigurationTest {
     /**
      * 스케줄러 스레드 수: 1이면 주문 복구가 길어질 때 환율 수집이 멈춥니다.
      * 원장 타임아웃: 빠지면 OpenFeign 기본값(연결 10초, 읽기 60초)이 되어 선점 유효 기간(10초)의 전제가 깨집니다.
+     * 캐시 Redis 타임아웃: 빠지면 Lettuce 기본값(60초)이 되어 Redis가 멈췄을 때 조회가 DB로 넘어가지 못하고 붙잡힙니다.
+     * Redis health: 켜지면 캐시 Redis가 꺼졌을 때 DB로 동작 중인 앱까지 DOWN이 됩니다.
      */
     @ParameterizedTest
     @ValueSource(strings = {
             "spring.task.scheduling.pool.size",
             "spring.cloud.openfeign.client.config.ledger-service.connect-timeout",
             "spring.cloud.openfeign.client.config.ledger-service.read-timeout",
+            "spring.data.redis.connect-timeout",
+            "spring.data.redis.timeout",
+            "spring.data.redis.repositories.enabled",
+            "management.health.redis.enabled",
+            "exchange.rate.cache.enabled",
     })
     void prodKeepsSameValueAsLocal(String key) {
         String local = LOCAL.getProperty(key);

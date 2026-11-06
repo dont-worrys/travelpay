@@ -89,6 +89,16 @@ public class ExchangeRate {
     }
 
     /**
+     * 이미 저장된 환율을 DB 밖(캐시)에 둔 값에서 다시 만듭니다. ID는 저장 때 받은 값 그대로라 견적의 근거로 쓸 수 있습니다.
+     * 값 검증은 수집 때와 같은 규칙(CollectedRate)을 거칩니다. 이렇게 만든 객체는 읽기 전용으로만 쓰고 저장하지 않습니다.
+     */
+    public static ExchangeRate restore(UUID id, CollectedRate rate, Instant collectedAt) {
+        ExchangeRate restored = new ExchangeRate(Objects.requireNonNull(rate, "rate"), collectedAt);
+        restored.id = Objects.requireNonNull(id, "id");
+        return restored;
+    }
+
+    /**
      * 매매기준율로 원화와 이 환율의 외화 사이를 환산합니다. 받는 금액은 받는 통화 자릿수로 내림합니다.
      * 원화 → 외화는 {@code 원화 × unit ÷ 환율}, 외화 → 원화는 {@code 외화 × 환율 ÷ unit}입니다.
      *

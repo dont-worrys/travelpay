@@ -14,6 +14,7 @@
 #   DB 활성 세션: pg_stat_activity에서 state=active인 세션 수(이 조회 자신은 제외)의 평균·최대
 #   환율 조회 쿼리 수: pg_stat_statements의 exchange_rates SELECT 호출 수 합 (예열·수집기 포함, 검산용)
 #   견적 행 수: exchange_quotes 행 수 (all = 예열 포함 전체, measure = created_at이 측정 구간 안). 환율 조회 측정이면 0
+#   캐시 조회 수: Actuator exchange_rate_cache_lookups_total{result=hit/miss/error}의 구간 차이 (통화 하나당 1). 캐시를 쓰지 않는 jar면 null
 set -euo pipefail
 
 LABEL=${1:?LABEL(db/redis)을 주세요}
@@ -44,8 +45,11 @@ psql_q() {
 echo "[1/4] 환전 서비스 재시작 (준비될 때까지 대기)"
 docker compose --profile app up -d --force-recreate --wait app >/dev/null 2>&1
 
-echo "[2/4] 환율 이력 적재 (hours=${HOURS})"
+echo "[2/4] 환율 이력 적재 (hours=${HOURS}), 캐시 Redis 비우기"
 psql_q -v hours="${HOURS}" -f /load-test/seed-rate-history.sql >/dev/null
+# 적재 SQL이 환율 표를 비우고 새로 채우므로, 앱이 시작하며 캐시에 넣은 환율은 DB에 없는 행이 된다.
+# 그대로 두면 다음 수집(최대 5초) 전까지 그 환율로 견적을 내다 외래 키에 막힌다. 그래서 적재 직후 캐시를 비운다
+docker compose exec -T measure-redis redis-cli FLUSHALL >/dev/null
 
 echo "[3/4] k6 실행 (${SCRIPT}, VUS=${VUS}), DB 지표 1초 간격 기록"
 # 지표는 Docker 네트워크 안에서 읽는다(앱 컨테이너 안에서 curl). PC에서 읽으면 포트 전달을 지나 표본이 빠짐.
@@ -54,7 +58,7 @@ collect_seconds=$((WARMUP_SECONDS + MEASURE_SECONDS + 15))   # k6 컨테이너�
 # 커넥션 풀·CPU 지표: 1초마다 "ts <시각>" 줄과 Actuator 지표를 내보내고, PC 쪽 awk가 한 줄 표본으로 묶는다
 docker compose exec -T app sh -c "end=\$((\$(date +%s) + ${collect_seconds})); while [ \$(date +%s) -lt \$end ]; do echo \"ts \$(date +%s)\"; curl -s --max-time 2 http://localhost:18085/actuator/prometheus; sleep 1; done" \
     | awk '
-        function flush() { if (ts != "") printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", ts, p, a, c, s, sc, pc; p = a = c = s = sc = pc = "" }
+        function flush() { if (ts != "") printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", ts, p, a, c, s, sc, pc, ch, cm, ce; p = a = c = s = sc = pc = ch = cm = ce = "" }
         $1 == "ts" { flush(); ts = $2; next }
         $1 ~ /^hikaricp_connections_pending\{/ { p = $2 }
         $1 ~ /^hikaricp_connections_active\{/ { a = $2 }
@@ -62,6 +66,10 @@ docker compose exec -T app sh -c "end=\$((\$(date +%s) + ${collect_seconds})); w
         $1 ~ /^hikaricp_connections_acquire_seconds_sum\{/ { s = $2 }
         $1 == "system_cpu_usage" { sc = $2 }
         $1 == "process_cpu_usage" { pc = $2 }
+        # 환율 캐시 조회 결과(누적). Redis를 쓰지 않는 jar에는 없어 빈 칸으로 남는다
+        $1 ~ /^exchange_rate_cache_lookups_total\{.*result="hit"/ { ch = $2 }
+        $1 ~ /^exchange_rate_cache_lookups_total\{.*result="miss"/ { cm = $2 }
+        $1 ~ /^exchange_rate_cache_lookups_total\{.*result="error"/ { ce = $2 }
         END { flush() }' >"$hikari_samples" &
 hikari_pid=$!
 # DB 활성 세션: psql 하나를 띄워 두고 \watch로 1초마다 (매번 새로 띄우면 느려서 표본이 빠짐). 횟수(c)를 정해 스스로 끝나게 한다
@@ -112,6 +120,15 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         if ($3 > actMax) actMax = $3
         if (n == 1) { c0 = $4; s0 = $5 }
         c1 = $4; s1 = $5
+        # 캐시 지표도 세 개가 다 있을 때만 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 계산돼 hit 비율이 틀어짐.
+        # 하나라도 보이면 캐시를 쓰는 jar라는 뜻이라(cacheSeen), 아래에서 측정 구간을 다 덮었는지 검사한다
+        if ($8 != "" || $9 != "" || $10 != "") cacheSeen++
+        if ($8 != "" && $9 != "" && $10 != "") {
+            if (k == 0) { k0 = $1; hit0 = $8; miss0 = $9; err0 = $10 }
+            else if ($1 - k1 > kGap) kGap = $1 - k1
+            k1 = $1
+            k++; hit1 = $8; miss1 = $9; err1 = $10
+        }
     }
     file == 2 {
         if (m == 0) d0 = $1
@@ -139,6 +156,12 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
             printf "측정 구간 중간에 표본이 빠졌습니다: 가장 긴 틈 커넥션 풀 %d초, DB 세션 %d초 (허용 %d초)\n", hGap, dGap, gap > "/dev/stderr"
             exit 1
         }
+        # 캐시를 쓰는 jar면 캐시 표본(세 값이 모두 있는 행)도 같은 기준으로 구간을 다 덮어야 한다.
+        # 끝 무렵 표본이 빠지면 그 뒤 조회가 hit·miss 차이에서 빠져 hit 비율이 틀어지기 때문이다
+        if (cacheSeen > 0 && (k == 0 || k0 > from + gap || k1 < to - gap || kGap > gap)) {
+            printf "캐시 지표 표본이 측정 구간(%d~%d)을 다 덮지 못했습니다: %d~%d, 가장 긴 틈 %d초 (허용 %d초)\n", from, to, k0, k1, kGap, gap > "/dev/stderr"
+            exit 1
+        }
         acqAvgMs = (c1 > c0) ? (s1 - s0) / (c1 - c0) * 1000 : 0
         printf "{\n"
         printf "  \"label\": \"%s\",\n  \"vus\": %d,\n", label, vus
@@ -150,6 +173,9 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         printf "  \"cpuPercent\": {\"systemAvg\": %.1f, \"systemMax\": %.1f, \"appAvg\": %.1f},\n", sys / n * 100, sysMax * 100, proc / n * 100
         printf "  \"dbActiveSessions\": {\"avg\": %.2f, \"max\": %d},\n", (m ? ses / m : 0), sesMax
         printf "  \"quoteRows\": {\"all\": %d, \"measure\": %d},\n", quoteAll, quoteMeasure
+        # 측정 구간 동안 늘어난 캐시 조회 수 (통화 하나당 1). 캐시를 쓰지 않는 jar면 null
+        if (k > 0) printf "  \"cacheLookups\": {\"hit\": %d, \"miss\": %d, \"error\": %d},\n", hit1 - hit0, miss1 - miss0, err1 - err0
+        else printf "  \"cacheLookups\": null,\n"
         printf "  \"rateSelectCalls\": %d\n", selects
         printf "}\n"
     }' "$hikari_samples" "$session_samples" >"$summary.tmp" || {

@@ -11,6 +11,19 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  data:
+    redis:
+      # 환율 캐시용 Redis(팀 compose의 redis-cache)입니다. 세션 Redis(16379)와 다른 인스턴스입니다.
+      host: ${REDIS_CACHE_HOST:localhost}
+      port: ${REDIS_CACHE_PORT:16380}
+      password: ${REDIS_CACHE_PASSWORD}
+      # 캐시는 DB보다 빨라야 의미가 있어, 명령 하나를 200ms까지만 기다리고 넘으면 DB로 조회한다.
+      # 연결은 앱 시작·재연결 때만 맺으므로 조금 더 기다린다. application-prod.yml에도 같은 값을 둔다
+      connect-timeout: 1s
+      timeout: 200ms
+      # Spring Data Redis 저장소(@RedisHash)는 쓰지 않고 키·명령을 직접 다룬다
+      repositories:
+        enabled: false
   task:
     scheduling:
       pool:
@@ -42,6 +55,9 @@ exchange:
     mode: ${EXCHANGE_RATE_MODE:koreaexim}
     koreaexim:
       api-key: ${KOREAEXIM_API_KEY:}
+    # 최신 환율 캐시(Redis). false면 Redis를 쓰지 않고 모두 DB에서 읽는다
+    cache:
+      enabled: true
     # mock 모드에서만 읽습니다. 간격·변동 비율·신선도는 코드 기본값(5s, 0.0005, 0.02, 30s)을 씁니다.
     mock:
       # 공식 환율이 DB에 없을 때 쓸 매매기준율 (JPY는 100엔당, CNY는 1위안당)
@@ -83,6 +99,10 @@ eureka:
       defaultZone: http://localhost:8761/eureka/
 
 management:
+  health:
+    redis:
+      # 캐시 Redis가 꺼져도 DB로 조회해 서비스는 동작하므로, Redis 상태로 앱 health를 DOWN으로 만들지 않는다
+      enabled: false
   endpoints:
     web:
       exposure:
