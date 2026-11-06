@@ -33,6 +33,7 @@ class ProdConfigurationTest {
             "spring.data.redis.timeout",
             "spring.data.redis.repositories.enabled",
             "management.health.redis.enabled",
+            "exchange.rate.cache.enabled",
     })
     void prodKeepsSameValueAsLocal(String key) {
         String local = LOCAL.getProperty(key);

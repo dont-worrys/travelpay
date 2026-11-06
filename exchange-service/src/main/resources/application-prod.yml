@@ -54,6 +54,9 @@ exchange:
     mode: koreaexim
     koreaexim:
       api-key: ${KOREAEXIM_API_KEY:}
+    # 최신 환율 캐시(Redis). false면 Redis를 쓰지 않고 모두 DB에서 읽는다
+    cache:
+      enabled: true
   quote:
     # 견적 유효 시간과 수수료율(0.01 = 1%)
     ttl: 5m

@@ -12,6 +12,7 @@ import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.connection.RedisStringCommands.SetOption;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -29,6 +30,7 @@ import tools.jackson.databind.json.JsonMapper;
  */
 @Slf4j
 @Component
+@ConditionalOnProperty(name = "exchange.rate.cache.enabled", havingValue = "true", matchIfMissing = true)
 public class RedisLatestRateCache implements LatestRateCache {
 
     static final String KEY_PREFIX = "exchange:rate:latest:";
