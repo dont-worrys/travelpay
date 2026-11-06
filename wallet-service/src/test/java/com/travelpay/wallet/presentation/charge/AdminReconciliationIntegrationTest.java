@@ -159,6 +159,7 @@ class AdminReconciliationIntegrationTest {
     void 기간_생략_수동_실행은_스케줄러와_같은_기간_계산() throws Exception {
         asMaster(post(PATH)).andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.runType").value("AUTO"))
                 .andExpect(jsonPath("$.data.periodFrom").value(INITIAL_FROM.toString()))
                 .andExpect(jsonPath("$.data.overlapFrom").value(nullValue()))
                 .andExpect(jsonPath("$.data.mismatchCount").value(0));
@@ -172,6 +173,7 @@ class AdminReconciliationIntegrationTest {
         asMaster(post(PATH).param("from", from.toString()).param("to", to.toString()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.runType").value("MANUAL"))
                 .andExpect(jsonPath("$.data.periodFrom").value(from.toString()))
                 .andExpect(jsonPath("$.data.periodTo").value(to.toString()))
                 .andExpect(jsonPath("$.data.overlapFrom").value(nullValue()));
@@ -181,7 +183,7 @@ class AdminReconciliationIntegrationTest {
     void 실행_목록은_최근_시작순이고_status로_거름() throws Exception {
         UUID oldest = insertRun("COMPLETED", now.minus(Duration.ofHours(4)), now.minus(Duration.ofHours(3)),
                 now.minus(Duration.ofHours(3)));
-        UUID partial = insertRun("PARTIAL", now.minus(Duration.ofHours(3)), now.minus(Duration.ofHours(2)),
+        UUID partial = insertRun("MANUAL", "PARTIAL", now.minus(Duration.ofHours(3)), now.minus(Duration.ofHours(2)),
                 now.minus(Duration.ofHours(2)));
         UUID failed = insertRun("FAILED", now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)),
                 now.minus(Duration.ofHours(1)));
@@ -189,6 +191,7 @@ class AdminReconciliationIntegrationTest {
         asMaster(get(PATH)).andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.items[*].runId",
                         contains(failed.toString(), partial.toString(), oldest.toString())))
+                .andExpect(jsonPath("$.data.items[*].runType", contains("AUTO", "MANUAL", "AUTO")))
                 .andExpect(jsonPath("$.data.totalElements").value(3));
         asMaster(get(PATH).param("status", "PARTIAL"))
                 .andExpect(jsonPath("$.data.items[*].runId", contains(partial.toString())));
@@ -202,7 +205,7 @@ class AdminReconciliationIntegrationTest {
 
     @Test
     void 실행_상세는_요약과_결과를_최근_감지순으로_유형별_필터() throws Exception {
-        UUID runId = insertRun("PARTIAL", now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)),
+        UUID runId = insertRun("MANUAL", "PARTIAL", now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)),
                 now.minus(Duration.ofHours(1)));
         UUID first = insertOrphan(runId, "BANK", "BANK_ORPHAN", now.minus(Duration.ofMinutes(30)));
         UUID second = insertChargeResult(runId, "SOURCE_UNAVAILABLE", now.minus(Duration.ofMinutes(20)));
@@ -214,6 +217,7 @@ class AdminReconciliationIntegrationTest {
         asMaster(get(PATH + "/" + runId)).andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.run.runId").value(runId.toString()))
                 .andExpect(jsonPath("$.data.run.status").value("PARTIAL"))
+                .andExpect(jsonPath("$.data.run.runType").value("MANUAL"))
                 .andExpect(jsonPath("$.data.results.items[*].resultId",
                         contains(third.toString(), second.toString(), first.toString())))
                 .andExpect(jsonPath("$.data.results.totalElements").value(3));
@@ -226,11 +230,15 @@ class AdminReconciliationIntegrationTest {
     }
 
     private UUID insertRun(String status, Instant from, Instant to, Instant startedAt) {
+        return insertRun("AUTO", status, from, to, startedAt);
+    }
+
+    private UUID insertRun(String runType, String status, Instant from, Instant to, Instant startedAt) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO reconciliation_runs (id, period_from, period_to, status, started_at, "
-                        + "finished_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        + "finished_at, run_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 id, Timestamp.from(from), Timestamp.from(to), status, Timestamp.from(startedAt),
-                "RUNNING".equals(status) ? null : Timestamp.from(startedAt.plusSeconds(1)));
+                "RUNNING".equals(status) ? null : Timestamp.from(startedAt.plusSeconds(1)), runType);
         return id;
     }
 

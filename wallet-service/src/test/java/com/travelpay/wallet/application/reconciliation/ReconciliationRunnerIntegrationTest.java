@@ -5,6 +5,7 @@ import com.travelpay.wallet.application.reconciliation.dto.ReconciliationPeriod;
 import com.travelpay.wallet.application.reconciliation.dto.ReconciliationRunResult;
 import com.travelpay.wallet.application.reconciliation.dto.SourceLookup;
 import com.travelpay.wallet.domain.reconciliation.ReconciliationRunStatus;
+import com.travelpay.wallet.domain.reconciliation.ReconciliationRunType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -112,6 +113,7 @@ class ReconciliationRunnerIntegrationTest {
 
         Map<String, Object> run = run(result.runId());
         assertEquals("COMPLETED", run.get("status"));
+        assertEquals("AUTO", run.get("run_type"));
         assertEquals(INITIAL_FROM, instant(run, "period_from"));
         assertNull(run.get("overlap_from"));
         assertBetween(instant(run, "period_to"), before.minus(GRACE).truncatedTo(ChronoUnit.MICROS),
@@ -154,6 +156,51 @@ class ReconciliationRunnerIntegrationTest {
 
         assertEquals(partialTo.minus(OVERLAP), period.from());
         assertEquals(partialTo.minus(OVERLAP), period.overlapFrom());
+    }
+
+    @Test
+    void 기간_지정_수동_실행은_스케줄러_위치를_움직이지_않음() {
+        Instant autoTo = now.minus(Duration.ofDays(3));
+        insertRun("COMPLETED", autoTo.minus(Duration.ofHours(1)), autoTo, autoTo);
+
+        ReconciliationRunResult manual = runner.runManual(now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)));
+        assertEquals("MANUAL", run(manual.runId()).get("run_type"));
+        assertEquals(ReconciliationRunStatus.COMPLETED, manual.status());
+
+        ReconciliationRunResult next = runner.runScheduled().orElseThrow();
+
+        Map<String, Object> nextRun = run(next.runId());
+        assertEquals("AUTO", nextRun.get("run_type"));
+        assertEquals(autoTo.minus(OVERLAP), instant(nextRun, "period_from"));
+        assertEquals(autoTo.minus(OVERLAP), instant(nextRun, "overlap_from"));
+    }
+
+    @Test
+    void 기간_생략_수동_실행은_AUTO라_위치를_움직임() {
+        Instant autoTo = now.minus(Duration.ofHours(2));
+        insertRun("COMPLETED", autoTo.minus(Duration.ofHours(1)), autoTo, autoTo);
+
+        ReconciliationRunResult manual = runner.runManual(null, null);
+
+        Map<String, Object> manualRun = run(manual.runId());
+        assertEquals("AUTO", manualRun.get("run_type"));
+        assertEquals(autoTo.minus(OVERLAP), instant(manualRun, "period_from"));
+        Instant manualTo = instant(manualRun, "period_to");
+        assertEquals(manualTo.minus(OVERLAP), calculator.next(Instant.now()).orElseThrow().from());
+    }
+
+    @Test
+    void AUTO_실행_없이_기간_지정_실행만_있으면_최초_시작점부터() {
+        insertRun("MANUAL", "COMPLETED", now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)),
+                now.minus(Duration.ofMinutes(30)));
+        insertRun("MANUAL", "PARTIAL", now.minus(Duration.ofDays(5)), now.minus(Duration.ofDays(4)),
+                now.minus(Duration.ofMinutes(20)));
+
+        ReconciliationPeriod period = calculator.next(now).orElseThrow();
+
+        assertEquals(INITIAL_FROM, period.from());
+        assertNull(period.overlapFrom());
+        assertEquals(ReconciliationRunType.AUTO, period.runType());
     }
 
     @Test
@@ -234,7 +281,8 @@ class ReconciliationRunnerIntegrationTest {
                     "SUCCEEDED", 10_000));
         });
 
-        ReconciliationRunResult result = service.run(now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)));
+        ReconciliationRunResult result = service.run(now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)), null,
+                ReconciliationRunType.MANUAL);
 
         assertEquals(ReconciliationRunStatus.FAILED, result.status());
         assertEquals("정리됨", result.failureReason());
@@ -251,7 +299,8 @@ class ReconciliationRunnerIntegrationTest {
             throw new ReconciliationSourceException("은행 거래 목록 조회 실패");
         });
 
-        ReconciliationRunResult result = service.run(now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)));
+        ReconciliationRunResult result = service.run(now.minus(Duration.ofHours(2)), now.minus(Duration.ofHours(1)), null,
+                ReconciliationRunType.MANUAL);
 
         assertEquals(ReconciliationRunStatus.FAILED, result.status());
         assertEquals("정리됨", run(result.runId()).get("failure_reason"));
@@ -263,11 +312,15 @@ class ReconciliationRunnerIntegrationTest {
     }
 
     private UUID insertRun(String status, Instant from, Instant to, Instant startedAt) {
+        return insertRun("AUTO", status, from, to, startedAt);
+    }
+
+    private UUID insertRun(String runType, String status, Instant from, Instant to, Instant startedAt) {
         UUID id = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO reconciliation_runs (id, period_from, period_to, status, started_at, "
-                        + "finished_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        + "finished_at, run_type) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 id, Timestamp.from(from), Timestamp.from(to), status, Timestamp.from(startedAt),
-                "RUNNING".equals(status) ? null : Timestamp.from(startedAt.plusSeconds(1)));
+                "RUNNING".equals(status) ? null : Timestamp.from(startedAt.plusSeconds(1)), runType);
         return id;
     }
 
