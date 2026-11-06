@@ -15,7 +15,7 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.data.redis.connection.RedisStringCommands.SetOption;
+import org.springframework.data.redis.connection.SetCondition;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.types.Expiration;
@@ -118,7 +118,7 @@ public class RedisLatestRateCache implements LatestRateCache {
                 .map(rate -> bytes(JSON.writeValueAsString(CachedExchangeRate.from(rate)))).toList();
         redis.executePipelined((RedisCallback<Object>) connection -> {
             for (int i = 0; i < keys.size(); i++) {
-                connection.stringCommands().set(keys.get(i), values.get(i), Expiration.from(TTL), SetOption.upsert());
+                connection.stringCommands().set(keys.get(i), values.get(i), SetCondition.upsert(), Expiration.from(TTL));
             }
             // 파이프라인 결과는 executePipelined가 모아 돌려주므로 여기서는 null을 반환해야 합니다.
             return null;
