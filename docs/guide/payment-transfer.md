@@ -272,8 +272,17 @@ REQUESTED ──취소──▶ CANCELLED            (원장 연동 전 접수 �
 
 PROCESSING ──원장 반영──▶ COMPLETED
            ──원장 거절──▶ FAILED
+           ──결과 모름 1~4회──▶ PROCESSING   (시도 횟수 +1, 대기 후 복구 스케줄러가 재전송)
            ──결과 모름 5회 / 원장이 요청을 받지 않음──▶ MANUAL_REVIEW
+
+MANUAL_REVIEW ──운영자 확정(원장 POSTED)──▶ COMPLETED
+              ──운영자 확정(원장 REJECTED)──▶ FAILED
+              ──운영자 확정(원장 기록 없음)──▶ PROCESSING   (시도 횟수 0)
 ```
+
+- 상태를 바꾸는 경로는 조건부 UPDATE뿐이고, 각 UPDATE의 시작 상태 조건이 위 전이만 허용합니다. DB CHECK는 상태와 사유 컬럼의 조합만 검사합니다.
+- `COMPLETED`·`FAILED`·`CANCELLED`는 종료 상태로, 재요청·복구·취소·운영자 확정 어느 경로로도 바뀌지 않습니다.
+- 전이표는 `TransferStatusTransitionIntegrationTest`(모든 조건부 UPDATE × 모든 시작 상태)로 고정되어 있습니다.
 
 | 상태 | 의미 |
 |---|---|
