@@ -31,6 +31,7 @@ public class ExchangeRateCollector {
     private final RateCollectionPolicy policy;
     private final ExchangeRateStore store;
     private final LatestRateCache cache;
+    private final CacheFailureLog failureLog;
     private final Clock clock;
 
     /**
@@ -128,8 +129,8 @@ public class ExchangeRateCollector {
         try {
             cache.putAll(saved);
         } catch (RuntimeException e) {
-            log.warn("환율 캐시 갱신 실패, DB 저장은 완료: source={}, count={}, reason={}",
-                    provider.source(), saved.size(), e.toString());
+            // mock 모드는 5초마다 수집하므로, Redis가 꺼진 동안 경고가 쌓이지 않게 1분에 한 번만 남깁니다.
+            failureLog.warn("갱신", e);
         }
     }
 }

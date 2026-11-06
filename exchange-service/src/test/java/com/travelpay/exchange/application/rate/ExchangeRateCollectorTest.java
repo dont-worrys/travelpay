@@ -46,7 +46,8 @@ class ExchangeRateCollectorTest {
     private final ExchangeRateStore store = mock(ExchangeRateStore.class);
     private final LatestRateCache cache = mock(LatestRateCache.class);
     private final ExchangeRateCollector collector =
-            new ExchangeRateCollector(provider, policy, store, cache, Clock.fixed(NOW, SEOUL));
+            new ExchangeRateCollector(provider, policy, store, cache,
+                    new CacheFailureLog(Clock.fixed(NOW, SEOUL)), Clock.fixed(NOW, SEOUL));
 
     @BeforeEach
     void setUp() {
