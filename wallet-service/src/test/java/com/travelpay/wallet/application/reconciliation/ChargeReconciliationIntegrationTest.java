@@ -94,7 +94,7 @@ class ChargeReconciliationIntegrationTest {
     void setUp() {
         jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".reconciliation_results, " + SCHEMA + ".reconciliation_runs, "
                 + SCHEMA + ".charge_status_history, " + SCHEMA + ".outbox_events, "
-                + SCHEMA + ".charge_requests, " + SCHEMA + ".wallet_currencies, " + SCHEMA + ".wallets");
+                + SCHEMA + ".charge_requests, " + SCHEMA + ".wallet_currencies, " + SCHEMA + ".wallets CASCADE");
         UUID userId = UUID.randomUUID();
         walletId = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO wallets (id, user_id, status) VALUES (?, ?, 'ACTIVE')", walletId, userId);

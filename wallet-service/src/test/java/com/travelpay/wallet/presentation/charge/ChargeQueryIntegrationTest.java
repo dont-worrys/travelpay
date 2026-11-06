@@ -95,7 +95,7 @@ class ChargeQueryIntegrationTest {
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
         jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".charge_status_history, " + SCHEMA + ".outbox_events, "
-                + SCHEMA + ".charge_requests, " + SCHEMA + ".wallet_currencies, " + SCHEMA + ".wallets");
+                + SCHEMA + ".charge_requests, " + SCHEMA + ".wallet_currencies, " + SCHEMA + ".wallets CASCADE");
         me = UUID.randomUUID();
         other = UUID.randomUUID();
         myWallet = insertWallet(me);
