@@ -76,6 +76,7 @@ travelpay:
       saga:
         consumer:
           enabled: true
+          concurrency: 1
       recovery:
         enabled: true
         fixed-delay: 10s
