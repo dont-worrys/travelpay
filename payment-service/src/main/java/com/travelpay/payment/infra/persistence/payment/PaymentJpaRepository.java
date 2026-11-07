@@ -23,6 +23,8 @@ public interface PaymentJpaRepository extends JpaRepository<Payment, UUID> {
     Page<Payment> findByMerchantId(UUID merchantId, Pageable pageable);
     Page<Payment> findByMerchantIdAndStatus(UUID merchantId, PaymentStatus status, Pageable pageable);
     Page<Payment> findByStatus(PaymentStatus status, Pageable pageable);
+    Page<Payment> findByStatusAndUpdatedAtBefore(PaymentStatus status, Instant before, Pageable pageable);
+    long countByStatusAndUpdatedAtBefore(PaymentStatus status, Instant before);
     Page<Payment> findByStatusAndReviewReason(PaymentStatus status, SettlementReviewReason reviewReason,
                                               Pageable pageable);
 

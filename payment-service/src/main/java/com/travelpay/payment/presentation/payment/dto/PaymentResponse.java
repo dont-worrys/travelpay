@@ -15,6 +15,7 @@ public record PaymentResponse (
     String paymentInfo,
     String declineReason,
     List<RefundResponse> refunds,
+    RefundRequestResponse refundRequest,
     Instant createdAt,
     Instant updatedAt
 ) {
@@ -23,6 +24,7 @@ public record PaymentResponse (
                 result.paymentId(), result.status().name(), result.amount(), result.currency().name(),
                 result.merchantName(), result.paymentInfo(), result.declineReason(),
                 result.refunds().stream().map(RefundResponse::from).toList(),
+                RefundRequestResponse.from(result.refundRequest()),
                 result.createdAt(), result.updatedAt());
     }
 }

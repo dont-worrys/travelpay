@@ -61,6 +61,16 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
     }
 
     @Override
+    public Page<Payment> findRefundRequestsUpdatedBefore(Instant before, Pageable pageable) {
+        return paymentJpaRepository.findByStatusAndUpdatedAtBefore(PaymentStatus.REFUND_REQUESTED, before, pageable);
+    }
+
+    @Override
+    public long countRefundRequestsUpdatedBefore(Instant before) {
+        return paymentJpaRepository.countByStatusAndUpdatedAtBefore(PaymentStatus.REFUND_REQUESTED, before);
+    }
+
+    @Override
     public List<Payment> findRecoveryTargets(Instant now, int limit) {
         return paymentJpaRepository.findRecoveryTargets(now, limit);
     }

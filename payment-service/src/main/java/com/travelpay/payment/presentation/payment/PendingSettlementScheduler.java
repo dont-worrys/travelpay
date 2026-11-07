@@ -35,6 +35,7 @@ public class PendingSettlementScheduler {
     private final AtomicLong stuckRefunds = new AtomicLong();
     private final AtomicLong manualReviewPayments = new AtomicLong();
     private final AtomicLong manualReviewRefunds = new AtomicLong();
+    private final AtomicLong overdueRefundRequests = new AtomicLong();
 
     public PendingSettlementScheduler(PaymentService paymentService, MeterRegistry meterRegistry) {
         this.paymentService = paymentService;
@@ -53,6 +54,9 @@ public class PendingSettlementScheduler {
         Gauge.builder("payment.settlement.manual_review", manualReviewRefunds, AtomicLong::get)
                 .description("자동 처리를 멈추고 운영자 확인을 기다리는 건수")
                 .tag("type", "refund")
+                .register(meterRegistry);
+        Gauge.builder("payment.refund_request.overdue", overdueRefundRequests, AtomicLong::get)
+                .description("고객이 신청한 뒤 3일 넘게 가맹점이 처리하지 않은 환불 신청 건수")
                 .register(meterRegistry);
     }
 
@@ -74,6 +78,7 @@ public class PendingSettlementScheduler {
             reportStuck(now.minus(STUCK_AFTER));
             manualReviewPayments.set(paymentService.countManualReviewPayments());
             manualReviewRefunds.set(paymentService.countManualReviewRefunds());
+            overdueRefundRequests.set(paymentService.countOverdueRefundRequests());
         } catch (RuntimeException e) {
             log.error("확정되지 않은 결제·환불 수를 조회하지 못했습니다.", e);
         }

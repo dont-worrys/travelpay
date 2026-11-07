@@ -15,6 +15,9 @@ public interface PaymentRepository {
     Page<Payment> findPageByUserId(UUID userId, PaymentStatus status, Pageable pageable);
     Page<Payment> findPageByMerchantId(UUID merchantId, PaymentStatus status, Pageable pageable);
     Page<Payment> findManualReviews(SettlementReviewReason reviewReason, Pageable pageable);
+    // 기준 시각 전에 신청되어 아직 처리되지 않은 환불 신청 (신청 중에는 updatedAt이 신청 시각)
+    Page<Payment> findRefundRequestsUpdatedBefore(Instant before, Pageable pageable);
+    long countRefundRequestsUpdatedBefore(Instant before);
     List<Payment> findRecoveryTargets(Instant now, int limit);
     int claimForRecovery(UUID paymentId, Instant seenUpdatedAt, Instant now);
     int recordUnknownAttempt(UUID paymentId, int expectedAttempts, PaymentStatus status,

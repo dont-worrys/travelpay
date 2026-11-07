@@ -8,11 +8,13 @@ import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.application.payment.PaymentReviewService;
+import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.domain.payment.ReviewTarget;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import com.travelpay.payment.presentation.payment.dto.ManualReviewResolutionResponse;
 import com.travelpay.payment.presentation.payment.dto.ManualReviewResolveRequest;
 import com.travelpay.payment.presentation.payment.dto.ManualReviewResolveResponse;
+import com.travelpay.payment.presentation.payment.dto.OverdueRefundRequestResponse;
 import com.travelpay.payment.presentation.payment.dto.PaymentManualReviewResponse;
 import com.travelpay.payment.presentation.payment.dto.PaymentReviewDetailResponse;
 import com.travelpay.payment.presentation.payment.dto.RefundManualReviewResponse;
@@ -31,13 +33,26 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
 
-// MANUAL_REVIEW 결제·환불 운영자 처리 API (MASTER 전용). 관리자 API는 /api/v1/admin/** 아래에 둔다
+// MANUAL_REVIEW 결제·환불 운영자 처리, 오래된 환불 신청 확인 API (MASTER 전용). 관리자 API는 /api/v1/admin/** 아래에 둔다
 @RestController
 @RequestMapping("/api/v1/admin/payments")
 @RequiredArgsConstructor
 public class AdminPaymentController {
 
     private final PaymentReviewService paymentReviewService;
+    private final PaymentService paymentService;
+
+    // 신청 후 3일 넘게 가맹점이 처리하지 않은 환불 신청
+    @GetMapping("/refund-requests/overdue")
+    public ResponseEntity<ApiResponse<PageResponse<OverdueRefundRequestResponse>>> getOverdueRefundRequests(
+            @CurrentUser AuthenticatedUser user,
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "20") @Min(1) int size) {
+        requireMaster(user);
+        PageResponse<OverdueRefundRequestResponse> response = PageResponse.from(
+                paymentService.getOverdueRefundRequests(page, size), OverdueRefundRequestResponse::from);
+        return ResponseEntity.ok(ApiResponse.success(response));
+    }
 
     @GetMapping("/manual-reviews")
     public ResponseEntity<ApiResponse<PageResponse<PaymentManualReviewResponse>>> getPaymentManualReviews(

@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -21,4 +22,15 @@ public interface PaymentHistoryJpaRepository extends JpaRepository<PaymentHistor
               and h.currentStatus = com.travelpay.payment.domain.payment.PaymentStatus.APPROVED
             """)
     Optional<Instant> findApprovedAt(UUID paymentId, Collection<PaymentStatus> fromStatuses);
+
+    List<PaymentHistory> findByPaymentIdOrderByCreatedAtAsc(UUID paymentId);
+
+    // 여러 결제의 특정 상태로 바뀐 이력, 최신순
+    @Query("""
+            select h from PaymentHistory h
+            where h.paymentId in :paymentIds
+              and h.currentStatus = :toStatus
+            order by h.createdAt desc
+            """)
+    List<PaymentHistory> findChangedToStatusNewestFirst(Collection<UUID> paymentIds, PaymentStatus toStatus);
 }
