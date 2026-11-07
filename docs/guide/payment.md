@@ -38,7 +38,7 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
 
 5. 테이블은 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)).
 
-결제·가맹점 API는 아직 Swagger 그룹이 없습니다. Swagger UI에는 송금(`transfer`) 그룹만 보입니다([고려 중](#고려-중)).
+결제·가맹점 API는 아직 Swagger 그룹이 없습니다. Swagger UI에는 송금(`transfer`) 그룹만 보입니다
 
 ## API 목록
 
@@ -65,7 +65,7 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
 | `GET /api/v1/admin/payments/resolutions` | 운영자 처리 기록 목록 | `MASTER` | 불필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/refund-requests/overdue` | 3일 넘게 처리되지 않은 환불 신청 | `MASTER` | 불필요 | 없음 | 200 |
 
-모든 API는 로그인이 필요합니다. 응답 본문은 `success`·`data`·`error` 공통 형식입니다([error-contract.md](error-contract.md)). ID는 모두 UUID이고, 금액은 통화별 최소 단위 정수(KRW 원, JPY 엔, CNY 펀)이며, 시각은 UTC ISO-8601입니다.
+모든 API는 로그인이 필요합니다. 응답 본문은 `success`·`data`·`error` 공통 형식입니다. ID는 모두 UUID이고, 금액은 통화별 최소 단위 정수(KRW 원, JPY 엔, CNY 펀)이며, 시각은 UTC ISO-8601입니다.
 
 로그인·CSRF는 Gateway가 확인하고, payment-service는 Gateway가 넣어 준 `User-Id`·`User-Role` 헤더로 요청자를 정합니다. 헤더가 없거나 일부만 있거나 형식이 잘못되면 `401 COMMON_UNAUTHORIZED`입니다.
 
@@ -621,7 +621,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | 기록 없음 | 결제 `DECLINED`("결제 처리 시간이 초과되어 취소되었습니다.") / **환불 `REQUESTED`(재시도)** | 결제 `DECLINED` / 환불 `DECLINED` (위와 같은 문구) |
 
 - **항목 비교**: 원장이 `POSTED`면 거래 항목(지갑·통화·방향·금액·항목 유형)이 우리 기록으로 만든 기대 항목과 정확히 같은 묶음인지 봅니다(순서 무관). 기대 항목은 [원장 거래 등록](#원장-거래-등록)과 같은 구성이고, 가맹점 쪽은 가맹점 원장 지갑입니다. 같으면 돈이 의도대로 움직인 것이라 멈춘 사유와 상관없이 기록을 맞춥니다(송금 resolve와 같은 정책).
-- **항목이 다르면 처리하지 않습니다.** 돈이 우리 기록과 다르게 움직인 상태라 거절로 끝내면 돈과 기록이 어긋납니다. 원장 보정(되돌리는 거래)과 원인 조사가 필요합니다([고려 중](#고려-중)).
+- **항목이 다르면 처리하지 않습니다.** 돈이 우리 기록과 다르게 움직인 상태라 거절로 끝내면 돈과 기록이 어긋납니다. 원장 보정(되돌리는 거래)과 원인 조사가 필요합니다.
 - **결제는 기록이 없으면 재시도하지 않습니다.** 오래 멈춘 결제를 뒤늦게 처리하면 고객이 이미 다른 수단으로 냈을 수 있어(이중 결제) 취소합니다. 환불은 돌려줘야 할 돈이라 `REQUESTED`·`attempt_count` 0으로 되돌리고, 복구 스케줄러가 30초 뒤부터 다시 요청합니다.
 - 환불 처리 후 결제는 남은 금액이 0이면 `REFUNDED`, 아니면 `APPROVED`(부분 환불), 거절이면 `APPROVED`, 재시도면 `REFUND_PENDING`입니다.
 

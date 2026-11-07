@@ -638,8 +638,8 @@ public class PaymentService {
     private RefundTarget findRefundTarget(RefundCommand command) {
         Payment payment = reloadPayment(command.paymentId());
         Optional<Merchant> merchant = merchantRepository.findById(payment.getMerchantId());
-        if (!isMerchantOwnerOrMaster(merchant, command.userId(), command.role())) {
-            throw new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND);
+        if (command.role() != AuthRole.MASTER) {
+            requireMerchantOwner(merchant, command.userId());
         }
         // 결제 시 ledgerWalletId가 있는 가맹점만 통과하므로, 없으면 데이터 이상
         UUID merchantWalletId = merchant.map(Merchant::getLedgerWalletId)
@@ -651,16 +651,17 @@ public class PaymentService {
     // 결제한 가맹점의 주인 또는 MASTER만, 아니면 결제가 없는 것처럼 404
     private Payment findMerchantActionPayment(UUID userId, AuthRole role, UUID paymentId) {
         Payment payment = reloadPayment(paymentId);
-        if (role != AuthRole.MASTER
-                && !isMerchantOwnerOrMaster(merchantRepository.findById(payment.getMerchantId()), userId, role)) {
-            throw new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND);
+        // MASTER는 가맹점 조회 없이 통과
+        if (role != AuthRole.MASTER) {
+            requireMerchantOwner(merchantRepository.findById(payment.getMerchantId()), userId);
         }
         return payment;
     }
 
-    private static boolean isMerchantOwnerOrMaster(Optional<Merchant> merchant, UUID userId, AuthRole role) {
-        return role == AuthRole.MASTER
-                || merchant.map(found -> found.getOwnerUserId().equals(userId)).orElse(false);
+    // 결제한 가맹점의 주인이 아니면 결제가 없는 것처럼 404
+    private static void requireMerchantOwner(Optional<Merchant> merchant, UUID userId) {
+        merchant.filter(found -> found.getOwnerUserId().equals(userId))
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
     }
 
     private Payment reloadPayment(UUID paymentId) {
