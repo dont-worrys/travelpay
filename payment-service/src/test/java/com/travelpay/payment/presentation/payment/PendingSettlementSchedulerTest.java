@@ -110,6 +110,15 @@ class PendingSettlementSchedulerTest {
         assertEquals(1.0, gauge("payment.settlement.manual_review", "refund"));
     }
 
+    @Test
+    void publishesOverdueRefundRequestCountAsGauge() {
+        when(paymentService.countOverdueRefundRequests()).thenReturn(3L);
+
+        scheduler.recover();
+
+        assertEquals(3.0, meterRegistry.get("payment.refund_request.overdue").gauge().value());
+    }
+
     private double gauge(String name, String type) {
         return meterRegistry.get(name).tag("type", type).gauge().value();
     }

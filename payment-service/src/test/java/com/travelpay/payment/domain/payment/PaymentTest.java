@@ -95,23 +95,35 @@ class PaymentTest {
         assertEquals(PaymentStatus.APPROVED, approved.getStatus());
     }
 
+    // MASTER는 고객 신청 없이 승인된 결제를 바로 환불할 수 있습니다.
     @Test
-    void refundRequestChangesApprovedToRefundPending() {
+    void masterRefundChangesApprovedToRefundPending() {
         Payment payment = approvedPayment();
 
-        PaymentHistory history = payment.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        PaymentHistory history = payment.refundStartedHistory("단순 변심", PaymentActor.MASTER);
 
         assertEquals(PaymentStatus.REFUND_PENDING, payment.getStatus());
         assertEquals(PaymentStatus.APPROVED, history.getPreviousStatus());
         assertEquals(PaymentStatus.REFUND_PENDING, history.getCurrentStatus());
         assertEquals("단순 변심", history.getReason());
-        assertEquals(PaymentActor.USER, history.getCreatedBy());
+        assertEquals(PaymentActor.MASTER, history.getCreatedBy());
+    }
+
+    @Test
+    void merchantCannotRefundWithoutCustomerRequest() {
+        Payment payment = approvedPayment();
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> payment.refundStartedHistory("단순 변심", PaymentActor.MERCHANT));
+
+        assertEquals(PaymentErrorCode.REFUND_NOT_REQUESTED, exception.getErrorCode());
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
     }
 
     @Test
     void refundCompletionChangesRefundPendingToRefunded() {
         Payment payment = approvedPayment();
-        payment.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        payment.refundStartedHistory("단순 변심", PaymentActor.MASTER);
 
         PaymentHistory history = payment.refundCompletedHistory(10_000L, 0L);
 
@@ -125,7 +137,7 @@ class PaymentTest {
     @Test
     void partialRefundCompletionReturnsRefundPendingToApproved() {
         Payment payment = approvedPayment();
-        payment.refundRequestedHistory("일부 취소", PaymentActor.USER);
+        payment.refundStartedHistory("일부 취소", PaymentActor.MASTER);
 
         PaymentHistory history = payment.refundCompletedHistory(3_000L, 7_000L);
 
@@ -140,7 +152,7 @@ class PaymentTest {
     void refundRequestRecordsGivenActor() {
         Payment payment = approvedPayment();
 
-        PaymentHistory history = payment.refundRequestedHistory("관리자 처리", PaymentActor.MASTER);
+        PaymentHistory history = payment.refundStartedHistory("관리자 처리", PaymentActor.MASTER);
 
         assertEquals(PaymentActor.MASTER, history.getCreatedBy());
     }
@@ -148,7 +160,7 @@ class PaymentTest {
     @Test
     void refundDeclineReturnsRefundPendingToApproved() {
         Payment payment = approvedPayment();
-        payment.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        payment.refundStartedHistory("단순 변심", PaymentActor.MASTER);
 
         PaymentHistory history = payment.refundDeclinedHistory("원거래를 찾을 수 없습니다.");
 
@@ -163,10 +175,10 @@ class PaymentTest {
     @Test
     void refundCanBeRequestedAgainAfterDecline() {
         Payment payment = approvedPayment();
-        payment.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        payment.refundStartedHistory("단순 변심", PaymentActor.MASTER);
         payment.refundDeclinedHistory("원거래를 찾을 수 없습니다.");
 
-        payment.refundRequestedHistory("다시 요청", PaymentActor.USER);
+        payment.refundStartedHistory("다시 요청", PaymentActor.MASTER);
 
         assertEquals(PaymentStatus.REFUND_PENDING, payment.getStatus());
     }
@@ -174,22 +186,22 @@ class PaymentTest {
     @Test
     void rejectsRefundRequestWithErrorMatchingStatus() {
         Payment refundPending = approvedPayment();
-        refundPending.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        refundPending.refundStartedHistory("단순 변심", PaymentActor.MASTER);
         Payment refunded = approvedPayment();
-        refunded.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        refunded.refundStartedHistory("단순 변심", PaymentActor.MASTER);
         refunded.refundCompletedHistory(10_000L, 0L);
         Payment pending = payment(10_000L);
         Payment declined = payment(10_000L);
         declined.declinedHistory("잔액이 부족합니다.");
 
         BusinessException inProgress = assertThrows(BusinessException.class,
-                () -> refundPending.refundRequestedHistory("사유", PaymentActor.USER));
+                () -> refundPending.refundStartedHistory("사유", PaymentActor.MASTER));
         BusinessException alreadyRefunded = assertThrows(BusinessException.class,
-                () -> refunded.refundRequestedHistory("사유", PaymentActor.USER));
+                () -> refunded.refundStartedHistory("사유", PaymentActor.MASTER));
         BusinessException fromPending = assertThrows(BusinessException.class,
-                () -> pending.refundRequestedHistory("사유", PaymentActor.USER));
+                () -> pending.refundStartedHistory("사유", PaymentActor.MASTER));
         BusinessException fromDeclined = assertThrows(BusinessException.class,
-                () -> declined.refundRequestedHistory("사유", PaymentActor.USER));
+                () -> declined.refundStartedHistory("사유", PaymentActor.MASTER));
 
         assertEquals(PaymentErrorCode.REFUND_IN_PROGRESS, inProgress.getErrorCode());
         assertEquals(PaymentErrorCode.ALREADY_REFUNDED, alreadyRefunded.getErrorCode());
@@ -346,14 +358,158 @@ class PaymentTest {
     @Test
     void refundOutcomeHistoriesRecordGivenActor() {
         Payment completed = approvedPayment();
-        completed.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        completed.refundStartedHistory("단순 변심", PaymentActor.MASTER);
         Payment declined = approvedPayment();
-        declined.refundRequestedHistory("단순 변심", PaymentActor.USER);
+        declined.refundStartedHistory("단순 변심", PaymentActor.MASTER);
 
         assertEquals(PaymentActor.MASTER,
                 completed.refundCompletedHistory(10_000L, 0L, PaymentActor.MASTER).getCreatedBy());
         assertEquals(PaymentActor.MASTER,
                 declined.refundDeclinedHistory("환불 처리 중 오류로 취소되었습니다.", PaymentActor.MASTER).getCreatedBy());
+    }
+
+    @Test
+    void customerRefundRequestChangesApprovedToRefundRequestedByUser() {
+        Payment payment = approvedPayment();
+
+        PaymentHistory history = payment.refundRequestedByCustomerHistory("사이즈가 맞지 않음");
+
+        assertEquals(PaymentStatus.REFUND_REQUESTED, payment.getStatus());
+        assertEquals(PaymentStatus.APPROVED, history.getPreviousStatus());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, history.getCurrentStatus());
+        assertEquals("사이즈가 맞지 않음", history.getReason());
+        assertEquals(PaymentActor.USER, history.getCreatedBy());
+    }
+
+    @Test
+    void customerRefundRequestRequiresReason() {
+        Payment payment = approvedPayment();
+
+        assertThrows(NullPointerException.class, () -> payment.refundRequestedByCustomerHistory(null));
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+    }
+
+    @Test
+    void rejectsCustomerRefundRequestWithErrorMatchingStatus() {
+        Payment refundPending = approvedPayment();
+        refundPending.refundStartedHistory("단순 변심", PaymentActor.MASTER);
+        Payment refunded = approvedPayment();
+        refunded.refundStartedHistory("단순 변심", PaymentActor.MASTER);
+        refunded.refundCompletedHistory(10_000L, 0L);
+        Payment pending = payment(10_000L);
+
+        BusinessException inProgress = assertThrows(BusinessException.class,
+                () -> refundPending.refundRequestedByCustomerHistory("사유"));
+        BusinessException alreadyRefunded = assertThrows(BusinessException.class,
+                () -> refunded.refundRequestedByCustomerHistory("사유"));
+        BusinessException fromPending = assertThrows(BusinessException.class,
+                () -> pending.refundRequestedByCustomerHistory("사유"));
+
+        assertEquals(PaymentErrorCode.REFUND_IN_PROGRESS, inProgress.getErrorCode());
+        assertEquals(PaymentErrorCode.ALREADY_REFUNDED, alreadyRefunded.getErrorCode());
+        assertEquals(PaymentErrorCode.NOT_REFUNDABLE, fromPending.getErrorCode());
+    }
+
+    // 이미 신청한 결제의 재신청은 서비스에서 현재 상태로 응답합니다. 도메인은 상태를 바꾸지 않습니다.
+    @Test
+    void rejectsCustomerRefundRequestWhenAlreadyRequested() {
+        Payment payment = refundRequestedPayment();
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> payment.refundRequestedByCustomerHistory("사유"));
+
+        assertEquals(PaymentErrorCode.INVALID_STATUS_TRANSITION, exception.getErrorCode());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, payment.getStatus());
+    }
+
+    @Test
+    void customerCancelReturnsRefundRequestedToApprovedByUser() {
+        Payment payment = refundRequestedPayment();
+
+        PaymentHistory history = payment.refundRequestCancelledHistory();
+
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, history.getPreviousStatus());
+        assertEquals(PaymentStatus.APPROVED, history.getCurrentStatus());
+        assertNull(history.getReason());
+        assertEquals(PaymentActor.USER, history.getCreatedBy());
+    }
+
+    @Test
+    void rejectReturnsRefundRequestedToApprovedWithReasonAndActor() {
+        Payment byMerchant = refundRequestedPayment();
+        Payment byMaster = refundRequestedPayment();
+
+        PaymentHistory merchantHistory = byMerchant.refundRequestRejectedHistory("사용 흔적이 있음", PaymentActor.MERCHANT);
+        PaymentHistory masterHistory = byMaster.refundRequestRejectedHistory("고객센터 확인 결과 환불 대상 아님", PaymentActor.MASTER);
+
+        assertEquals(PaymentStatus.APPROVED, byMerchant.getStatus());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, merchantHistory.getPreviousStatus());
+        assertEquals("사용 흔적이 있음", merchantHistory.getReason());
+        assertEquals(PaymentActor.MERCHANT, merchantHistory.getCreatedBy());
+        assertEquals(PaymentStatus.APPROVED, byMaster.getStatus());
+        assertEquals(PaymentActor.MASTER, masterHistory.getCreatedBy());
+    }
+
+    @Test
+    void rejectRequiresReason() {
+        Payment payment = refundRequestedPayment();
+
+        assertThrows(NullPointerException.class,
+                () -> payment.refundRequestRejectedHistory(null, PaymentActor.MERCHANT));
+        assertEquals(PaymentStatus.REFUND_REQUESTED, payment.getStatus());
+    }
+
+    @Test
+    void rejectsCancelOrRejectUnlessRefundRequested() {
+        Payment approved = approvedPayment();
+        Payment refundPending = refundRequestedPayment();
+        refundPending.refundStartedHistory("단순 변심", PaymentActor.MERCHANT);
+
+        BusinessException cancelApproved = assertThrows(BusinessException.class,
+                approved::refundRequestCancelledHistory);
+        BusinessException rejectApproved = assertThrows(BusinessException.class,
+                () -> approved.refundRequestRejectedHistory("사유", PaymentActor.MERCHANT));
+        BusinessException cancelInProgress = assertThrows(BusinessException.class,
+                refundPending::refundRequestCancelledHistory);
+        BusinessException rejectInProgress = assertThrows(BusinessException.class,
+                () -> refundPending.refundRequestRejectedHistory("사유", PaymentActor.MERCHANT));
+
+        assertEquals(PaymentErrorCode.REFUND_NOT_REQUESTED, cancelApproved.getErrorCode());
+        assertEquals(PaymentErrorCode.REFUND_NOT_REQUESTED, rejectApproved.getErrorCode());
+        assertEquals(PaymentErrorCode.REFUND_IN_PROGRESS, cancelInProgress.getErrorCode());
+        assertEquals(PaymentErrorCode.REFUND_IN_PROGRESS, rejectInProgress.getErrorCode());
+    }
+
+    @Test
+    void refundStartsFromCustomerRefundRequest() {
+        Payment payment = refundRequestedPayment();
+
+        PaymentHistory history = payment.refundStartedHistory("단순 변심", PaymentActor.MERCHANT);
+
+        assertEquals(PaymentStatus.REFUND_PENDING, payment.getStatus());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, history.getPreviousStatus());
+        assertEquals(PaymentActor.MERCHANT, history.getCreatedBy());
+    }
+
+    @Test
+    void customerCanRequestAgainAfterCancelOrReject() {
+        Payment cancelled = refundRequestedPayment();
+        cancelled.refundRequestCancelledHistory();
+        Payment rejected = refundRequestedPayment();
+        rejected.refundRequestRejectedHistory("사용 흔적이 있음", PaymentActor.MERCHANT);
+
+        cancelled.refundRequestedByCustomerHistory("다시 신청");
+        rejected.refundRequestedByCustomerHistory("다시 신청");
+
+        assertEquals(PaymentStatus.REFUND_REQUESTED, cancelled.getStatus());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, rejected.getStatus());
+    }
+
+    private Payment refundRequestedPayment() {
+        Payment payment = approvedPayment();
+        payment.refundRequestedByCustomerHistory("단순 변심");
+        return payment;
     }
 
     private Payment manualReviewPayment() {

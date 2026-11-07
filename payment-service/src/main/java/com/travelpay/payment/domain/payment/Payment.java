@@ -97,9 +97,36 @@ public class Payment {
         return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.SYSTEM);
     }
 
-    public PaymentHistory refundRequestedHistory(String reason, PaymentActor actor) {
+    // 고객 환불 신청. 승인된 결제만 신청할 수 있고 사유는 필수입니다. 금액은 가맹점이 환불을 실행할 때 정합니다.
+    public PaymentHistory refundRequestedByCustomerHistory(String reason) {
+        Objects.requireNonNull(reason);
         validateRefundable();
-        PaymentStatus previous = changeStatus(PaymentStatus.APPROVED, PaymentStatus.REFUND_PENDING);
+        PaymentStatus previous = changeStatus(PaymentStatus.APPROVED, PaymentStatus.REFUND_REQUESTED);
+        return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.USER);
+    }
+
+    // 고객이 환불 신청을 취소합니다. 가맹점이 환불을 실행한 뒤에는 취소할 수 없습니다.
+    public PaymentHistory refundRequestCancelledHistory() {
+        requireRefundRequested();
+        PaymentStatus previous = changeStatus(PaymentStatus.REFUND_REQUESTED, PaymentStatus.APPROVED);
+        return PaymentHistory.of(this.id, previous, this.status, null, PaymentActor.USER);
+    }
+
+    // 가맹점 주인 또는 MASTER가 환불 신청을 거절합니다. 결제는 그대로 유효합니다.
+    public PaymentHistory refundRequestRejectedHistory(String reason, PaymentActor actor) {
+        Objects.requireNonNull(reason);
+        requireRefundRequested();
+        PaymentStatus previous = changeStatus(PaymentStatus.REFUND_REQUESTED, PaymentStatus.APPROVED);
+        return PaymentHistory.of(this.id, previous, this.status, reason, actor);
+    }
+
+    // 환불 실행. 가맹점 주인은 고객이 신청한 결제만, MASTER는 승인된 결제도 바로 환불할 수 있습니다.
+    public PaymentHistory refundStartedHistory(String reason, PaymentActor actor) {
+        validateRefundable();
+        if (this.status == PaymentStatus.APPROVED && actor != PaymentActor.MASTER) {
+            throw new BusinessException(PaymentErrorCode.REFUND_NOT_REQUESTED);
+        }
+        PaymentStatus previous = changeStatus(this.status, PaymentStatus.REFUND_PENDING);
         return PaymentHistory.of(this.id, previous, this.status, reason, actor);
     }
 
@@ -160,8 +187,18 @@ public class Payment {
         if (this.status == PaymentStatus.REFUNDED) {
             throw new BusinessException(PaymentErrorCode.ALREADY_REFUNDED);
         }
-        if (this.status != PaymentStatus.APPROVED) {
+        if (this.status != PaymentStatus.APPROVED && this.status != PaymentStatus.REFUND_REQUESTED) {
             throw new BusinessException(PaymentErrorCode.NOT_REFUNDABLE);
+        }
+    }
+
+    // 취소·거절은 신청 중일 때만. 이미 실행된 환불은 되돌릴 수 없습니다.
+    private void requireRefundRequested() {
+        if (this.status == PaymentStatus.REFUND_PENDING) {
+            throw new BusinessException(PaymentErrorCode.REFUND_IN_PROGRESS);
+        }
+        if (this.status != PaymentStatus.REFUND_REQUESTED) {
+            throw new BusinessException(PaymentErrorCode.REFUND_NOT_REQUESTED);
         }
     }
 

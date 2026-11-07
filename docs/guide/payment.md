@@ -1,6 +1,6 @@
 # 결제·환불·가맹점 실행·사용 가이드
 
-payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액으로 결제하고, 가맹점 주인이 결제를 환불하며, 관리자(`MASTER`)가 가맹점을 만들고 자동 처리가 멈춘 결제·환불(`MANUAL_REVIEW`)을 정리합니다. 잔액은 결제가 직접 바꾸지 않고 원장(ledger-service)이 차감·입금을 한 거래로 처리합니다. 같은 서비스 안의 송금은 [송금 가이드](payment-transfer.md)를 봅니다. 브라우저는 Gateway를 통해 호출합니다([Gateway 가이드](gateway.md)).
+payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액으로 결제하고 환불을 신청하면, 가맹점 주인이 신청을 거절하거나 환불을 실행하며, 관리자(`MASTER`)가 가맹점을 만들고 자동 처리가 멈춘 결제·환불(`MANUAL_REVIEW`)을 정리합니다. 잔액은 결제가 직접 바꾸지 않고 원장(ledger-service)이 차감·입금을 한 거래로 처리합니다. 같은 서비스 안의 송금은 [송금 가이드](payment-transfer.md)를 봅니다. 브라우저는 Gateway를 통해 호출합니다([Gateway 가이드](gateway.md)).
 
 ## 로컬 실행
 
@@ -47,7 +47,10 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
 | `POST /api/v1/payments` | 결제 요청 | 회원 | 필요 | 필수 | 201 |
 | `GET /api/v1/payments/{paymentId}` | 내 결제 상세 | 결제한 회원 | 불필요 | 없음 | 200 |
 | `GET /api/v1/payments` | 내 결제 목록 | 회원 | 불필요 | 없음 | 200 |
-| `POST /api/v1/payments/{paymentId}/refunds` | 환불 실행 | 가맹점 주인·`MASTER` | 필요 | 필수 | 200 |
+| `POST /api/v1/payments/{paymentId}/refund-request` | 환불 신청 | 결제한 회원 | 필요 | 없음 | 200 |
+| `DELETE /api/v1/payments/{paymentId}/refund-request` | 환불 신청 취소 | 결제한 회원 | 필요 | 없음 | 200 |
+| `POST /api/v1/payments/{paymentId}/refund-request/reject` | 환불 신청 거절 | 가맹점 주인·`MASTER` | 필요 | 없음 | 200 |
+| `POST /api/v1/payments/{paymentId}/refunds` | 환불 실행(가맹점 주인은 신청된 결제만) | 가맹점 주인·`MASTER` | 필요 | 필수 | 200 |
 | `POST /api/v1/payments/merchants` | 가맹점 생성 | `MASTER` | 필요 | 없음 | 201·202 |
 | `POST /api/v1/payments/merchants/{merchantId}/ledger-account` | 가맹점 원장 계정 생성 재시도 | `MASTER` | 필요 | 없음 | 200 |
 | `GET /api/v1/payments/merchants/{merchantId}/balance` | 가맹점 잔액 | 가맹점 주인·`MASTER` | 불필요 | 없음 | 200 |
@@ -60,6 +63,7 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
 | `GET /api/v1/admin/payments/refunds/{refundId}` | `MANUAL_REVIEW` 환불 단건(원장 조회·예상 결과) | `MASTER` | 불필요 | 없음 | 200 |
 | `POST /api/v1/admin/payments/refunds/{refundId}/resolve` | `MANUAL_REVIEW` 환불 처리 | `MASTER` | 필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/resolutions` | 운영자 처리 기록 목록 | `MASTER` | 불필요 | 없음 | 200 |
+| `GET /api/v1/admin/payments/refund-requests/overdue` | 3일 넘게 처리되지 않은 환불 신청 | `MASTER` | 불필요 | 없음 | 200 |
 
 모든 API는 로그인이 필요합니다. 응답 본문은 `success`·`data`·`error` 공통 형식입니다([error-contract.md](error-contract.md)). ID는 모두 UUID이고, 금액은 통화별 최소 단위 정수(KRW 원, JPY 엔, CNY 펀)이며, 시각은 UTC ISO-8601입니다.
 
@@ -73,6 +77,8 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
 | `MASTER`가 아닌 회원이 `/api/v1/admin/payments/**` | 403 `COMMON_FORBIDDEN` |
 | 가맹점 주인·`MASTER`가 아닌 회원이 가맹점 잔액·결제 조회 | 404 `PAYMENT_MERCHANT_NOT_FOUND` (가맹점이 있는지 알리지 않음) |
 | 가맹점 주인·`MASTER`가 아닌 회원이 환불 | 404 `PAYMENT_NOT_FOUND` (결제한 회원 본인도 환불할 수 없음) |
+| 가맹점 주인·`MASTER`가 아닌 회원이 환불 신청 거절 | 404 `PAYMENT_NOT_FOUND` |
+| 결제한 회원이 아닌 사람이 환불 신청·취소 | 404 `PAYMENT_NOT_FOUND` (가맹점 주인도 고객 대신 신청할 수 없음) |
 | 결제한 회원이 아닌 사람이 `GET /api/v1/payments/{paymentId}` | 404 `PAYMENT_NOT_FOUND` |
 
 ## 호출 순서
@@ -93,17 +99,24 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
    - 422 PAYMENT_DECLINED: 잔액 부족 등으로 거절(결제는 DECLINED로 기록)
 4. GET  /api/v1/payments/{paymentId}                       → 최종 상태 확인
 5. GET  /api/v1/payments                                   → 내 결제 목록
+6. POST   /api/v1/payments/{paymentId}/refund-request      → 환불 신청(사유 필수). 결제 승인 후 3일 안
+7. DELETE /api/v1/payments/{paymentId}/refund-request      → 가맹점이 처리하기 전이면 신청 취소
 
 [가맹점 주인]
-6. GET  /api/v1/payments/merchants/{merchantId}/payments   → 받은 결제 목록(환불된 금액 포함)
-7. POST /api/v1/payments/{paymentId}/refunds               → 부분·전액 환불
-8. GET  /api/v1/payments/merchants/{merchantId}/balance    → 가맹점 잔액
+8.  GET  /api/v1/payments/merchants/{merchantId}/payments  → 받은 결제 목록(환불된 금액 포함)
+    - ?status=REFUND_REQUESTED: 처리할 환불 신청만
+9.  POST /api/v1/payments/{paymentId}/refunds              → 신청된 결제를 부분·전액 환불(금액은 가맹점이 정함)
+    POST /api/v1/payments/{paymentId}/refund-request/reject → 또는 신청 거절(사유 필수)
+10. GET  /api/v1/payments/merchants/{merchantId}/balance   → 가맹점 잔액
 
 [관리자 - 멈춘 결제·환불 처리]
-9.  GET  /api/v1/admin/payments/manual-reviews             → MANUAL_REVIEW 결제 목록 (환불은 /refunds/manual-reviews)
-10. GET  /api/v1/admin/payments/{paymentId}                → 원장 조회 결과와 예상 처리 결과 확인
-11. POST /api/v1/admin/payments/{paymentId}/resolve        → 처리(memo 선택). 결과는 원장 조회로 서버가 정함
-12. GET  /api/v1/admin/payments/resolutions                → 처리 기록 목록(누가 언제 어떻게 처리했는지)
+11. GET  /api/v1/admin/payments/manual-reviews             → MANUAL_REVIEW 결제 목록 (환불은 /refunds/manual-reviews)
+12. GET  /api/v1/admin/payments/{paymentId}                → 원장 조회 결과와 예상 처리 결과 확인
+13. POST /api/v1/admin/payments/{paymentId}/resolve        → 처리(memo 선택). 결과는 원장 조회로 서버가 정함
+14. GET  /api/v1/admin/payments/resolutions                → 처리 기록 목록(누가 언제 어떻게 처리했는지)
+
+[관리자 - 오래된 환불 신청]
+15. GET  /api/v1/admin/payments/refund-requests/overdue    → 3일 넘게 가맹점이 처리하지 않은 환불 신청
 ```
 
 결제·환불 응답을 받지 못해 다시 보낼 때는 **같은 `Idempotency-Key`와 같은 본문**을 사용합니다. 그래야 두 번 처리되지 않습니다. 새 결제·환불마다 새 키를 만듭니다(UUID 권장).
@@ -131,7 +144,11 @@ curl -s -H "User-Id: $PAYER" -H 'User-Role: USER' \
 
 PAYMENT=<응답의 paymentId>
 
-# 부분 환불 (가맹점 주인)
+# 환불 신청 (결제자)
+curl -s -X POST -H "User-Id: $PAYER" -H 'User-Role: USER' -H 'Content-Type: application/json' \
+  -d '{"reason":"size change"}' "$BASE/api/v1/payments/$PAYMENT/refund-request"
+
+# 부분 환불 (가맹점 주인, 신청된 결제만)
 curl -s -H "User-Id: $OWNER" -H 'User-Role: USER' \
   -H "Idempotency-Key: $(uuidgen)" -H 'Content-Type: application/json' \
   -d '{"amount":2000,"reason":"size change"}' \
@@ -309,7 +326,18 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 
 ### 내 결제
 
-`GET /api/v1/payments/{paymentId}`는 결제한 회원만 조회할 수 있습니다. 응답은 결제 요청 응답과 같은 결제 객체이며 `refunds`에 이 결제의 환불 내역이 모두 들어 있습니다.
+`GET /api/v1/payments/{paymentId}`는 결제한 회원만 조회할 수 있습니다. 응답은 결제 요청 응답과 같은 결제 객체이며 `refunds`에 이 결제의 환불 내역이 모두 들어 있습니다. 상세 조회에는 가장 최근 고객 환불 신청의 요약(`refundRequest`)도 들어 있습니다.
+
+| `refundRequest` 필드 | 내용 |
+|---|---|
+| `result` | `REQUESTED`(가맹점 처리 대기)·`CANCELLED`(고객 취소)·`REJECTED`(가맹점 주인·`MASTER` 거절)·`ACCEPTED`(가맹점이 환불 실행) |
+| `requestedAt`·`requestReason` | 신청 시각과 고객이 적은 사유 |
+| `processedAt` | 취소·거절·실행 시각. `REQUESTED`면 `null` |
+| `rejectReason` | 거절 사유. `REJECTED`일 때만 값이 있음 |
+
+- 신청한 적이 없으면 `refundRequest`는 `null`입니다. 결제 목록과 결제 생성·환불 실행 응답에서는 이력을 조회하지 않아 항상 `null`입니다(신청·취소·거절 응답에는 들어 있음).
+- `ACCEPTED`는 가맹점이 환불을 실행했다는 뜻입니다. 원장이 그 환불을 거절해도 `ACCEPTED`로 남으므로 환불 결과는 `refunds`에서 확인합니다.
+- 요약은 `payment_histories`에서 가장 최근의 `→ REFUND_REQUESTED` 기록과 그다음 기록으로 만듭니다.
 
 `GET /api/v1/payments`는 내 결제 목록입니다.
 
@@ -327,13 +355,39 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 
 목록 항목은 `paymentId`·`status`·`amount`·`refundedAmount`·`currency`·`paymentInfo`·`createdAt`입니다. `refundedAmount`는 그 결제의 **완료된** 환불 금액 합계이며, 진행 중이거나 거절된 환불은 넣지 않습니다.
 
-상세(`.../payments/{paymentId}`)는 결제 객체를 응답합니다. 다른 가맹점의 결제면 404 `PAYMENT_NOT_FOUND`입니다.
+상세(`.../payments/{paymentId}`)는 결제 객체를 응답하며, 내 결제 상세와 같이 `refundRequest`가 들어 있습니다. 다른 가맹점의 결제면 404 `PAYMENT_NOT_FOUND`입니다. 처리할 환불 신청은 목록을 `status=REFUND_REQUESTED`로 걸러서 봅니다.
 
 ## 환불
 
-환불은 가맹점이 직접 실행합니다. 결제자의 환불 요청을 받아 승인하는 단계는 없습니다. 결제 한 건에 여러 번 나눠 환불할 수 있습니다.
+고객이 환불을 신청하고 가맹점이 실행합니다. 가맹점 주인은 고객이 신청한 결제(`REFUND_REQUESTED`)만 환불할 수 있고, 금액은 가맹점이 정합니다. `MASTER`는 신청이 없는 승인 결제도 바로 환불할 수 있습니다(운영 예외 통로). 결제 한 건을 여러 번 나눠 환불할 수 있으며, 부분 환불 뒤 남은 금액은 고객이 다시 신청합니다.
 
-### 요청
+### 고객 환불 신청
+
+| API | 상태 변화 | 본문 | 이력 처리자 |
+|---|---|---|---|
+| 신청 `POST .../refund-request` | `APPROVED` → `REFUND_REQUESTED` | `{"reason"}` 필수, 공백이 아닌 255자 이하. 본문이 없으면 400 | `USER` |
+| 취소 `DELETE .../refund-request` | `REFUND_REQUESTED` → `APPROVED` | 없음 | `USER` |
+| 거절 `POST .../refund-request/reject` | `REFUND_REQUESTED` → `APPROVED` | `{"reason"}` 필수, 공백이 아닌 255자 이하 | `MERCHANT`(가맹점 주인)·`MASTER` |
+
+- 세 API 모두 원장을 호출하지 않고 한 트랜잭션에서 처리합니다. `Idempotency-Key`는 받지 않습니다. 응답은 200과 결제 객체(`refundRequest` 포함)입니다.
+- 신청 사유와 거절 사유는 `payment_histories.reason`에 저장합니다. 거절 사유는 고객에게 `refundRequest.rejectReason`으로 보입니다.
+- **환불 기간(3일)은 신청할 때만** 확인합니다. 결제 승인 시각에서 3일이 지났으면 422 `PAYMENT_REFUND_PERIOD_EXPIRED`입니다. 승인 시각은 `payment_histories`의 `PENDING → APPROVED` 기록이고, 운영자 처리로 승인된 결제는 `MANUAL_REVIEW → APPROVED` 기록(처리 시각)입니다. 부분 환불·거절·취소 뒤의 `→ APPROVED`는 승인 시각이 아닙니다.
+- 기간 안에 들어온 신청은 가맹점 처리가 늦어도 실행할 수 있습니다. 거절·취소된 뒤에도 승인 후 3일 안이면 다시 신청할 수 있습니다.
+
+| 상황 | 결과 |
+|---|---|
+| 이미 신청한 결제에 다시 신청 | 200, 현재 상태(처음 신청 사유 유지) |
+| 결제가 `REFUND_PENDING`(가맹점이 이미 실행) | 신청·취소·거절 모두 409 `PAYMENT_REFUND_IN_PROGRESS` |
+| 결제가 `REFUNDED` | 신청 409 `PAYMENT_ALREADY_REFUNDED` |
+| 결제가 `PENDING`·`DECLINED`·`MANUAL_REVIEW` | 신청 409 `PAYMENT_NOT_REFUNDABLE` |
+| 신청 중이 아닌 결제에 취소·거절 | 422 `PAYMENT_REFUND_NOT_REQUESTED` |
+
+- 동시 요청: 결제의 `@Version`으로 먼저 저장된 쪽만 반영됩니다. 고객 취소와 가맹점 실행이 함께 들어오면 늦은 쪽은 409 `COMMON_CONFLICT`이거나, 바뀐 상태를 보고 422 `PAYMENT_REFUND_NOT_REQUESTED`·409 `PAYMENT_REFUND_IN_PROGRESS`입니다. 같은 고객의 신청이 동시에 들어오면 둘 다 200입니다.
+- 가맹점이 응답하지 않아도 자동 환불·자동 만료는 없습니다. 고객은 신청을 취소할 수 있고, `MASTER`가 직접 환불하거나 거절할 수 있습니다.
+- 신청 후 3일 넘게 처리되지 않은 신청은 `GET /api/v1/admin/payments/refund-requests/overdue`(오래된 순, `size` 최대 100)와 지표 `payment.refund_request.overdue`로 확인합니다. 항목은 `paymentId`·`userId`·`merchantId`·`amount`·`currency`·`requestedAt`·`requestReason`입니다. 신청 중에는 결제의 `updated_at`이 신청 시각입니다.
+- 정산은 `APPROVED` 결제만 대상이라 신청 중인 결제는 자연히 빠집니다.
+
+### 환불 실행 요청
 
 | 항목 | 규칙 |
 |---|---|
@@ -352,17 +406,17 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 
 1. 결제를 찾고, 요청자가 결제한 가맹점의 주인이거나 `MASTER`인지 확인합니다. 아니면 404 `PAYMENT_NOT_FOUND`.
 2. 같은 요청자·같은 키의 환불이 이미 있으면 아래 [멱등성](#환불-멱등성) 규칙으로 응답합니다.
-3. 결제 상태를 확인합니다([환불할 수 없는 경우](#환불할-수-없는-경우)).
-4. 결제 승인 시각에서 **3일**이 지났으면 422 `PAYMENT_REFUND_PERIOD_EXPIRED`. 승인 시각은 `payment_histories`의 `PENDING → APPROVED` 기록이고, 운영자 처리로 승인된 결제는 `MANUAL_REVIEW → APPROVED` 기록(처리 시각)입니다. 부분 환불 뒤의 `REFUND_PENDING → APPROVED`는 승인 시각이 아닙니다.
-5. 한 트랜잭션에서 남은 금액을 다시 계산하고, 환불을 `REQUESTED`로 저장하고, 결제를 `REFUND_PENDING`으로 바꿉니다(커밋).
+3. 결제 상태를 확인합니다([환불할 수 없는 경우](#환불할-수-없는-경우)). 가맹점 주인은 `REFUND_REQUESTED`에서만, `MASTER`는 `APPROVED`·`REFUND_REQUESTED`에서 실행할 수 있습니다.
+4. 환불 기간은 여기서 확인하지 않습니다. 기간은 [고객 신청](#고객-환불-신청) 때 확인하며, `MASTER` 직접 환불은 기간 제한이 없습니다.
+5. 한 트랜잭션에서 결제를 다시 읽어 상태를 확인하고, 남은 금액을 다시 계산하고, 환불을 `REQUESTED`로 저장하고, 결제를 `REFUND_PENDING`으로 바꿉니다(커밋).
    - 남은 금액 = 결제 금액 − (`COMPLETED` + `REQUESTED` + `MANUAL_REVIEW` 환불 합계)
-   - 요청 금액이 남은 금액보다 크면 422 `PAYMENT_REFUND_AMOUNT_EXCEEDED`
+   - 요청 금액이 남은 금액보다 크면 422 `PAYMENT_REFUND_AMOUNT_EXCEEDED`. 트랜잭션이 롤백되어 결제는 `REFUND_REQUESTED`에 남습니다.
 6. 원장에 환불 거래를 등록하고 결과로 상태를 정합니다.
 
 | 원장 결과 | 환불 | 결제 |
 |---|---|---|
 | 반영, 남은 금액 0 | `COMPLETED` | `REFUNDED` |
-| 반영, 남은 금액 있음(부분 환불) | `COMPLETED` | `APPROVED` (다음 환불 가능) |
+| 반영, 남은 금액 있음(부분 환불) | `COMPLETED` | `APPROVED` (남은 금액은 고객이 다시 신청) |
 | 거절 | `DECLINED` | `APPROVED` (결제는 그대로 유효) |
 | 결과 모름 | `REQUESTED` 유지 | `REFUND_PENDING` 유지 |
 | 받아들이지 않음·결과 모름 5회 | `MANUAL_REVIEW` | `REFUND_PENDING` 유지 |
@@ -410,6 +464,7 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 | `REFUND_PENDING` (다른 환불 처리 중) | 409 `PAYMENT_REFUND_IN_PROGRESS` |
 | `REFUNDED` | 409 `PAYMENT_ALREADY_REFUNDED` |
 | `PENDING`·`DECLINED`·`MANUAL_REVIEW` | 409 `PAYMENT_NOT_REFUNDABLE` |
+| `APPROVED`인데 가맹점 주인이 실행(고객 신청 없음) | 422 `PAYMENT_REFUND_NOT_REQUESTED` |
 
 환불은 결제 한 건에 한 번에 하나씩만 진행됩니다. 같은 결제에 동시에 환불을 보내면 하나만 저장되고, 나머지는 409(`PAYMENT_REFUND_IN_PROGRESS` 또는 `COMMON_CONFLICT`)입니다. 결제의 `@Version` 낙관적 락으로 막습니다.
 
@@ -430,8 +485,10 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 ### 결제 상태
 
 ```txt
-PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUND_PENDING ──전액 환불 완료──▶ REFUNDED
-        ──원장 거절──▶ DECLINED                               ──부분 환불 완료·환불 거절──▶ APPROVED
+PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUND_REQUESTED ──가맹점 실행──▶ REFUND_PENDING ──전액 환불 완료──▶ REFUNDED
+                               ◀──고객 취소·가맹점 거절──┘                       ──부분 환불 완료·환불 거절──▶ APPROVED
+                      APPROVED ──MASTER 직접 환불──────────────────────────────▶ REFUND_PENDING
+        ──원장 거절──▶ DECLINED
         ──결과 모름 5회 / 원장이 요청을 받지 않음──▶ MANUAL_REVIEW ──운영자 처리──▶ APPROVED / DECLINED
 ```
 
@@ -440,6 +497,7 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 | `PENDING` | 원장 처리 결과 미확정. 복구 스케줄러가 다시 요청 |
 | `APPROVED` | 결제 완료. 환불 가능 |
 | `DECLINED` | 원장 거절. 거절 사유(`decline_reason`)를 저장 |
+| `REFUND_REQUESTED` | 고객이 환불을 신청해 가맹점 처리를 기다림. 원장 호출 없음, 정산 대상 아님 |
 | `REFUND_PENDING` | 환불 한 건이 처리 중 |
 | `REFUNDED` | 전액 환불 완료 |
 | `MANUAL_REVIEW` | 자동 처리 중단. 사유(`LEDGER_REQUEST_NOT_ACCEPTED`·`RETRY_EXHAUSTED`)를 저장. [운영자 처리](#manual_review-운영자-처리)로 해소 |
@@ -455,7 +513,7 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 
 ### 상태 이력
 
-결제의 상태가 바뀔 때마다 `payment_histories`에 이전·현재 상태, 사유, 처리 주체(`USER`·`SYSTEM`·`MASTER`)를 남깁니다. 결제 생성은 `USER`, 원장 결과 반영은 `SYSTEM`, 환불 요청은 요청자가 `MASTER`면 `MASTER` 아니면 `USER`, 운영자 처리는 `MASTER`입니다. 부분 환불 완료는 사유에 `부분 환불 완료: {금액}`을, 운영자 처리 승인은 `원장에 거래가 반영되어 있음`을 남깁니다. 환불 승인 시각(환불 기간 기준)도 이 이력에서 읽습니다. 이력을 조회하는 API는 없습니다.
+결제의 상태가 바뀔 때마다 `payment_histories`에 이전·현재 상태, 사유, 처리 주체(`USER`·`MERCHANT`·`SYSTEM`·`MASTER`)를 남깁니다. 결제 생성과 고객 환불 신청·취소는 `USER`, 원장 결과 반영은 `SYSTEM`, 신청 거절과 환불 실행은 가맹점 주인이면 `MERCHANT`·`MASTER`면 `MASTER`, 운영자 처리는 `MASTER`입니다. 신청 사유와 거절 사유도 이 이력의 사유에 남습니다. 부분 환불 완료는 사유에 `부분 환불 완료: {금액}`을, 운영자 처리 승인은 `원장에 거래가 반영되어 있음`을 남깁니다. 결제 승인 시각(환불 기간 기준)과 상세 응답의 `refundRequest`도 이 이력에서 읽습니다. 이력 전체를 조회하는 API는 없습니다.
 
 환불 자체의 상태 변화(`REQUESTED → MANUAL_REVIEW` 등)는 결제 상태가 바뀌지 않으면 `payment_histories`에 남지 않습니다. 운영자가 처리한 내용은 처리 기록(`payment_review_resolutions`)에 남습니다.
 
@@ -515,6 +573,7 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 |---|---|---|
 | `payment.settlement.stuck` | `type=payment`·`refund` | 생성 후 30분이 지나도 `PENDING` 결제·`REQUESTED` 환불 수. 0보다 크면 ERROR 로그(오래된 순 ID 10개)도 남김 |
 | `payment.settlement.manual_review` | `type=payment`·`refund` | 운영자 확인을 기다리는 `MANUAL_REVIEW` 건수 |
+| `payment.refund_request.overdue` | 없음 | 고객이 신청한 뒤 3일 넘게 가맹점이 처리하지 않은 환불 신청 수 |
 
 지표는 `/actuator/prometheus`로 볼 수 있습니다. `MANUAL_REVIEW` 건은 아래 [운영자 처리](#manual_review-운영자-처리)로 해소합니다.
 
@@ -621,19 +680,19 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 | 400 | `COMMON_INVALID_REQUEST` | 본문 검증 실패(운영자 처리 `memo` 255자 초과 포함), `Idempotency-Key` 없음·형식 오류, 잘못된 `status`·`reviewReason`·`page`·`size` |
 | 400 | `PAYMENT_CURRENCY_MISMATCH` | 결제 통화가 가맹점 통화와 다름 |
 | 401 | `COMMON_UNAUTHORIZED` | 회원 헤더 없음(Gateway 경유 시 세션 없음) |
-| 403 | `COMMON_CSRF_INVALID` | Gateway 경유 변경 요청의 CSRF 토큰 없음·불일치 |
+| 403 | `COMMON_CSRF_INVALID` | Gateway 경유 변경 요청(POST·DELETE)의 CSRF 토큰 없음·불일치 |
 | 403 | `COMMON_FORBIDDEN` | `MASTER`가 아닌 회원의 가맹점 생성·원장 계정 재시도·운영자 처리 API |
 | 404 | `PAYMENT_MERCHANT_NOT_FOUND` | 가맹점 없음, 가맹점 주인·`MASTER`가 아닌 회원의 가맹점 조회 |
 | 404 | `PAYMENT_MERCHANT_OWNER_NOT_FOUND` | 가맹점 생성 시 주인이 활성 회원이 아님 |
 | 404 | `PAYMENT_WALLET_NOT_FOUND` | 결제자 지갑 없음 |
-| 404 | `PAYMENT_NOT_FOUND` | 결제가 없거나 조회·환불 권한이 없음 |
+| 404 | `PAYMENT_NOT_FOUND` | 결제가 없거나 조회·환불·환불 신청·취소·거절 권한이 없음 |
 | 404 | `PAYMENT_REFUND_NOT_FOUND` | 운영자 처리 대상 환불이 없음 |
 | 409 | `PAYMENT_IDEMPOTENCY_KEY_REUSED` | 같은 키로 다른 결제 |
 | 409 | `PAYMENT_REFUND_IDEMPOTENCY_KEY_REUSED` | 같은 키로 다른 환불 |
 | 409 | `PAYMENT_REFUND_IN_PROGRESS` | 다른 환불이 처리 중 |
 | 409 | `PAYMENT_ALREADY_REFUNDED` | 전액 환불된 결제 |
 | 409 | `PAYMENT_NOT_REFUNDABLE` | 환불할 수 없는 결제 상태 |
-| 409 | `COMMON_CONFLICT` | 같은 결제에 동시 환불 |
+| 409 | `COMMON_CONFLICT` | 같은 결제에 동시 환불, 환불 신청 취소·거절·실행이 동시에 들어옴 |
 | 409 | `PAYMENT_NOT_MANUAL_REVIEW` | 운영자 단건 조회·처리 대상이 `MANUAL_REVIEW`가 아님, 또는 동시에 다른 처리가 먼저 끝남 |
 | 409 | `PAYMENT_LEDGER_CORRECTION_REQUIRED` | 원장 `POSTED` 거래의 항목이 우리 결제·환불과 달라 처리할 수 없음 |
 | 422 | `PAYMENT_MERCHANT_NOT_ACTIVE` | 가맹점이 `ACTIVE`가 아님(결제), `PENDING`(잔액 조회) |
@@ -641,7 +700,8 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 | 422 | `PAYMENT_DECLINED` | 원장이 결제 거절(결제 `DECLINED`), `details`에 거절 사유 |
 | 422 | `PAYMENT_REFUND_DECLINED` | 원장이 환불 거절(환불 `DECLINED`), `details`에 거절 사유 |
 | 422 | `PAYMENT_REFUND_AMOUNT_EXCEEDED` | 환불 금액이 남은 금액보다 큼 |
-| 422 | `PAYMENT_REFUND_PERIOD_EXPIRED` | 결제 승인 후 3일이 지남 |
+| 422 | `PAYMENT_REFUND_PERIOD_EXPIRED` | 고객 환불 신청 때 결제 승인 후 3일이 지남 |
+| 422 | `PAYMENT_REFUND_NOT_REQUESTED` | 가맹점 주인이 고객 신청 없는 결제를 환불, 신청 중이 아닌 결제의 신청 취소·거절 |
 | 429 | `COMMON_TOO_MANY_REQUESTS` | user-service 회원 조회 한도 초과 |
 | 502 | `COMMON_BAD_GATEWAY` | 지갑·회원·원장 계정 응답 해석 불가 |
 | 503 | `COMMON_SERVICE_UNAVAILABLE` | 지갑·회원·원장 계정 서비스 연결 불가 |
@@ -662,6 +722,7 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 | `V20261031_1__add_merchant_ledger_wallet_and_owner.sql` | 가맹점 `ledger_wallet_id`·`owner_user_id`, `PENDING` 상태 |
 | `V20261103_1__add_payment_refund_manual_review.sql` | 결제·환불 `MANUAL_REVIEW`, `attempt_count`, `review_reason` |
 | `V20261105_2__add_payment_review_resolutions_and_list_indexes.sql` | 운영자 처리 기록 테이블, 가맹점별·회원별 결제 목록 인덱스 |
+| `V20261106_1__add_refund_requested_status_and_status_indexes.sql` | 결제 `REFUND_REQUESTED` 상태, 이력 처리자 `MERCHANT`, 상태별 부분 인덱스 |
 
 | 제약·인덱스 | 내용 |
 |---|---|
@@ -672,7 +733,7 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 | `ck_merchants_status`, `ck_payments_status`, `ck_refunds_status` | 상태 값 목록 |
 | `ck_payments_manual_review_has_reason`, `ck_refunds_manual_review_has_reason` | `MANUAL_REVIEW`일 때만 `review_reason`이 있음 |
 | `ck_payments_attempt_count`, `ck_refunds_attempt_count` | `attempt_count >= 0` |
-| `ck_payment_histories_created_by` | `USER`·`SYSTEM`·`MASTER` |
+| `ck_payment_histories_created_by` | `USER`·`MERCHANT`·`SYSTEM`·`MASTER` |
 | `fk_payment_histories_payment_id`, `fk_refunds_payment_id` | 결제 FK |
 | `ix_payment_histories_payment_id_created_at`, `ix_refunds_payment_id_created_at` | 결제별 이력·환불 시간순 조회 |
 | `idx_merchants_owner_user_id` | 주인별 가맹점(한 회원이 여러 가맹점 가능, UNIQUE 아님) |
@@ -680,6 +741,7 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 | `fk_payment_review_resolutions_payment_id`, `fk_payment_review_resolutions_refund_id` | 처리 기록 → 결제·환불 FK |
 | `ck_payment_review_resolutions_ledger_transaction_id` | 원장 기록 없음(`NOT_FOUND`)일 때만 원장 거래 ID가 비어 있음 |
 | `ix_payment_review_resolutions_payment_id_created_at` | 결제별 처리 기록 시간순 조회 |
+| `ix_payments_pending_updated_at_id`, `ix_payments_manual_review_created_at_id`, `ix_payments_refund_requested_updated_at_id`, `ix_payments_refund_requested_merchant_id_created_at_id`, `ix_refunds_requested_updated_at_id`, `ix_refunds_manual_review_created_at_id` | 상태별 부분 인덱스(해당 상태의 행만 담음). 복구 대상·`MANUAL_REVIEW` 건수·30분 지난 건수, 3일 초과 환불 신청, 가맹점 환불 신청 목록. 로컬 48만 건에서 결제 복구 대상 조회 37.7ms → 0.13ms |
 
 - 회원·지갑·원장은 다른 서비스 소유라 FK 없이 ID만 저장합니다. 결제자 지갑 ID를 결제에 저장해 재전송 요청을 저장된 값만으로 만듭니다.
 - `V20261031_1`은 `owner_user_id NOT NULL`을 추가하므로 기존 가맹점 행이 있는 DB에서는 실패합니다. 기존 데이터는 각 환경에서 직접 정리합니다.
@@ -704,11 +766,13 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 
 | 테스트 | 확인하는 것 |
 |---|---|
-| `PaymentServiceTest` | 결제·환불 처리 순서, 멱등성, 부분 환불·남은 금액, 환불 기간, 결과 모름·`MANUAL_REVIEW`, 복구 |
+| `PaymentServiceTest` | 결제·환불 처리 순서, 멱등성, 부분 환불·남은 금액, 환불 기간, 고객 환불 신청·취소·거절과 역할별 실행 가능 상태, 3일 초과 신청 목록, 결과 모름·`MANUAL_REVIEW`, 복구 |
+| `RefundRequestSummaryTest` | 결제 이력으로 고객 환불 신청 요약(`REQUESTED`·`CANCELLED`·`REJECTED`·`ACCEPTED`) 판정 |
+| `PaymentHistoryRepositoryImplTest` | 결제별 가장 최근 환불 신청 사유 조회 |
 | `ManualReviewRulesTest` | 운영자 처리 규칙(멈춘 사유 × 원장 결과), 원장 항목 비교 |
 | `PaymentReviewServiceTest` | 운영자 처리·단건 조회·목록·처리 기록 목록, 예상 결과와 실제 처리 일치, 항목 불일치·동시 처리·원장 조회 실패 |
 | `PaymentReviewRepositoryIntegrationTest` | 실제 PostgreSQL에서 목록 쿼리, 환불 조건부 UPDATE, 처리 기록 제약·조건별 조회, 승인 시각 조회, 목록 인덱스 |
-| `PaymentTest` | 결제 상태 전이와 환불 가능 여부 |
+| `PaymentTest` | 결제 상태 전이(환불 신청·취소·거절 포함)와 역할별 환불 가능 여부 |
 | `MerchantServiceTest` | 가맹점 생성(주인 확인, 원장 실패 시 `PENDING`), 재시도, 잔액 권한 |
 | `PaymentLedgerFeignClientTest` | 원장 응답별 반영·거절·받아들이지 않음·결과 모름 분류, 거래 조회 결과 변환(코드 없는 404는 결론 내지 않음) |
 | `MerchantLedgerFeignClientTest`, `PaymentWalletFeignClientTest`, `MerchantUserFeignClientTest` | 다른 서비스 응답·실패 변환 |
@@ -722,5 +786,5 @@ PENDING ──원장 반영──▶ APPROVED ──환불 요청──▶ REFUN
 ## Gateway 연결과 신뢰 경계
 
 - 외부 요청은 Gateway `/api/v1/payments/**` 라우트로 들어옵니다. 가맹점 API도 이 경로 아래라 Gateway 라우트를 따로 둘 필요가 없습니다. 운영자 처리 API는 관리자 API 규칙에 따라 `/api/v1/admin/payments/**` 라우트로 들어옵니다. Gateway는 세션·CSRF를 확인하고, 클라이언트가 보낸 `User-Id`·`User-Role`을 지운 뒤 검증한 값으로 다시 설정합니다.
-- Gateway 경유 POST(결제·환불·가맹점 생성)는 CSRF 토큰이 필요합니다. 로그인하면 세션이 바뀌므로 로그인 뒤 CSRF 토큰을 다시 받습니다.
+- Gateway 경유 POST·DELETE(결제·환불·환불 신청·취소·거절·가맹점 생성)는 CSRF 토큰이 필요합니다. 로그인하면 세션이 바뀌므로 로그인 뒤 CSRF 토큰을 다시 받습니다.
 - payment-service는 회원 헤더를 믿고 요청자와 `MASTER` 여부를 정하므로, 배포에서는 payment-service 포트를 외부에 열지 않아야 합니다. 직접 접근할 수 있으면 헤더를 위조해 `MASTER`로 행세할 수 있습니다.

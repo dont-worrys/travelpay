@@ -24,6 +24,7 @@ public enum PaymentErrorCode implements ErrorCode {
     REFUND_DECLINED("PAYMENT_REFUND_DECLINED", "환불이 거절되었습니다.", 422),
     REFUND_AMOUNT_EXCEEDED("PAYMENT_REFUND_AMOUNT_EXCEEDED", "환불 가능 금액을 초과했습니다.", 422),
     REFUND_PERIOD_EXPIRED("PAYMENT_REFUND_PERIOD_EXPIRED", "환불 가능 기간이 지난 결제입니다.", 422),
+    REFUND_NOT_REQUESTED("PAYMENT_REFUND_NOT_REQUESTED", "환불 신청이 없는 결제입니다.", 422),
     REFUND_IDEMPOTENCY_KEY_REUSED("PAYMENT_REFUND_IDEMPOTENCY_KEY_REUSED", "이미 다른 환불에 사용된 요청 키입니다.", 409),
     LEDGER_LOOKUP_UNAVAILABLE("PAYMENT_LEDGER_LOOKUP_UNAVAILABLE", "원장 거래 결과를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503),
     REFUND_NOT_FOUND("PAYMENT_REFUND_NOT_FOUND", "환불을 찾을 수 없습니다.", 404),
