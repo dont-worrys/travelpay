@@ -89,6 +89,53 @@ interface ExchangeOrderJpaRepository extends JpaRepository<ExchangeOrder, UUID> 
                            @Param("settledAt") Instant settledAt,
                            @Param("now") Instant now);
 
+    /** MANUAL_REVIEW인 주문만 관리자 처리 결과로 바꾼다. 이미 확정되었거나 다른 상태인 주문은 0행 */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ExchangeOrder o
+               set o.status = :status,
+                   o.ledgerTransactionId = :ledgerTransactionId,
+                   o.failureReason = :failureReason,
+                   o.settledAt = :settledAt,
+                   o.updatedAt = :now
+             where o.id = :id
+               and o.status = com.travelpay.exchange.domain.order.ExchangeOrderStatus.MANUAL_REVIEW
+            """)
+    int resolveIfManualReview(@Param("id") UUID id,
+                             @Param("status") ExchangeOrderStatus status,
+                             @Param("ledgerTransactionId") UUID ledgerTransactionId,
+                             @Param("failureReason") ExchangeFailureReason failureReason,
+                             @Param("settledAt") Instant settledAt,
+                             @Param("now") Instant now);
+
+    /**
+     * 관리자용 MANUAL_REVIEW 주문 목록.
+     * 인덱스 ix_exchange_orders_manual_review(created_at, order_id)를 타도록 created_at, id 순으로 정렬한다.
+     */
+    @Query(value = """
+            select o from ExchangeOrder o
+             where o.status = com.travelpay.exchange.domain.order.ExchangeOrderStatus.MANUAL_REVIEW
+               and (:reviewReason is null or exists (
+                   select 1 from ExchangeOrderStatusHistory h
+                    where h.orderId = o.id
+                      and h.toStatus = com.travelpay.exchange.domain.order.ExchangeOrderStatus.MANUAL_REVIEW
+                      and h.reason = :reviewReason
+               ))
+             order by o.createdAt asc, o.id asc
+            """,
+            countQuery = """
+            select count(o) from ExchangeOrder o
+             where o.status = com.travelpay.exchange.domain.order.ExchangeOrderStatus.MANUAL_REVIEW
+               and (:reviewReason is null or exists (
+                   select 1 from ExchangeOrderStatusHistory h
+                    where h.orderId = o.id
+                      and h.toStatus = com.travelpay.exchange.domain.order.ExchangeOrderStatus.MANUAL_REVIEW
+                      and h.reason = :reviewReason
+               ))
+            """)
+    Page<ExchangeOrder> findManualReviews(@Param("reviewReason") String reviewReason, Pageable pageable);
+
     /**
      * 대기 시간(30초 × 2^min(확인 횟수, 5))이 지난 PROCESSING 주문. 시각은 DB now()가 아니라 서비스 Clock 값을 받는다.
      * 정렬 앞부분은 부분 인덱스 ix_exchange_orders_processing(ledger_check_count, last_ledger_checked_at)과 같다.

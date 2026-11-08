@@ -10,6 +10,7 @@ import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
+import com.travelpay.exchange.domain.order.ManualReviewResolution;
 import com.travelpay.exchange.domain.order.Settlement;
 import com.travelpay.exchange.infrastructure.persistence.ConstraintViolations;
 import lombok.RequiredArgsConstructor;
@@ -71,6 +72,18 @@ class ExchangeOrderRepositoryAdapter implements ExchangeOrderRepository {
     public boolean settleIfProcessing(UUID orderId, Settlement settlement, Instant now) {
         return jpaRepository.settleIfProcessing(orderId, settlement.status(), settlement.ledgerTransactionId(),
                 settlement.failureReason(), settlement.settledAt(), now) == 1;
+    }
+
+    @Override
+    public boolean resolveIfManualReview(UUID orderId, ManualReviewResolution resolution, Instant now) {
+        return jpaRepository.resolveIfManualReview(
+                orderId,
+                resolution.status(),
+                resolution.orderLedgerTransactionId(),
+                resolution.failureReason(),
+                resolution.settledAt(),
+                now
+        ) == 1;
     }
 
     @Override
