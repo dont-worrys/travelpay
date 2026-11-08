@@ -40,7 +40,7 @@ class ExchangeOrderQueryRepositoryAdapter implements ExchangeOrderQueryRepositor
         String reasonName = reviewReason != null ? reviewReason.name() : null;
         Page<ExchangeOrder> orders = jpaRepository.findManualReviews(reasonName, pageable);
         if (orders.isEmpty()) {
-            return orders.map(order -> new ExchangeManualReviewView(order, null));
+            return Page.empty(pageable);
         }
         List<UUID> orderIds = orders.map(ExchangeOrder::getId).toList();
         Map<UUID, ManualReviewReason> reasonsByOrderId = historyJpaRepository
