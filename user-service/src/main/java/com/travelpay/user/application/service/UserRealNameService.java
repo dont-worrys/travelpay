@@ -32,7 +32,7 @@ public class UserRealNameService {
         this.readTransactions.setReadOnly(true);
     }
 
-    /** 명세 I02 송금 수취인 확인: 다른 회원의 상태가 드러나지 않도록 없는 회원과 ACTIVE가 아닌 회원을 같은 404로 처리합니다. */
+    /** 송금 수취인 실명 조회: 다른 회원의 상태가 드러나지 않도록 없는 회원과 ACTIVE가 아닌 회원을 같은 404로 처리합니다. */
     public UserRealNameResult getRecipient(UUID requesterId, UUID recipientId) {
         if (requesterId == null) {
             throw new BusinessException(CommonErrorCode.UNAUTHORIZED);
@@ -55,7 +55,7 @@ public class UserRealNameService {
                 .orElseThrow(() -> new BusinessException(UserErrorCode.RECIPIENT_NOT_FOUND)));
     }
 
-    /** 명세 I03: 본인만 조회하며, 정지·종료 상태는 해당 회원에게 403으로 알립니다. */
+    /** 충전 예금주(본인 실명) 조회: 본인만 조회하며, 정지·종료 상태는 해당 회원에게 403으로 알립니다. */
     public UserRealNameResult getFundingIdentity(UUID requesterId, UUID userId) {
         if (requesterId == null) {
             throw new BusinessException(CommonErrorCode.UNAUTHORIZED);

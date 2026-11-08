@@ -24,7 +24,7 @@ public record TermsResponse(List<TermItem> terms) {
             Instant effectiveAt
     ) {
 
-        private static TermItem from(TermsResult result) {
+        public static TermItem from(TermsResult result) {
             return new TermItem(result.termsCode(), result.termsVersion(), result.title(),
                     result.content(), result.required(), result.effectiveAt());
         }

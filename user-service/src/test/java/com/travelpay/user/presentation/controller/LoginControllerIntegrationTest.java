@@ -829,7 +829,7 @@ class LoginControllerIntegrationTest {
         var principal = (UserSessionPrincipal) stored.getAuthentication().getPrincipal();
         var context = SecurityContextHolder.createEmptyContext();
         context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
-                new UserSessionPrincipal(principal.userId(), principal.role(), loginTime), null,
+                new UserSessionPrincipal(principal.userId(), principal.role(), loginTime, principal.sessionVersion()), null,
                 stored.getAuthentication().getAuthorities()));
         session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, context);
         repository.save(session);

@@ -40,7 +40,7 @@ class SessionCurrentUserProviderTest {
     @ParameterizedTest
     @EnumSource(AuthRole.class)
     void returnsTheMemberIdAndRoleFromAnAuthenticatedSessionPrincipal(AuthRole role) {
-        var principal = new UserSessionPrincipal(USER_ID, role, AUTHENTICATED_AT);
+        var principal = new UserSessionPrincipal(USER_ID, role, AUTHENTICATED_AT, 0L);
         SecurityContextHolder.getContext().setAuthentication(
                 UsernamePasswordAuthenticationToken.authenticated(principal, null,
                         List.of(new SimpleGrantedAuthority("ROLE_" + role.name()))));
@@ -58,7 +58,7 @@ class SessionCurrentUserProviderTest {
 
     @Test
     void rejectsAnUnauthenticatedTokenEvenWhenItContainsAMemberPrincipal() {
-        var principal = new UserSessionPrincipal(USER_ID, AuthRole.USER, AUTHENTICATED_AT);
+        var principal = new UserSessionPrincipal(USER_ID, AuthRole.USER, AUTHENTICATED_AT, 0L);
         SecurityContextHolder.getContext().setAuthentication(
                 UsernamePasswordAuthenticationToken.unauthenticated(principal, null));
 
@@ -67,7 +67,7 @@ class SessionCurrentUserProviderTest {
 
     @Test
     void rejectsAnAnonymousTokenEvenWhenItsAuthenticatedFlagAndPrincipalLookValid() {
-        var principal = new UserSessionPrincipal(USER_ID, AuthRole.USER, AUTHENTICATED_AT);
+        var principal = new UserSessionPrincipal(USER_ID, AuthRole.USER, AUTHENTICATED_AT, 0L);
         var anonymous = new AnonymousAuthenticationToken("anonymous-key-for-test", principal,
                 List.of(new SimpleGrantedAuthority("ROLE_USER")));
         SecurityContextHolder.getContext().setAuthentication(anonymous);

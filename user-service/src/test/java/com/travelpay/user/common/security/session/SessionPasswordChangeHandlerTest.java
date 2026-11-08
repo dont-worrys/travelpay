@@ -66,7 +66,7 @@ class SessionPasswordChangeHandlerTest {
 
     @Test
     void aMissingExistingSessionDoesNotCreateANewLoginAfterTheAccountWasUpdated() {
-        var principal = new UserSessionPrincipal(UUID.randomUUID(), AuthRole.USER, LOGIN_AT);
+        var principal = new UserSessionPrincipal(UUID.randomUUID(), AuthRole.USER, LOGIN_AT, 0L);
         var context = SecurityContextHolder.createEmptyContext();
         context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(principal, null,
                 List.of(new SimpleGrantedAuthority("ROLE_USER"))));
@@ -110,7 +110,7 @@ class SessionPasswordChangeHandlerTest {
     }
 
     private UserSessionPrincipal authenticate(AuthRole role) {
-        var principal = new UserSessionPrincipal(UUID.randomUUID(), role, LOGIN_AT);
+        var principal = new UserSessionPrincipal(UUID.randomUUID(), role, LOGIN_AT, 0L);
         var context = SecurityContextHolder.createEmptyContext();
         context.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(principal, null,
                 List.of(new SimpleGrantedAuthority("ROLE_" + role.name()))));

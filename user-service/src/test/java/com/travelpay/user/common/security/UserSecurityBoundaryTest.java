@@ -202,7 +202,7 @@ class UserSecurityBoundaryTest {
         return new WebApplicationContextRunner()
                 .withBean(CurrentMemberService.class, () -> {
                     var service = mock(CurrentMemberService.class);
-                    when(service.requireActive(USER_ID)).thenReturn(new AuthenticatedUser(USER_ID, AuthRole.USER));
+                    when(service.requireActiveSession(USER_ID, 0L)).thenReturn(new AuthenticatedUser(USER_ID, AuthRole.USER));
                     return service;
                 })
                 .withConfiguration(AutoConfigurations.of(
@@ -226,7 +226,7 @@ class UserSecurityBoundaryTest {
 
     private MockHttpSession userSession(WebApplicationContext context) {
         return sessionWithPrincipal(context, new UserSessionPrincipal(
-                USER_ID, AuthRole.USER, Instant.parse("2026-10-30T00:00:00Z")));
+                USER_ID, AuthRole.USER, Instant.parse("2026-10-30T00:00:00Z"), 0L));
     }
 
     private MockHttpSession sessionWithPrincipal(WebApplicationContext context, Object principal) {

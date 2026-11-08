@@ -45,6 +45,24 @@ class UserConfigurationFilesTest {
         assertEquals(Duration.ofSeconds(3), properties.transactionTimeout());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"application.yml", "application-prod.yml"})
+    void adminApisUseTheBoundedDatabaseTransactionTimeout(String filename) throws IOException {
+        var properties = Binder.get(environment(filename))
+                .bind("travelpay.user.admin", AdminProperties.class).get();
+
+        assertEquals(Duration.ofSeconds(5), properties.transactionTimeout());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"application.yml", "application-prod.yml"})
+    void adminTransactionTimeoutCanBeOverriddenByTheEnvironment(String filename) throws IOException {
+        var environment = environment(filename).withProperty("USER_ADMIN_TRANSACTION_TIMEOUT", "3s");
+        var properties = Binder.get(environment).bind("travelpay.user.admin", AdminProperties.class).get();
+
+        assertEquals(Duration.ofSeconds(3), properties.transactionTimeout());
+    }
+
     private static ServerProperties serverProperties(String filename) throws IOException {
         return Binder.get(environment(filename)).bindOrCreate("server", ServerProperties.class);
     }

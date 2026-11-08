@@ -133,10 +133,23 @@ class TermsServiceIntegrationTest {
         @Bean
         @Primary
         TermsDocumentRepository transactionalTermsRepository(TermsDocumentRepositoryImpl delegate) {
-            return at -> {
-                assertTrue(TransactionSynchronizationManager.isActualTransactionActive());
-                assertTrue(TransactionSynchronizationManager.isCurrentTransactionReadOnly());
-                return delegate.findEffectiveAt(at);
+            return new TermsDocumentRepository() {
+                @Override
+                public List<TermsDocument> findEffectiveAt(Instant at) {
+                    assertTrue(TransactionSynchronizationManager.isActualTransactionActive());
+                    assertTrue(TransactionSynchronizationManager.isCurrentTransactionReadOnly());
+                    return delegate.findEffectiveAt(at);
+                }
+
+                @Override
+                public List<TermsDocument> findPage(String termsCode, int offset, int limit) {
+                    return delegate.findPage(termsCode, offset, limit);
+                }
+
+                @Override
+                public void insert(TermsDocument document) {
+                    delegate.insert(document);
+                }
             };
         }
     }

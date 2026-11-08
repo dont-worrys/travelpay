@@ -4,7 +4,7 @@ import java.time.Duration;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-/** I02 수취인 조회의 요청자별 허용 횟수와 집계 기간입니다. */
+/** 송금 수취인 실명 조회의 요청자별 허용 횟수와 집계 기간입니다. */
 @ConfigurationProperties("travelpay.user.recipient-lookup")
 public record RecipientLookupProperties(int limit, Duration period) {
 

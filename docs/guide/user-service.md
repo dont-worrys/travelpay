@@ -46,6 +46,11 @@ user-service는 일반 회원가입, 로그인·로그아웃, 비밀번호 변�
 | `GET /api/v1/users/me` | 내 정보 조회 | 필요 | 불필요 | 200 |
 | `PATCH /api/v1/users/me/password` | 현재 비밀번호 확인 후 비밀번호 변경 | 필요 | 필요 | 204 |
 | `POST /api/v1/auth/logout` | 로그아웃 | 필요 | 필요 | 204 |
+| `GET /api/v1/admin/users` | 관리자 회원 검색(개인정보 마스킹) | ACTIVE MASTER | 불필요 | 200 |
+| `PATCH /api/v1/admin/users/{userId}/status` | 회원 정지·해제 | ACTIVE MASTER | 필요 | 200 |
+| `DELETE /api/v1/admin/users/{userId}/sessions` | 회원의 기존 세션 종료 | ACTIVE MASTER | 필요 | 200 |
+| `GET /api/v1/admin/terms` | 약관 버전 목록 | ACTIVE MASTER | 불필요 | 200 |
+| `POST /api/v1/admin/terms` | 새 약관 버전 등록 | ACTIVE MASTER | 필요 | 201 |
 
 응답 본문은 `success`·`data`·`error` 공통 형식입니다. 성공은 `data`에 결과를, 실패는 `error`에 코드·안내 메시지·상세 목록을 담습니다. 로그아웃·비밀번호 변경 성공은 본문 없는 204입니다.
 
@@ -84,7 +89,7 @@ curl -s -b jar $BASE/api/v1/users/me
 curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -X POST -o /dev/null -w '%{http_code}\n' $BASE/api/v1/auth/logout
 ```
 
-## 비밀번호 변경 (B05)
+## 비밀번호 변경
 
 로그인한 ACTIVE 회원이 자신의 현재 비밀번호를 확인한 뒤 새 비밀번호로 변경합니다. `USER`·`MASTER` 모두 같은 본인 변경 API를 사용합니다. 변경 대상은 서버의 세션에서 확인하므로 본문에 회원 ID·이메일·역할을 넣지 않습니다.
 
@@ -135,21 +140,21 @@ Csrf-Token: 현재 세션의 유효한 토큰
 
 ## 내부 API
 
-서버끼리 호출하는 API입니다. I01은 Gateway가 SESSION 쿠키를 전달하는 세션 확인 API이고, I02·I03은 업무 서비스의 회원 이름 조회입니다. 외부 Gateway 라우트에는 등록하지 않습니다.
+서버끼리 호출하는 API입니다. 세션 확인 API는 Gateway가 SESSION 쿠키를 전달해 부르고, 송금 수취인 실명 조회와 충전 예금주(본인 실명) 조회는 업무 서비스가 부르는 회원 이름 조회입니다. 외부 Gateway 라우트에는 등록하지 않습니다.
 
-### I01 · 세션 확인
+### 세션 확인
 
 | 항목 | 내용 |
 |---|---|
 | 요청 | `POST /internal/v1/auth/session`, 본문 없음 |
 | 입력 | SESSION 쿠키·Original-Method·필요한 Csrf-Token |
 | Original-Method | Gateway가 실제 외부 요청 메서드로 작성, 정확히 하나의 대문자 값 |
-| 검증 | 로그인 세션·유휴/절대 만료·현재 DB 회원 상태·역할 |
+| 검증 | 로그인 세션·유휴/절대 만료·현재 DB 회원 상태·역할·세션 버전 |
 | CSRF | 원래 메서드가 POST·PUT·PATCH·DELETE일 때 검사 |
 | 성공 | 200, ApiResponse의 data에 userId·role |
-| 실패 | 세션 없음 401, 회원 상태·CSRF 403, 세션 충돌 409, 저장소 장애 503 |
+| 실패 | 세션 없음·세션 버전 불일치 401, 회원 상태·CSRF 403, 세션 충돌 409, 저장소 장애 503 |
 
-허용하는 원래 메서드는 GET·HEAD·OPTIONS·POST·PUT·PATCH·DELETE입니다. 잘못된 Original-Method는 400이며, Gateway는 이 오류를 만들지 않도록 실제 메서드를 검사해 I01을 호출합니다. 성공 응답은 쿠키를 새로 발급하지 않으며, 기존 세션의 접근 시각은 갱신됩니다.
+허용하는 원래 메서드는 GET·HEAD·OPTIONS·POST·PUT·PATCH·DELETE입니다. 잘못된 Original-Method는 400이며, Gateway는 이 오류를 만들지 않도록 실제 메서드를 검사해 세션 확인 API를 호출합니다. 성공 응답은 쿠키를 새로 발급하지 않으며, 기존 세션의 접근 시각은 갱신됩니다.
 
 ```json
 {
@@ -162,7 +167,7 @@ Csrf-Token: 현재 세션의 유효한 토큰
 }
 ```
 
-### I02·I03 · 회원 이름 조회
+### 회원 이름 조회 (송금 수취인·충전 예금주)
 
 세션 쿠키와 CSRF 헤더 없이 호출하며, 응답에서 세션을 만들지 않습니다. 대신 아래 두 회원 헤더가 모두 필요합니다.
 
@@ -173,10 +178,10 @@ Csrf-Token: 현재 세션의 유효한 토큰
 
 헤더가 없거나 일부만 있거나, 값이 잘못됐거나 중복되면 `401 COMMON_UNAUTHORIZED`입니다. User 자신의 보호 API는 기존 세션 Provider를 사용하고, 이 두 내부 조회 API의 컨트롤러만 회원 헤더를 직접 검사합니다. `header-context.enabled`를 다시 켜지 않습니다.
 
-| API | 명세 | 용도 |
-|---|---|---|
-| `GET /internal/v1/users/{userId}/real-name` | I02 | 송금 수취인 확인 |
-| `GET /internal/v1/users/{userId}/funding-identity` | I03 | 충전 예금주 확인(충전 요청자 본인) |
+| API | 용도 |
+|---|---|
+| `GET /internal/v1/users/{userId}/real-name` | 송금 수취인 실명 조회 |
+| `GET /internal/v1/users/{userId}/funding-identity` | 충전 예금주 확인(충전 요청자 본인 실명 조회) |
 
 두 API의 성공 응답 형식은 같습니다. `realName`은 가입 때 입력한 성명이며 실명 확인 결과가 아닙니다. 이메일·휴대폰 번호는 담지 않으며, 화면에 보여 줄 이름의 마스킹은 호출한 서비스의 공개 응답에서 합니다.
 
@@ -191,7 +196,7 @@ Csrf-Token: 현재 세션의 유효한 토큰
 }
 ```
 
-| 상황 | I02 `real-name` | I03 `funding-identity` |
+| 상황 | 송금 수취인 실명 조회 `real-name` | 충전 예금주 조회 `funding-identity` |
 |---|---|---|
 | 회원 헤더 누락·잘못된 형식·중복 | 401 `COMMON_UNAUTHORIZED` | 401 `COMMON_UNAUTHORIZED` |
 | 요청자 ID와 조회 대상 ID가 다름 | 다른 수취인 조회 가능 | DB 조회 전 403 `COMMON_FORBIDDEN` |
@@ -199,13 +204,13 @@ Csrf-Token: 현재 세션의 유효한 토큰
 | 회원 없음 | 404 `USER_RECIPIENT_NOT_FOUND` | 404 `USER_NOT_FOUND` |
 | 정지·종료 회원 | 404 `USER_RECIPIENT_NOT_FOUND` | 403 `USER_ACCOUNT_SUSPENDED`, `USER_ACCOUNT_CLOSED` |
 | `userId`가 UUID 형식이 아님 | 400 `COMMON_INVALID_REQUEST` | 400 `COMMON_INVALID_REQUEST` |
-| 요청자의 조회 한도 소진 | 429 `COMMON_TOO_MANY_REQUESTS` | I02 한도를 적용하지 않음 |
-| 조회 횟수 저장소(Redis) 장애 | 503 `COMMON_SERVICE_UNAVAILABLE` | I02 횟수 저장소를 사용하지 않음 |
+| 요청자의 조회 한도 소진 | 429 `COMMON_TOO_MANY_REQUESTS` | 수취인 조회 한도를 적용하지 않음 |
+| 조회 횟수 저장소(Redis) 장애 | 503 `COMMON_SERVICE_UNAVAILABLE` | 수취인 조회 횟수 저장소를 사용하지 않음 |
 | DB 장애 | 503 `COMMON_SERVICE_UNAVAILABLE` | 503 `COMMON_SERVICE_UNAVAILABLE` |
 
-대상 회원의 상태에 따른 200·404·403은 정상 회원 헤더를 받았고, I02는 호출 한도를 통과했으며, I03은 요청자와 대상이 같은 경우의 결과입니다.
+대상 회원의 상태에 따른 200·404·403은 정상 회원 헤더를 받았고, 송금 수취인 실명 조회는 호출 한도를 통과했으며, 충전 예금주 조회는 요청자와 대상이 같은 경우의 결과입니다.
 
-I02는 다른 회원을 조회하므로 없는 회원과 정지·종료 회원을 같은 404로 응답해 상태를 알려 주지 않습니다. I03은 요청자 본인만 조회하며 `MASTER`도 예외로 다른 회원을 조회할 수 없습니다. 본인 확인을 통과한 뒤에는 정지·종료 상태를 해당 회원에게 403으로 알려 줍니다.
+송금 수취인 실명 조회는 다른 회원을 조회하므로 없는 회원과 정지·종료 회원을 같은 404로 응답해 상태를 알려 주지 않습니다. 충전 예금주 조회는 요청자 본인만 조회하며 `MASTER`도 예외로 다른 회원을 조회할 수 없습니다. 본인 확인을 통과한 뒤에는 정지·종료 상태를 해당 회원에게 403으로 알려 줍니다.
 
 접근 보호는 팀 결정(2026-10-31)에 따라 내부망 격리만 사용하며, 서비스 인증 헤더는 없습니다. user-service는 위 두 경로의 GET만 세션 없이 허용하고, 그 밖의 `/internal/**` 요청은 다른 API와 같은 로그인·CSRF 규칙을 따릅니다. 외부에서 닿지 않게 막는 일은 Gateway 라우트와 배포 망 구성이 맡습니다. 로컬 실행에서는 `8081` 포트로 바로 호출할 수 있습니다.
 
@@ -214,12 +219,12 @@ I02는 다른 회원을 조회하므로 없는 회원과 정지·종료 회원�
 curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
   "$BASE/internal/v1/users/$RECIPIENT_ID/real-name"
 
-# I03은 요청자 UUID와 경로의 UUID가 같아야 합니다.
+# 충전 예금주 조회는 요청자 UUID와 경로의 UUID가 같아야 합니다.
 curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
   "$BASE/internal/v1/users/$REQUESTER_ID/funding-identity"
 ```
 
-#### I02 요청자별 호출 제한
+#### 송금 수취인 실명 조회의 요청자별 호출 제한
 
 기본 한도는 **요청자 한 명당 최근 60초 동안 허용된 조회 60회**입니다. 조회 대상이 달라져도 같은 요청자의 한도를 사용합니다.
 
@@ -227,7 +232,7 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 - 집계 기간이 지난 기록은 빼고 최근 기록만 셉니다. 허용한 호출은 대상 조회가 200·404 등 어떤 결과로 끝나든 한 번 집계합니다.
 - 한도를 소진한 요청은 DB 조회 전에 429로 종료합니다. 거절된 호출을 기록에 추가하거나 기록의 만료 시간을 연장하지 않습니다.
 - Redis를 사용할 수 없으면 제한 없이 진행하지 않고 DB 조회 전에 503으로 종료합니다. Redis 확인은 이 서비스가 시작하는 읽기 트랜잭션 밖에서 수행합니다.
-- I03 본인 조회에는 I02 호출 한도를 적용하지 않습니다.
+- 충전 예금주(본인) 조회에는 수취인 조회 호출 한도를 적용하지 않습니다.
 
 | 설정 | 환경변수 | 기본값 |
 |---|---|---|
@@ -250,12 +255,58 @@ curl -s -H "User-Id: $REQUESTER_ID" -H 'User-Role: USER' \
 | 세션 저장소 | 세션 Redis (`redis-session`, 메모리가 차도 키를 지우지 않는 `noeviction`) |
 | 응답 캐시 | Spring Security가 `Cache-Control: no-cache, no-store, max-age=0, must-revalidate`를 붙여 인증·개인정보 응답이 저장되지 않게 함 |
 | 회원 상태 확인 | 로그인이 필요한 요청마다 DB에서 현재 상태·권한 확인. 정지·종료 회원은 로그인이 필요한 API 중 로그아웃만 가능 |
+| 세션 버전 | 회원마다 DB에 둔 숫자(`users.session_version`). 로그인할 때 세션에 복사하고, 로그인이 필요한 요청(로그아웃 제외)마다 같은 DB 조회에서 비교해 다르면 401. 관리자 세션 종료와 정지·해제 때 1 올림 |
+
+### 세션 Redis 운영 조건
+
+- **메모리 정책**: 운영 Redis도 `noeviction`이어야 합니다. 관리형 Redis는 설정 묶음(파라미터 그룹)에서 따로 지정합니다. ElastiCache의 기본값은 `volatile-lru`라서, 메모리가 차면 만료 시간이 있는 세션과 로그인 차단 기록을 조용히 지웁니다.
+- **메모리 경보**: 메모리가 가득 차면 로그인과 로그인이 필요한 요청이 모두 503이지만, `/actuator/health`는 UP으로 남습니다. Redis 메모리 사용률 경보로 따로 감시합니다.
+- **재시작 판단**: 컨테이너 재시작은 `/actuator/health/liveness`로 판단합니다. 이 주소는 Redis가 꺼져도 UP이며, Spring Boot 4.1.2가 기본으로 켜 두므로 따로 설정할 것이 없습니다. `/actuator/health`는 Redis를 포함해 Redis 장애 때 503이 되므로, 감시에만 씁니다. 재시작에 쓰면 Redis 장애 동안 재시작이 반복됩니다.
+- **Redis 장애 때 동작**: 로그인이 필요한 요청·로그인·CSRF 발급·송금 수취인 실명 조회는 503입니다. 쿠키 없는 약관 조회와 충전 예금주(본인 실명) 조회는 계속 동작합니다. SESSION 쿠키가 있는 요청은 공개 API라도 세션을 한 번 읽으므로 503이 됩니다. Spring Security의 세션 관리 필터와 Spring MVC의 요청 처리 이벤트가 세션을 읽기 때문입니다.
+- **응답 시간**: Redis가 응답하지 않으면 요청마다 명령 제한 시간(2초)만큼 기다린 뒤 503입니다.
+- **재시작 후 데이터**: 로컬 설정은 디스크에 저장하지 않습니다. Redis를 재시작하면 세션과 로그인 차단 기록이 사라지고 회원은 다시 로그인합니다.
 
 ### 회원 상태와 역할
 
 `status`는 이용 상태(`ACTIVE`·`SUSPENDED`·`CLOSED`), `role`은 역할(`USER`·`MASTER`)입니다. 일반 회원가입은 ACTIVE·USER로 생성하며, 관리자는 ACTIVE·MASTER일 때 보호 규칙을 통과합니다. 역할값은 대문자로 사용합니다.
 
-User의 `/api/v1/admin/**` 보호 규칙은 DB의 현재 상태·역할로 MASTER를 확인하도록 준비되어 있습니다. 관리자 회원 조회·정지/해제·회원별 세션 종료·약관 관리 API와 Gateway의 관리자 라우트는 아직 구현하지 않았습니다.
+User의 `/api/v1/admin/**`는 DB의 현재 상태·역할로 ACTIVE MASTER만 통과시킵니다. Gateway는 기존 User 라우트로 `/api/v1/admin/users/**`·`/api/v1/admin/terms/**`를 쿠키와 함께 전달합니다. 최초 MASTER는 API 없이 제한된 초기 설정 절차에서 DB 역할을 바꿔 준비합니다.
+
+### 관리자 API
+
+| API | 규칙 |
+|---|---|
+| 회원 검색 | `userId`·`loginEmail`·`phone`·`status` 중 값을 준 조건만 정확히 일치로 찾고, 빈 값으로 보낸 조건은 없는 것으로 봅니다. 제어 문자(NUL 등)가 든 값은 400입니다. 이메일은 앞뒤 공백을 지우고 소문자로, 번호는 하이픈이 없어도 `010-0000-0000`으로 맞춥니다. `page` 0부터, `size` 기본 20·최대 100이며, 가입 최신순·ID 역순 고정입니다. 응답은 `items`·`page`·`size`·`hasNext`이고, 전체 개수는 세지 않습니다. |
+| 마스킹 | 이름은 한 글자면 `*`, 두 글자면 첫 글자만, 그 이상은 첫·끝 글자만 남깁니다(홍*동). 이메일은 앞부분 첫 글자와 별 3개, 도메인을 남깁니다(m***@example.com). 번호는 가운데 4자리를 가립니다(010-****-5678). 비밀번호 로그인 정보가 없는 회원의 이메일은 `null`입니다. |
+| 회원 정지·해제 | `ACTIVE`·`SUSPENDED`만 지정합니다. 이미 그 상태면 바꾸지 않고 현재 상태를 돌려줍니다. 자기 정지와 종료된 계정은 409입니다. 상태가 바뀌면(정지·해제) 세션 버전을 올려서, 정지 중 기존 세션은 403, 해제 뒤 기존 세션은 401(다시 로그인)입니다. 이 API 밖에서 정지된 회원도 해제하면 기존 세션이 끝납니다. |
+| 마지막 MASTER 보호 | 요청자와 대상 두 행을 ID 순서로 잠근 뒤 요청자가 여전히 ACTIVE MASTER인지 다시 확인합니다. 정지는 늘 다른 ACTIVE MASTER가 하므로, 정지가 커밋될 때 요청자가 ACTIVE MASTER로 남습니다. 두 관리자가 서로를 동시에 정지하면 한쪽만 성공합니다. |
+| 회원 세션 종료 | 세션 버전을 1 올려, 그때까지 발급된 대상 회원의 세션을 다음 요청부터 401로 만듭니다. 이후 새 로그인은 막지 않습니다. 응답은 `userId`·`scope`(`EXISTING_SESSIONS`)입니다. |
+| 약관 목록 조회 | `termsCode`를 주면 그 코드만 봅니다. 약관 코드 순, 같은 코드는 시행 시각이 최신인 버전부터입니다. 지난 버전과 시행 예정 버전도 모두 포함합니다. |
+| 새 약관 버전 등록 | 새 버전을 추가만 합니다. 시행 시각은 등록 시점보다 1분 이상 뒤여야 하고(커밋 전에 시행되면 그 사이 가입한 회원의 동의 버전이 어긋나기 때문), 같은 코드의 같은 버전·같은 시행 시각은 409입니다. 약관 코드는 대문자로 시작하는 대문자·숫자·밑줄 40자 이내입니다. |
+
+| API | 요청 | 성공 응답 `data` |
+|---|---|---|
+| 회원 검색 | Query `userId`·`loginEmail`·`phone`·`status`·`page`·`size` | `items[]`(`userId`·`maskedRealName`·`maskedEmail`·`maskedPhone`·`status`·`role`)·`page`·`size`·`hasNext` |
+| 회원 정지·해제 | Body `{"status":"SUSPENDED"}` 또는 `{"status":"ACTIVE"}` | `userId`·`status` |
+| 회원 세션 종료 | 본문 없음 | `userId`·`scope` |
+| 약관 목록 조회 | Query `termsCode`·`page`·`size` | `items[]`(`termsCode`·`termsVersion`·`title`·`content`·`isRequired`·`effectiveAt`)·`page`·`size`·`hasNext` |
+| 새 약관 버전 등록 | Body `termsCode`·`termsVersion`·`title`·`content`·`isRequired`·`effectiveAt`(ISO-8601 시각, 예: `2027-01-01T00:00:00Z`. `+09:00`처럼 오프셋을 붙이면 같은 순간으로 저장하고 응답은 UTC) | 등록한 약관(약관 목록 항목과 같은 형식), 201 |
+
+새 약관 버전의 시행 시각은 마이크로초 아래를 버린 값으로 저장하고 그 값을 돌려줍니다. 9999년을 넘는 시각은 `400 COMMON_INVALID_REQUEST`입니다.
+
+회원 검색 조건(이메일·휴대폰 번호)은 URL 쿼리에 실립니다. 앱 로그에는 검색값을 남기지 않지만(테스트로 확인), Tomcat·Gateway·로드밸런서·CDN의 접근 로그를 켤 때는 쿼리 문자열이 기록되지 않게 하거나 가려야 합니다.
+
+조건 없이 찾거나 상태로만 찾으면 회원 전체를 가입순으로 정렬합니다. 지금 규모에서는 문제가 없고, 회원이 크게 늘어 느려지면 `users(created_at desc, id desc)` 인덱스를 추가합니다.
+
+관리자 API는 트랜잭션 안에서 Redis나 다른 서비스를 부르지 않고, 각 변경을 짧은 DB 트랜잭션 하나로 처리합니다. 요청 인증(세션)은 다른 API처럼 Redis를 쓰므로 Redis 장애 중에는 관리자 API도 503입니다. 세션 종료 중에 이미 진행 중이던 비밀번호 변경은 변경까지 끝나며, 그 세션은 다음 요청에서 끊깁니다.
+
+관리자 변경은 커밋된 뒤 감사 로그를 남깁니다. 로거 이름은 `travelpay.audit.admin`이며, 로그 JSON에 `event`(`ADMIN_USER_STATUS_CHANGED`·`ADMIN_USER_SESSIONS_ENDED`·`ADMIN_TERMS_PUBLISHED`), 처리한 관리자 `actorId`, 대상(`targetUserId` 또는 `termsCode`·`termsVersion`·`effectiveAt`), 상태 변경이면 `fromStatus`·`toStatus` 필드가 붙고 traceId·spanId·service는 자동으로 붙습니다. 이미 그 상태였던 요청과 거절·실패한 요청은 남기지 않으며, 성명·이메일·휴대폰 번호는 남기지 않습니다.
+
+| 설정 | 환경변수 | 로컬·배포 기본값 |
+|---|---|---|
+| `travelpay.user.admin.transaction-timeout` | `USER_ADMIN_TRANSACTION_TIMEOUT` | `5s` |
+
+관리자 API의 DB 트랜잭션마다 적용합니다. 정지·해제가 다른 요청의 행 잠금을 기다리는 시간도 포함되며, 넘기면 변경 없이 503입니다. 1초 이상의 정수 초 단위만 허용합니다.
 
 관리 API 경로의 `admin`은 기능 영역, `MASTER`는 허용 역할이므로 같은 이름으로 바꾸지 않습니다. 관리자 API도 기존 User 세션 인증을 사용하며, 외부 회원 헤더로 관리자 신원을 결정하지 않습니다.
 
@@ -289,16 +340,20 @@ User의 `/api/v1/admin/**` 보호 규칙은 DB의 현재 상태·역할로 MASTE
 | 400 | `USER_TERMS_CONSENT_INVALID` | 필수 약관 누락, 없는 약관·버전 |
 | 400 | `USER_CURRENT_PASSWORD_MISMATCH` | 비밀번호 변경의 현재 비밀번호 불일치 |
 | 400 | `USER_NEW_PASSWORD_SAME_AS_CURRENT` | 새 비밀번호가 현재 비밀번호와 같음 |
-| 401 | `COMMON_UNAUTHORIZED` | 세션 없음·만료(유휴 60분·절대 24시간), 회원 정보 없음 |
+| 400 | `USER_TERMS_EFFECTIVE_AT_NOT_FUTURE` | 약관 시행 시각이 등록 시점부터 1분이 안 됨(지난 시각 포함) |
+| 401 | `COMMON_UNAUTHORIZED` | 세션 없음·만료(유휴 60분·절대 24시간), 회원 정보 없음, 관리자가 세션을 끝냈거나 정지 후 해제된 기존 세션 |
 | 401 | `USER_INVALID_CREDENTIALS` | 이메일 없음 또는 비밀번호 불일치 |
 | 403 | `COMMON_CSRF_INVALID` | CSRF 토큰 없음·불일치 |
-| 403 | `COMMON_FORBIDDEN` | 권한 부족, I03에서 요청자와 조회 대상 불일치 |
-| 403 | `USER_ACCOUNT_SUSPENDED`, `USER_ACCOUNT_CLOSED` | 정지·종료 회원. 올바른 비밀번호로 로그인하거나 기존 세션으로 요청할 때, 충전 예금주 조회(I03) |
-| 404 | `USER_RECIPIENT_NOT_FOUND`, `USER_NOT_FOUND` | 내부 이름 조회 대상 없음(I02·I03) |
+| 403 | `COMMON_FORBIDDEN` | 권한 부족, 충전 예금주 조회에서 요청자와 조회 대상 불일치 |
+| 403 | `USER_ACCOUNT_SUSPENDED`, `USER_ACCOUNT_CLOSED` | 정지·종료 회원. 올바른 비밀번호로 로그인하거나 기존 세션으로 요청할 때, 충전 예금주 조회 |
+| 404 | `USER_RECIPIENT_NOT_FOUND`, `USER_NOT_FOUND` | 내부 이름 조회 대상 없음(송금 수취인·충전 예금주 조회), 관리자 정지·해제·세션 종료 대상 없음 |
 | 409 | `USER_EMAIL_ALREADY_EXISTS`, `USER_PHONE_ALREADY_EXISTS` | 이미 가입한 이메일·휴대폰 번호 |
 | 409 | `COMMON_CONFLICT` | 같은 세션의 다른 요청이 로그인·로그아웃으로 세션을 바꾼 경우 |
 | 409 | `USER_CREDENTIAL_CONFLICT` | 비밀번호 변경 중 자격 증명 충돌 또는 비밀번호 수단 없음 |
-| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인·현재 비밀번호 확인 시도 제한 또는 I02 요청자별 조회 한도 초과 |
+| 409 | `USER_MASTER_PROTECTION_CONFLICT` | 관리자가 자기 계정을 정지 |
+| 409 | `USER_CLOSED_ACCOUNT_UNCHANGEABLE` | 종료된 계정의 정지·해제 |
+| 409 | `USER_TERMS_VERSION_CONFLICT` | 같은 약관 코드의 같은 버전이나 같은 시행 시각이 이미 있음 |
+| 429 | `COMMON_TOO_MANY_REQUESTS` | 로그인·현재 비밀번호 확인 시도 제한 또는 송금 수취인 조회의 요청자별 한도 초과 |
 | 503 | `COMMON_SERVICE_UNAVAILABLE` | DB·Redis 장애, 시행 중인 약관 없음 |
 | 503 | `USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE` | 비밀번호 DB 변경 완료 후 세션 갱신 실패 |
 
@@ -312,6 +367,7 @@ User의 `/api/v1/admin/**` 보호 규칙은 DB의 현재 상태·역할로 MASTE
 |---|---|
 | `V1__create_user_tables.sql` | 회원·로그인 수단·약관·약관 동의 표 |
 | `V2__seed_initial_terms.sql` | 초기 약관 `SERVICE_TERMS`·`PRIVACY_TERMS` |
+| `V3__add_users_session_version.sql` | 회원별 세션 버전 `session_version`(기존 회원은 0) |
 
 - 이미 적용한 파일은 고치지 않습니다. 고치면 앱이 시작할 때 검증에서 멈춥니다. 구조나 데이터를 바꿀 때는 다음 번호의 새 파일을 추가합니다.
 - 엔티티를 바꾸면 같은 작업에서 마이그레이션 파일도 추가합니다. `FlywayMigrationTest`가 마이그레이션 결과를 엔티티 기준 스키마와 비교해 다르면 실패합니다.
@@ -327,10 +383,10 @@ User의 `/api/v1/admin/**` 보호 규칙은 DB의 현재 상태·역할로 MASTE
 
 테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다.
 
-비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
+비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
 
 ## Gateway 연결과 배포 시 신뢰 경계
 
 - Gateway는 연결 상대와 신뢰 프록시 설정으로 Client-Ip를 작성합니다. User의 Tomcat은 신뢰하는 내부 연결에서 온 Client-Ip를 `request.getRemoteAddr()`에 반영하고, 로그인 제한은 이 값을 사용합니다. 실제 배포에서는 ALB 서브넷 설정과 User 앞단의 신뢰 프록시 범위를 확인해야 합니다.
-- Gateway는 외부 User-Id·User-Role을 지운 뒤 I01의 검증 결과로 다시 설정합니다. User 자신의 보호 API는 자기 세션을 확인하고(`travelpay.auth.header-context.enabled: false`), 내부 I02·I03은 컨트롤러에서 전달된 회원 헤더를 직접 검사합니다.
+- Gateway는 외부 User-Id·User-Role을 지운 뒤 세션 확인 API의 검증 결과로 다시 설정합니다. User 자신의 보호 API는 자기 세션을 확인하고(`travelpay.auth.header-context.enabled: false`), 내부 회원 이름 조회(송금 수취인·충전 예금주)는 컨트롤러에서 전달된 회원 헤더를 직접 검사합니다.
 - `/internal/**`는 외부 Gateway 라우트에 없습니다. 배포에서는 User 포트를 외부에 열지 않고 허용된 내부 호출자만 접근시켜야 합니다. 회원 헤더 형식·본인 확인·횟수 제한은 호출 서비스 인증을 대신하지 않습니다. 외부에서 직접 접근할 수 있으면 헤더를 위조할 수 있으므로 내부망 격리가 필요합니다.

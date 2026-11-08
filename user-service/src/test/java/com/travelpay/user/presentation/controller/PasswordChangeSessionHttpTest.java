@@ -402,7 +402,7 @@ class PasswordChangeSessionHttpTest {
         var principal = (UserSessionPrincipal) authentication.getPrincipal();
         var updated = SecurityContextHolder.createEmptyContext();
         updated.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
-                new UserSessionPrincipal(principal.userId(), principal.role(), authenticatedAt), null, authentication.getAuthorities()));
+                new UserSessionPrincipal(principal.userId(), principal.role(), authenticatedAt, principal.sessionVersion()), null, authentication.getAuthorities()));
         stored.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, updated);
         repository.save(stored);
     }

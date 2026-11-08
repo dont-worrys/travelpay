@@ -25,7 +25,7 @@ public class InternalUserController {
 
     private final UserRealNameService userRealNameService;
 
-    /** 명세 I02: 요청자 회원 헤더를 검사한 뒤 경로의 수취인을 조회합니다. */
+    /** 송금 수취인 실명 조회: 요청자 회원 헤더를 검사한 뒤 경로의 수취인을 조회합니다. */
     @GetMapping("/internal/v1/users/{userId}/real-name")
     public ApiResponse<UserRealNameResponse> getRecipient(
             @PathVariable("userId") UUID recipientId, HttpServletRequest request) {
@@ -34,7 +34,7 @@ public class InternalUserController {
                 userRealNameService.getRecipient(requester.userId(), recipientId)));
     }
 
-    /** 명세 I03: 헤더의 요청자 ID와 경로의 대상 ID를 본인 확인에 전달합니다. */
+    /** 충전 예금주(본인 실명) 조회: 헤더의 요청자 ID와 경로의 대상 ID를 본인 확인에 전달합니다. */
     @GetMapping("/internal/v1/users/{userId}/funding-identity")
     public ApiResponse<UserRealNameResponse> getFundingIdentity(
             @PathVariable UUID userId, HttpServletRequest request) {

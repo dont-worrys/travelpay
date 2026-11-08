@@ -7,7 +7,7 @@ import com.travelpay.user.presentation.dto.SessionVerificationResponse;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/** 세션 확인 API(명세 I01): Gateway가 로그인이 필요한 요청을 업무 서비스로 넘기기 전에 부릅니다. */
+/** 세션 확인 API: Gateway가 로그인이 필요한 요청을 업무 서비스로 넘기기 전에 부릅니다. */
 @RestController
 public class InternalSessionController {
 

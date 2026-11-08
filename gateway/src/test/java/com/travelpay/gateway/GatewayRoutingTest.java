@@ -172,12 +172,14 @@ class GatewayRoutingTest {
         assertTrue(arrived.header("Cookie").isEmpty());
     }
 
-    @Test
-    void userServiceStillReceivesTheCookieOnItsProtectedRoutes() {
-        client().get().uri("/api/v1/users/me").header("Cookie", "SESSION=abc").exchange().expectStatus().isOk();
+    // 관리자 API도 User 라우트로 같은 방식(세션 확인 뒤 쿠키와 함께)으로 전달됨
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/v1/users/me", "/api/v1/admin/users", "/api/v1/admin/terms"})
+    void userServiceStillReceivesTheCookieOnItsProtectedRoutes(String path) {
+        client().get().uri(path).header("Cookie", "SESSION=abc").exchange().expectStatus().isOk();
 
         assertEquals(1, USER.received(SESSION_VERIFICATION).size());
-        var arrived = USER.received("/api/v1/users/me").getFirst();
+        var arrived = USER.received(path).getFirst();
         assertEquals(List.of("SESSION=abc"), arrived.header("Cookie"));
         assertEquals(List.of(MEMBER_ID.toString()), arrived.header("User-Id"));
     }
