@@ -11,8 +11,10 @@
 # 표본이 없거나 측정 구간 전체를 덮지 못하면(지표를 못 읽음, 수집기가 먼저 끝남) 0이나 일부 구간으로 채우지 않고 실패로 끝냅니다.
 #   연결 대기·사용 중 연결: Actuator hikaricp_connections_pending / _active의 평균·최대
 #   연결 얻는 시간: hikaricp_connections_acquire_seconds 합계·횟수의 구간 차이로 평균 (_max는 앞 실행 값을 들고 있어 쓰지 않음)
+#   연결 얻은 횟수: hikaricp_connections_acquire_seconds 횟수(_count)의 구간 차이. 캐시가 DB 연결을 얼마나 덜 빌리는지 보여 준다 (수집기 포함)
 #   DB 활성 세션: pg_stat_activity에서 state=active인 세션 수(이 조회 자신은 제외)의 평균·최대
-#   환율 조회 쿼리 수: pg_stat_statements의 exchange_rates SELECT 호출 수 합 (예열·수집기 포함, 검산용)
+#   환율 조회 쿼리 수: pg_stat_statements의 exchange_rates SELECT 호출 수
+#     measure = 1초 표본의 구간 차이(측정 구간만, 수집기 포함), all = 적재 후 전체(예열 포함, 검산용)
 #   견적 행 수: exchange_quotes 행 수 (all = 예열 포함 전체, measure = created_at이 측정 구간 안). 환율 조회 측정이면 0
 #   캐시 조회 수: Actuator exchange_rate_cache_lookups_total{result=hit/miss/error}의 구간 차이 (통화 하나당 1). 캐시를 쓰지 않는 jar면 null
 set -euo pipefail
@@ -20,8 +22,9 @@ set -euo pipefail
 LABEL=${1:?LABEL(db/redis)을 주세요}
 VUS=${2:?VUS(50/100/300)를 주세요}
 HOURS=${3:-24}
-WARMUP_SECONDS=${WARMUP_SECONDS:-15}
-MEASURE_SECONDS=${MEASURE_SECONDS:-60}
+# 예열 30초: JIT·커넥션 풀·DB 버퍼·캐시가 자리 잡게. 측정 120초: 1초 표본이 충분하고 순간 흔들림이 묻히게
+WARMUP_SECONDS=${WARMUP_SECONDS:-30}
+MEASURE_SECONDS=${MEASURE_SECONDS:-120}
 SCRIPT=${SCRIPT:-rate-query.js}
 
 cd "$(dirname "$0")"
@@ -73,7 +76,9 @@ docker compose exec -T app sh -c "end=\$((\$(date +%s) + ${collect_seconds})); w
         END { flush() }' >"$hikari_samples" &
 hikari_pid=$!
 # DB 활성 세션: psql 하나를 띄워 두고 \watch로 1초마다 (매번 새로 띄우면 느려서 표본이 빠짐). 횟수(c)를 정해 스스로 끝나게 한다
-printf "SELECT extract(epoch FROM now())::bigint, count(*) FROM pg_stat_activity WHERE datname = 'travelpay' AND state = 'active' AND pid <> pg_backend_pid()\n\\watch i=1 c=%d\n" "$collect_seconds" \
+# 같은 조회에 환율 SELECT 누적 호출 수도 함께 읽어, 측정 구간만의 쿼리 수를 구간 차이로 구한다 (예열 호출이 섞이지 않게)
+# (printf 형식 문자열이라 LIKE의 %는 %%로 쓴다)
+printf "SELECT extract(epoch FROM now())::bigint, (SELECT count(*) FROM pg_stat_activity WHERE datname = 'travelpay' AND state = 'active' AND pid <> pg_backend_pid()), (SELECT coalesce(sum(calls), 0) FROM public.pg_stat_statements WHERE query ILIKE 'select%%' AND query ILIKE '%%exchange_rates%%' AND query NOT ILIKE '%%pg_stat_statements%%')\n\\watch i=1 c=%d\n" "$collect_seconds" \
     | docker compose exec -T measure-postgres psql -U exchange_app -d travelpay -qAt -F $'\t' >"$session_samples" &
 session_pid=$!
 
@@ -131,9 +136,9 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         }
     }
     file == 2 {
-        if (m == 0) d0 = $1
+        if (m == 0) { d0 = $1; q0 = $3 }
         else if ($1 - d1 > dGap) dGap = $1 - d1
-        d1 = $1
+        d1 = $1; q1 = $3
         m++; ses += $2
         if ($2 > sesMax) sesMax = $2
     }
@@ -169,6 +174,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         printf "  \"hikariPending\": {\"avg\": %.2f, \"max\": %d},\n", (n ? pend / n : 0), pendMax
         printf "  \"hikariActive\": {\"avg\": %.2f, \"max\": %d},\n", (n ? act / n : 0), actMax
         printf "  \"acquireMsAvg\": %.3f,\n", acqAvgMs
+        printf "  \"acquireCount\": %d,\n", c1 - c0
         # PC 전체(system)와 환전 서비스 JVM(app)의 CPU 사용률. 한 PC에서 k6·Docker·DB와 CPU를 나눠 쓰는지 본다
         printf "  \"cpuPercent\": {\"systemAvg\": %.1f, \"systemMax\": %.1f, \"appAvg\": %.1f},\n", sys / n * 100, sysMax * 100, proc / n * 100
         printf "  \"dbActiveSessions\": {\"avg\": %.2f, \"max\": %d},\n", (m ? ses / m : 0), sesMax
@@ -176,7 +182,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         # 측정 구간 동안 늘어난 캐시 조회 수 (통화 하나당 1). 캐시를 쓰지 않는 jar면 null
         if (k > 0) printf "  \"cacheLookups\": {\"hit\": %d, \"miss\": %d, \"error\": %d},\n", hit1 - hit0, miss1 - miss0, err1 - err0
         else printf "  \"cacheLookups\": null,\n"
-        printf "  \"rateSelectCalls\": %d\n", selects
+        printf "  \"rateSelectCalls\": {\"measure\": %d, \"all\": %d}\n", q1 - q0, selects
         printf "}\n"
     }' "$hikari_samples" "$session_samples" >"$summary.tmp" || {
         # 검사에 실패한 측정은 k6 결과도 지운다. 남겨 두면 실패한 측정의 응답 결과를 유효한 결과로 오인할 수 있음
