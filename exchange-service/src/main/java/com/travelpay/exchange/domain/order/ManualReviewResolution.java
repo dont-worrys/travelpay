@@ -12,12 +12,10 @@ import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
  * MANUAL_REVIEW 주문을 원장 단건 조회 결과로 정리하는 도메인 규칙과 확정 값입니다.
  * 단건 조회(예상 처리 결과)와 처리 실행 API가 모두 {@link #decide}를 사용해 같은 기준으로 판단합니다.
  *
- * <ul>
- *   <li>POSTED + 항목 일치: MANUAL_REVIEW 사유와 관계없이 COMPLETED (원장 거래 ID 저장)</li>
- *   <li>POSTED + 항목 불일치: 처리 불가(409 원장 보정 필요, MANUAL_REVIEW 유지)</li>
- *   <li>REJECTED: FAILED (아는 거절 사유 3종이면 그대로, 모르는 사유이거나 LEDGER_CONFLICT 주문이면 PROCESSING_ERROR)</li>
- *   <li>기록 없음(NotFound): 재시도하지 않고 FAILED(NOT_PROCESSED)로 취소</li>
- * </ul>
+ * - POSTED + 항목 일치: MANUAL_REVIEW 사유와 관계없이 COMPLETED (원장 거래 ID 저장)
+ * - POSTED + 항목 불일치: 처리 불가(409 원장 보정 필요, MANUAL_REVIEW 유지)
+ * - REJECTED: FAILED (아는 거절 사유 3종이면 그대로, 모르는 사유이거나 LEDGER_CONFLICT 주문이면 PROCESSING_ERROR)
+ * - 기록 없음: 재시도하지 않고 FAILED(NOT_PROCESSED)로 취소
  *
  * @param status                    바뀔 주문 상태 (COMPLETED 또는 FAILED)
  * @param orderLedgerTransactionId  주문 테이블(exchange_orders.ledger_transaction_id)에 저장할 원장 거래 ID (COMPLETED일 때만 값 있음)
@@ -74,7 +72,7 @@ public record ManualReviewResolution(
         return switch (lookup) {
             case LedgerLookupResult.Posted posted -> decidePosted(order.expectedLedgerEntries(), posted);
             case LedgerLookupResult.Rejected rejected -> decideRejected(reviewReason, rejected);
-            case LedgerLookupResult.NotFound ignored -> Decision.NotFound.INSTANCE;
+            case LedgerLookupResult.NotFound ignored -> Decision.Resolvable.notProcessed();
             case LedgerLookupResult.Unavailable unavailable ->
                     throw new IllegalArgumentException("cannot decide when ledger lookup is unavailable: "
                             + unavailable.cause());
@@ -86,12 +84,7 @@ public record ManualReviewResolution(
         if (!sameEntries(expectedEntries, posted.entries())) {
             return new Decision.EntryMismatch(posted.transactionId(), expectedEntries, posted.entries());
         }
-        return new Decision.Resolvable(
-                ExchangeOrderStatus.COMPLETED,
-                null,
-                ManualReviewResolutionReason.LEDGER_POSTED,
-                posted.transactionId()
-        );
+        return Decision.Resolvable.completed(posted.transactionId());
     }
 
     private static Decision decideRejected(ManualReviewReason reviewReason, LedgerLookupResult.Rejected rejected) {
@@ -100,12 +93,7 @@ public record ManualReviewResolution(
                 ? ExchangeFailureReason.PROCESSING_ERROR
                 : ExchangeFailureReason.fromLedgerRejectReason(rejected.rejectReason())
                         .orElse(ExchangeFailureReason.PROCESSING_ERROR);
-        return new Decision.Resolvable(
-                ExchangeOrderStatus.FAILED,
-                failureReason,
-                ManualReviewResolutionReason.LEDGER_REJECTED,
-                rejected.transactionId()
-        );
+        return Decision.Resolvable.rejected(failureReason, rejected.transactionId());
     }
 
     /** 기대 항목과 원장 기록 항목을 순서와 관계없이(개수 포함) 비교합니다. */
@@ -159,19 +147,6 @@ public record ManualReviewResolution(
 
         boolean resolvable();
 
-        /** 원장에 기록이 없어 FAILED(NOT_PROCESSED)로 취소하는 결정입니다. */
-        final class NotFound {
-            private static final Resolvable INSTANCE = new Resolvable(
-                    ExchangeOrderStatus.FAILED,
-                    ExchangeFailureReason.NOT_PROCESSED,
-                    ManualReviewResolutionReason.LEDGER_NOT_FOUND,
-                    null
-            );
-
-            private NotFound() {
-            }
-        }
-
         /**
          * 주문을 COMPLETED 또는 FAILED로 확정할 수 있는 경우입니다.
          *
@@ -190,6 +165,24 @@ public record ManualReviewResolution(
             public Resolvable {
                 Objects.requireNonNull(toStatus, "toStatus");
                 Objects.requireNonNull(reason, "reason");
+            }
+
+            /** 원장에 주문과 같은 항목으로 반영되어 있어 COMPLETED로 확정합니다. */
+            static Resolvable completed(UUID ledgerTransactionId) {
+                return new Resolvable(ExchangeOrderStatus.COMPLETED, null,
+                        ManualReviewResolutionReason.LEDGER_POSTED, ledgerTransactionId);
+            }
+
+            /** 원장이 거절한 거래라 FAILED로 확정합니다. */
+            static Resolvable rejected(ExchangeFailureReason failureReason, UUID ledgerTransactionId) {
+                return new Resolvable(ExchangeOrderStatus.FAILED, failureReason,
+                        ManualReviewResolutionReason.LEDGER_REJECTED, ledgerTransactionId);
+            }
+
+            /** 원장에 기록이 없어 재시도하지 않고 FAILED(NOT_PROCESSED)로 취소합니다. */
+            static Resolvable notProcessed() {
+                return new Resolvable(ExchangeOrderStatus.FAILED, ExchangeFailureReason.NOT_PROCESSED,
+                        ManualReviewResolutionReason.LEDGER_NOT_FOUND, null);
             }
 
             @Override
