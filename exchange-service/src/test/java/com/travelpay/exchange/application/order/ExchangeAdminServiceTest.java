@@ -88,11 +88,11 @@ class ExchangeAdminServiceTest {
     @Test
     void getManualReviewsValidatesPageParameters() {
         BusinessException e1 = assertThrows(BusinessException.class,
-                () -> adminService.getManualReviews(null, -1, 20));
+                () -> adminService.getManualReviews(ACTOR_ID, null, -1, 20));
         assertEquals(CommonErrorCode.INVALID_REQUEST, e1.getErrorCode());
 
         BusinessException e2 = assertThrows(BusinessException.class,
-                () -> adminService.getManualReviews(null, 0, 0));
+                () -> adminService.getManualReviews(ACTOR_ID, null, 0, 0));
         assertEquals(CommonErrorCode.INVALID_REQUEST, e2.getErrorCode());
     }
 
@@ -101,7 +101,7 @@ class ExchangeAdminServiceTest {
         when(orderQueryRepository.findManualReviews(eq(ManualReviewReason.LEDGER_CONFLICT), eq(PageRequest.of(0, 100))))
                 .thenReturn(new PageImpl<>(List.of()));
 
-        adminService.getManualReviews(ManualReviewReason.LEDGER_CONFLICT, 0, 500);
+        adminService.getManualReviews(ACTOR_ID, ManualReviewReason.LEDGER_CONFLICT, 0, 500);
 
         verify(orderQueryRepository).findManualReviews(ManualReviewReason.LEDGER_CONFLICT, PageRequest.of(0, 100));
     }

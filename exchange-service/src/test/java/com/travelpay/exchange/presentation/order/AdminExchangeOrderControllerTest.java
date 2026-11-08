@@ -90,7 +90,7 @@ class AdminExchangeOrderControllerTest {
     void listManualReviewsReturns200WithPageResponse() throws Exception {
         ExchangeOrder order = order();
         ExchangeManualReviewView view = new ExchangeManualReviewView(order, ManualReviewReason.LEDGER_CONFLICT);
-        when(adminService.getManualReviews(eq(ManualReviewReason.LEDGER_CONFLICT), eq(0), eq(20)))
+        when(adminService.getManualReviews(eq(MASTER_ID), eq(ManualReviewReason.LEDGER_CONFLICT), eq(0), eq(20)))
                 .thenReturn(new PageImpl<>(List.of(view)));
 
         mockMvc.perform(get("/api/v1/admin/exchanges/manual-reviews")

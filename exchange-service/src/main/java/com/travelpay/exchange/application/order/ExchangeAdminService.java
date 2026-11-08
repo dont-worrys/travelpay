@@ -47,21 +47,28 @@ public class ExchangeAdminService {
      * MANUAL_REVIEW 주문 목록을 오래된 순으로 조회합니다.
      */
     @Transactional(readOnly = true)
-    public Page<ExchangeManualReviewView> getManualReviews(ManualReviewReason reviewReason, int page, int size) {
+    public Page<ExchangeManualReviewView> getManualReviews(UUID actorId, ManualReviewReason reviewReason,
+                                                           int page, int size) {
+        Objects.requireNonNull(actorId, "actorId");
         if (page < 0 || size < 1) {
             throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
         }
+        log.info("관리자 MANUAL_REVIEW 목록 조회: actorId={}, reviewReason={}, page={}, size={}",
+                actorId, reviewReason, page, size);
         int validSize = Math.min(size, MAX_PAGE_SIZE);
         return orderQueryRepository.findManualReviews(reviewReason, PageRequest.of(page, validSize));
     }
 
     /**
      * 단건 주문 및 원장 조회 결과, 예상 처리 결과를 조회합니다.
+     * 트랜잭션을 걸지 않습니다. 걸면 원장 HTTP 호출(최대 수 초)을 기다리는 동안 DB 연결을 붙잡습니다.
+     * 안의 DB 조회는 각각 쿼리 하나라 같은 시점으로 묶을 필요가 없습니다.
      */
-    @Transactional(readOnly = true)
     public AdminExchangeReviewDetailResult getManualReview(UUID actorId, UUID orderId) {
         Objects.requireNonNull(actorId, "actorId");
         Objects.requireNonNull(orderId, "orderId");
+        // 누가 어떤 주문을 봤는지 남깁니다. 처리(resolve)는 상태 이력에 관리자 ID가 남지만, 조회는 DB에 남지 않습니다.
+        log.info("관리자 MANUAL_REVIEW 주문 조회: actorId={}, orderId={}", actorId, orderId);
 
         ExchangeOrder order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new BusinessException(ExchangeOrderErrorCode.ORDER_NOT_FOUND));

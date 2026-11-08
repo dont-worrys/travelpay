@@ -37,7 +37,8 @@ public class ExchangeOrderController {
      * 견적으로 환전·재환전을 신청합니다. 응답 코드는 주문 상태로 정해, 같은 멱등 키 재요청도 같은 상태면 처음과 같은 응답을 받습니다.
      * - COMPLETED: 200
      * - PROCESSING·MANUAL_REVIEW: 202 (아직 확정 아님, 조회 API로 결과 확인)
-     * - FAILED: 422 + 실패 사유별 EXCHANGE_LEDGER_REJECTED_* 오류 (송금과 같은 방식)
+     * - FAILED: 422 + 실패 사유별 오류 (송금과 같은 방식). 원장 거절은 EXCHANGE_LEDGER_REJECTED_*,
+     *   관리자 처리로 취소된 주문은 EXCHANGE_NOT_PROCESSED(원장 기록 없음)·EXCHANGE_PROCESSING_ERROR(그 밖의 오류)
      * 지갑을 확인하지 못하면 주문을 만들지 않고 503입니다.
      * - 원장 장애(지갑이 잔액을 원장에서 읽지 못함): EXCHANGE_LEDGER_UNAVAILABLE
      * - 그 밖의 지갑 서비스 실패: EXCHANGE_WALLET_SERVICE_UNAVAILABLE
