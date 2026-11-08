@@ -1,10 +1,14 @@
 package com.travelpay.exchange.infrastructure.external.ledger;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 import com.travelpay.common.feign.FeignErrors;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.exchange.domain.ledger.LedgerClient;
+import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult.InvalidKind;
 import com.travelpay.exchange.domain.ledger.LedgerPosting;
@@ -16,13 +20,21 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 /**
- * 원장 거래 등록 응답을 4분류로 바꿉니다. 예외를 던지지 않습니다. 원장 응답 본문은 결과·로그에 싣지 않고 error.code만 봅니다.
+ * 원장 거래 등록·조회 응답을 도메인 결과로 바꿉니다. 예외를 던지지 않습니다. 원장 응답 본문은 결과·로그에 싣지 않고 error.code만 봅니다.
+ *
+ * [거래 등록 (post)]
  * - 201·200 + 거래 ID + POSTED: Posted
  * - 422 + LEDGER_REJECTED_*: Rejected (같은 reference로 다시 보내도 같은 422)
  * - 재시도 신호(Retry-After)가 있는 응답, 4xx로 거절되지 않은 실패(타임아웃·연결 실패·5xx·2xx인데 본문을 해석하지 못함): Unknown
  *   원장이 이미 기록했을 수 있으므로 실패로 끝내지 않고 같은 요청을 다시 보내 결과를 확인한다.
  * - 400: Invalid(BAD_REQUEST), 409: Invalid(CONFLICT)
  * - 그 밖의 4xx·따라가지 않은 3xx·본문은 읽었지만 내용이 계약과 다른 성공 응답: Invalid(MALFORMED_RESPONSE)
+ *
+ * [단건 조회 (findByOrderId)]
+ * - 200 + POSTED + 유효한 항목: Posted
+ * - 200 + REJECTED: Rejected
+ * - 404 + LEDGER_TRANSACTION_NOT_FOUND: NotFound (기록 없음)
+ * - 코드 없는 404·그 밖의 4xx·5xx·연결 실패·POSTED인데 항목 없음·알 수 없는 상태·reference 불일치: Unavailable (결론 내리지 않음)
  */
 @Slf4j
 @Component
@@ -30,7 +42,9 @@ import org.springframework.stereotype.Component;
 public class LedgerClientAdapter implements LedgerClient {
 
     private static final String POSTED = "POSTED";
+    private static final String REJECTED = "REJECTED";
     private static final String REJECTED_PREFIX = "LEDGER_REJECTED_";
+    private static final String TRANSACTION_NOT_FOUND_CODE = "LEDGER_TRANSACTION_NOT_FOUND";
 
     private final LedgerFeignClient feignClient;
 
@@ -50,6 +64,75 @@ public class LedgerClientAdapter implements LedgerClient {
             return invalid(posting, InvalidKind.MALFORMED_RESPONSE, "성공 응답 형식 이상");
         }
         return new LedgerPostResult.Posted(data.transactionId());
+    }
+
+    /**
+     * 주문 ID로 원장 거래를 단건 조회합니다.
+     * 404 + LEDGER_TRANSACTION_NOT_FOUND일 때만 NotFound(기록 없음)이고,
+     * 그 밖의 오류나 비정상 응답은 주문을 잘못 취소하지 않도록 모두 Unavailable로 돌려줍니다.
+     */
+    @Override
+    public LedgerLookupResult findByOrderId(UUID orderId) {
+        Objects.requireNonNull(orderId, "orderId");
+        ApiResponse<LedgerTransactionResponse> response;
+        try {
+            response = feignClient.findByReference(RegisterLedgerTransactionRequest.REFERENCE_TYPE, orderId);
+        } catch (FeignException e) {
+            if (e.status() == 404 && FeignErrors.hasErrorCode(e, TRANSACTION_NOT_FOUND_CODE)) {
+                return new LedgerLookupResult.NotFound();
+            }
+            String cause = cause(e);
+            log.warn("원장 거래 단건 조회에 실패했습니다: orderId={}, cause={}", orderId, cause);
+            return new LedgerLookupResult.Unavailable(cause);
+        }
+
+        LedgerTransactionResponse data = response == null || !response.success() ? null : response.data();
+        if (data == null || data.transactionId() == null || data.status() == null) {
+            return unavailable(orderId, "조회 응답 형식 이상");
+        }
+        if ((data.referenceType() != null
+                && !RegisterLedgerTransactionRequest.REFERENCE_TYPE.equals(data.referenceType()))
+                || (data.referenceId() != null && !orderId.equals(data.referenceId()))) {
+            return unavailable(orderId, "조회 응답 reference 불일치");
+        }
+        return switch (data.status()) {
+            case POSTED -> toPostedLookup(orderId, data);
+            case REJECTED -> new LedgerLookupResult.Rejected(data.transactionId(), data.rejectReason());
+            default -> unavailable(orderId, "알 수 없는 거래 상태: " + data.status());
+        };
+    }
+
+    private static LedgerLookupResult toPostedLookup(UUID orderId, LedgerTransactionResponse data) {
+        if (data.entries() == null || data.entries().isEmpty()) {
+            return unavailable(orderId, "POSTED 거래에 항목 없음");
+        }
+        List<LedgerLookupResult.Entry> entries = new ArrayList<>(data.entries().size());
+        for (LedgerTransactionResponse.Entry entry : data.entries()) {
+            if (entry == null
+                    || entry.ownerType() == null
+                    || entry.currency() == null
+                    || entry.direction() == null
+                    || entry.amount() == null
+                    || entry.amount() <= 0
+                    || entry.entryType() == null) {
+                return unavailable(orderId, "POSTED 거래 항목 값 이상");
+            }
+            entries.add(new LedgerLookupResult.Entry(
+                    entry.ownerType(),
+                    entry.walletId(),
+                    entry.accountType(),
+                    entry.currency(),
+                    entry.direction(),
+                    entry.amount(),
+                    entry.entryType()
+            ));
+        }
+        return new LedgerLookupResult.Posted(data.transactionId(), entries);
+    }
+
+    private static LedgerLookupResult unavailable(UUID orderId, String detail) {
+        log.error("원장 거래 단건 조회 응답이 계약과 다릅니다: orderId={}, detail={}", orderId, detail);
+        return new LedgerLookupResult.Unavailable(detail);
     }
 
     /**
