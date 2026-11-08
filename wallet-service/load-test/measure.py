@@ -44,6 +44,9 @@ PG_COLUMNS = 6
 MASTER = member_headers("00000000-0000-4000-8000-00000000a0a0", "MASTER")   # 관리자 대사용(측정 전용 ID)
 RECONCILIATION_GRACE_SECONDS = 10   # 지갑 실행 인자 grace=10s와 같게
 RECONCILIATION_URL = f"{WALLET_URL}/api/v1/admin/charges/reconciliations"
+RECONCILIATION_FIELDS = ("runId", "status", "targetCount", "matchedCount", "mismatchCount", "unverifiableCount")
+K6_FIELDS = ("requests", "droppedIterations", "errorResponses", "latencyMs", "statusCounts")
+K6_STATUS_KEYS = ("202", "200", "4xx", "5xx", "noResponse")
 
 
 def iso(moment):
@@ -83,9 +86,16 @@ class ServiceSampler(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.samples = []
+        self.error = None
         self.stop = threading.Event()
 
     def run(self):
+        try:
+            self._run()
+        except Exception as error:   # 표본이 중간에 끊기면 실패 사유로 남긴다
+            self.error = repr(error)
+
+    def _run(self):
         while not self.stop.is_set():
             started = time.time()
             snapshot = {}
@@ -111,6 +121,12 @@ class DbSampler(threading.Thread):
         self.stop = threading.Event()
 
     def run(self):
+        try:
+            self._run()
+        except Exception as error:   # 출력 파싱 등에서 멈추면 표본이 끊긴 것으로 남긴다
+            self.error = repr(error)
+
+    def _run(self):
         script = f"{PG_QUERY}\n\\watch i=1 c={self.CHUNK}\n"
         while not self.stop.is_set():
             try:
@@ -124,7 +140,7 @@ class DbSampler(threading.Thread):
                 if len(parts) == PG_COLUMNS and parts[0].isdigit():
                     self.samples.append(tuple(int(part) for part in parts))
             if done.returncode != 0:
-                self.error = done.stderr.strip()[:300]
+                self.error = f"종료 코드 {done.returncode}: {done.stderr.strip()[:300]}"
                 return
 
 
@@ -169,6 +185,15 @@ def service_metrics(samples, start, end):
         result["systemCpuPercent"] = {"avg": round(sum(system) / len(system) * 100, 1),
                                       "max": round(max(system) * 100, 1)}
     return result
+
+
+def incomplete_services(samples, start, end):
+    """HTTP 평균 계산에 쓰는 구간 시작·끝 경계 표본(service_metrics의 nearest)이 없는 서비스"""
+    window = [sample for sample in samples if start <= sample[0] <= end]
+    if not window:
+        return list(SERVICES)
+    first, last = nearest(samples, start), nearest(samples, end)
+    return [name for name in SERVICES if not (first[1].get(name) and last[1].get(name))]
 
 
 def db_metrics(sampler, start, end):
@@ -365,7 +390,15 @@ def main():
         service_sampler.stop.set()
         db_sampler.stop.set()
         raise SystemExit(f"k6 실행 실패(종료 코드 {k6.returncode}). 결과 파일이 없습니다: {k6_result}")
-    summary = json.loads(k6_result.read_text(encoding="utf-8"))
+    try:
+        summary = json.loads(k6_result.read_text(encoding="utf-8"))
+    except ValueError as error:
+        raise SystemExit(f"k6 결과 파일을 읽지 못했습니다: {k6_result} ({error})")
+    missing = [key for key in K6_FIELDS if key not in summary]
+    missing += [f"latencyMs.{key}" for key in ("p50", "p95") if key not in (summary.get("latencyMs") or {})]
+    missing += [f"statusCounts.{key}" for key in K6_STATUS_KEYS if key not in (summary.get("statusCounts") or {})]
+    if missing:
+        raise SystemExit(f"k6 결과 파일에 필드가 없습니다: {', '.join(missing)} ({k6_result})")
 
     print(f"[3/6] 종결 대기 (최대 {args.drain_timeout}초)")
     drain_seconds = wait_terminal(data, since, args.drain_timeout)
@@ -406,10 +439,24 @@ def main():
     accepted_202 = summary["statusCounts"]["202"]
     if charges["accepted"] != accepted_202:
         reasons.append(f"DB 접수 {charges['accepted']}건 ≠ k6 202 응답 {accepted_202}건")
-    window = [snapshot for moment, snapshot in service_sampler.samples if window_start <= moment <= window_end]
-    unscraped = [name for name in SERVICES if not any(snapshot.get(name) for snapshot in window)]
-    if unscraped:
-        reasons.append(f"서비스 지표 수집 실패: {', '.join(unscraped)}")
+    responded = sum(summary["statusCounts"][key] for key in K6_STATUS_KEYS)
+    if responded != args.count:
+        reasons.append(f"k6 응답 집계 {responded}건 ≠ --count {args.count}건")
+    incomplete = incomplete_services(service_sampler.samples, window_start, window_end)
+    if incomplete:
+        reasons.append(f"서비스 지표 구간 불완전: {', '.join(incomplete)}")
+    if service_sampler.error:
+        reasons.append(f"서비스 표본 수집 중단: {service_sampler.error}")
+    if db_sampler.error:
+        reasons.append(f"DB 표본 수집 실패: {db_sampler.error}")
+    elif db_sampler.is_alive():
+        reasons.append("DB 표본 수집이 끝나지 않음 (마지막 표본 누락)")
+    elif not metrics["db"].get("samples"):
+        reasons.append("DB 표본이 측정 구간에 없음")
+    completed = charges["statuses"].get("COMPLETED", {}).get("count", 0)
+    latency_count = (charges.get("completionLatencyMs") or {}).get("count", 0)
+    if completed != latency_count:
+        reasons.append(f"완료 지연 집계 {latency_count}건 ≠ COMPLETED {completed}건 (상태 이력 누락)")
 
     if drain_seconds is None:
         reasons.append(f"{args.drain_timeout}초 안에 종결되지 않은 충전이 있음 (출금 정합성·대사 생략)")
@@ -417,6 +464,8 @@ def main():
         print("[6/6] 대사: 생략")
     elif charges["accepted"] == 0:
         reasons.append("접수된 충전이 없음")
+    elif charges.get("lastTerminalEpoch") is None:
+        reasons.append("종결 상태 이력이 없음 (출금 정합성·대사 생략)")
     else:
         print("[5/6] 출금 정합성 (mock-bank 측정 계좌)")
         metrics["bankConsistency"] = bank_consistency(data, since, charges["statuses"], balance_before)
@@ -424,10 +473,16 @@ def main():
         print("[6/6] 대사 (POST /api/v1/admin/charges/reconciliations)")
         metrics["reconciliation"] = reconcile(charges["firstCreatedAt"], charges["lastTerminalEpoch"])
         run = metrics["reconciliation"].get("summary")
+        missing = [key for key in RECONCILIATION_FIELDS if run and run.get(key) is None]
         if not run:
             reasons.append(f"대사 실행 실패 HTTP {metrics['reconciliation']['httpStatus']}")
-        elif run["status"] != "COMPLETED" or run["mismatchCount"] or run["unverifiableCount"]:
-            reasons.append(f"대사 {run['status']}, 어긋남 {run['mismatchCount']}건, 판정 보류 {run['unverifiableCount']}건")
+        elif missing:
+            reasons.append(f"대사 응답 필드 누락: {', '.join(missing)}")
+        else:
+            if run["targetCount"] < charges["accepted"]:
+                reasons.append(f"대사 대상 {run['targetCount']}건 < 측정 접수 {charges['accepted']}건")
+            if run["status"] != "COMPLETED" or run["mismatchCount"] or run["unverifiableCount"]:
+                reasons.append(f"대사 {run['status']}, 어긋남 {run['mismatchCount']}건, 판정 보류 {run['unverifiableCount']}건")
 
     metrics["failures"] = reasons
     metrics_result.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -454,8 +509,9 @@ def print_brief(m):
     print(f"  상태 {statuses}")
     rec = (m.get("reconciliation") or {}).get("summary")
     if rec:
-        print(f"  대사 {rec['status']} 대상 {rec['targetCount']} 일치 {rec['matchedCount']} 어긋남 {rec['mismatchCount']}"
-              f" 보류 {rec['unverifiableCount']} ({m['reconciliation']['elapsedSeconds']}초)")
+        print(f"  대사 {rec.get('status')} 대상 {rec.get('targetCount')} 일치 {rec.get('matchedCount')}"
+              f" 어긋남 {rec.get('mismatchCount')} 보류 {rec.get('unverifiableCount')}"
+              f" ({m['reconciliation']['elapsedSeconds']}초)")
     print(f"  결과: results/{m['label']}-c{m['concurrency']}-metrics.json")
 
 

@@ -151,7 +151,16 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 
 서비스 지표 구간은 k6 시작 ~ 마지막 종결 시각입니다(접수 뒤에도 SAGA가 은행·원장을 부르므로).
 
-**종료 코드 1**: 202 외 응답, `dropped_iterations` > 0, `MANUAL_REVIEW` 1건 이상, `FAILED`·`REFUNDED` 1건 이상, DB 접수 건수(`charges.accepted`) ≠ k6 202 응답 건수, 측정 구간에 Prometheus 표본이 하나도 없는 서비스(user·wallet·ledger·mock-bank 중), 종결 대기 시간 초과, 출금 정합성 위반, 대사 status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상. 그 측정은 원인을 확인하기 전까지 기준값으로 쓰지 않습니다.
+**종료 코드 1** (그 측정은 원인을 확인하기 전까지 기준값으로 쓰지 않습니다):
+
+- 접수: 202 외 응답, `dropped_iterations` > 0, k6 응답 집계(202·200·4xx·5xx·무응답 합) ≠ `--count`, DB 접수 건수(`charges.accepted`) ≠ k6 202 응답 건수
+- 충전 결과: `MANUAL_REVIEW` 1건 이상, `FAILED`·`REFUNDED` 1건 이상, 종결 대기 시간 초과, 접수 0건, 종결 상태 이력 없음, 완료 지연 집계 건수 ≠ `COMPLETED` 건수
+- 서비스 지표: 구간 시작·끝 경계 표본이 없는 서비스(user·wallet·ledger·mock-bank 중), 서비스 표본 스레드 중단
+- DB 표본: 수집 실패(`docker exec` 0이 아닌 종료 코드 포함, `db.error`), 수집이 끝나지 않음, 측정 구간 표본 0개
+- 출금 정합성 위반
+- 대사: 실행 실패(HTTP 200 아님), 응답 필드 누락, 대상 건수 < 측정 접수 건수, status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상
+
+k6 결과 파일이 없거나 JSON이 아니거나 필수 필드가 빠지면 지표를 만들지 않고 바로 멈춥니다(종료 코드 1). psql 조회 실패도 같습니다.
 
 ## 주의
 
