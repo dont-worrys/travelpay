@@ -40,7 +40,7 @@ public class AdminExchangeOrderController {
             @RequestParam(defaultValue = "20") int size) {
         requireMaster(user);
         return ApiResponse.success(PageResponse.from(
-                adminService.getManualReviews(reviewReason, page, size),
+                adminService.getManualReviews(user.userId(), reviewReason, page, size),
                 AdminExchangeManualReviewResponse::from
         ));
     }
