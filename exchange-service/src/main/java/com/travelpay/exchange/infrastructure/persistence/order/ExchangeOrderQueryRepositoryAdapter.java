@@ -1,9 +1,9 @@
 package com.travelpay.exchange.infrastructure.persistence.order;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 import com.travelpay.exchange.application.order.ExchangeManualReviewView;
 import com.travelpay.exchange.application.order.ExchangeOrderListCondition;
@@ -43,13 +43,14 @@ class ExchangeOrderQueryRepositoryAdapter implements ExchangeOrderQueryRepositor
             return Page.empty(pageable);
         }
         List<UUID> orderIds = orders.map(ExchangeOrder::getId).toList();
-        Map<UUID, ManualReviewReason> reasonsByOrderId = historyJpaRepository
-                .findManualReviewReasonsByOrderIds(orderIds).stream()
-                .collect(Collectors.toMap(
-                        ManualReviewReasonProjection::getOrderId,
-                        p -> parseReason(p.getReason()),
-                        (first, second) -> first
-                ));
+        // 행은 최신순이라 주문마다 처음 나온 사유를 씁니다. 사유가 비었거나 모르는 값이면 null로 두고 목록은 그대로 보여 줍니다.
+        // Collectors.toMap은 값이 null이면 예외를 던져 한 행 때문에 목록 전체가 실패하므로, 반복문으로 담습니다.
+        Map<UUID, ManualReviewReason> reasonsByOrderId = new HashMap<>();
+        for (ManualReviewReasonProjection row : historyJpaRepository.findManualReviewReasonsByOrderIds(orderIds)) {
+            if (!reasonsByOrderId.containsKey(row.getOrderId())) {
+                reasonsByOrderId.put(row.getOrderId(), parseReason(row.getReason()));
+            }
+        }
         return orders.map(order -> new ExchangeManualReviewView(order, reasonsByOrderId.get(order.getId())));
     }
 

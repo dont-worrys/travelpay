@@ -55,6 +55,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -273,6 +274,32 @@ class ExchangeOrderListQueryIntegrationTest {
         Page<ExchangeManualReviewView> badRequest = queryRepository.findManualReviews(
                 ManualReviewReason.LEDGER_BAD_REQUEST, PageRequest.of(0, 10));
         assertEquals(0, badRequest.getTotalElements());
+    }
+
+    /** 이력의 사유가 비었거나 모르는 값(예: 이름이 바뀐 옛 사유)이어도 목록은 실패하지 않고 그 주문의 사유만 null로 보여 준다 */
+    @Test
+    void listsManualReviewsEvenWhenHistoryReasonIsMissingOrUnknown() {
+        UUID unknownReason = order(OWNER, Currency.KRW, Currency.JPY, T0);
+        orderRepository.settleIfProcessing(unknownReason,
+                Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), T0);
+        jdbcTemplate.update("INSERT INTO " + SCHEMA + ".exchange_order_status_histories"
+                + " (history_id, order_id, from_status, to_status, reason, changed_by_type, created_at)"
+                + " VALUES (?, ?, 'PROCESSING', 'MANUAL_REVIEW', 'RETIRED_REASON', 'SYSTEM', now())",
+                UUID.randomUUID(), unknownReason);
+
+        UUID missingReason = order(OWNER, Currency.KRW, Currency.JPY, T0.plusSeconds(10));
+        orderRepository.settleIfProcessing(missingReason,
+                Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), T0.plusSeconds(10));
+        jdbcTemplate.update("INSERT INTO " + SCHEMA + ".exchange_order_status_histories"
+                + " (history_id, order_id, from_status, to_status, reason, changed_by_type, created_at)"
+                + " VALUES (?, ?, 'PROCESSING', 'MANUAL_REVIEW', NULL, 'SYSTEM', now())",
+                UUID.randomUUID(), missingReason);
+
+        Page<ExchangeManualReviewView> page = queryRepository.findManualReviews(null, PageRequest.of(0, 10));
+
+        assertEquals(2, page.getTotalElements());
+        assertNull(page.getContent().get(0).reviewReason());
+        assertNull(page.getContent().get(1).reviewReason());
     }
 
     private String explainWithoutSeqScan(String query) {
