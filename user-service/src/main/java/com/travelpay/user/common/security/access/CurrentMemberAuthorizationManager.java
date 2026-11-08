@@ -29,6 +29,7 @@ import org.springframework.security.web.access.intercept.RequestAuthorizationCon
  *  Spring Security가 "이 요청을 통과시킬까?"를 물을 때 답하는 인가 판단기
  *   세션에 저장된 로그인 당시 정보가 아니라, 지금 DB에 있는 회원 상태와 역할로 판단
  *  보호 요청마다 DB의 현재 회원 상태·권한을 확인하고 이번 요청의 인증 정보를 맞춥니다.
+ *  세션 버전이 DB 값과 다르면(관리자의 세션 종료·정지 이후) 다시 로그인하도록 401로 거절합니다.
  */
 public final class CurrentMemberAuthorizationManager implements AuthorizationManager<RequestAuthorizationContext> {
 
@@ -65,9 +66,10 @@ public final class CurrentMemberAuthorizationManager implements AuthorizationMan
             return new AuthorizationDecision(true);
         }
 
-        var current = requireActive(principal);
-        // 새 컨텍스트만 만들어 현재 요청에 적용합니다. 로그인 시각·세션 ID·CSRF는 갱신하지 않습니다.
-        var refreshed = new UserSessionPrincipal(current.userId(), current.role(), principal.authenticatedAt());
+        var current = requireActiveSession(principal);
+        // 새 컨텍스트만 만들어 현재 요청에 적용합니다. 로그인 시각·세션 버전·세션 ID·CSRF는 갱신하지 않습니다.
+        var refreshed = new UserSessionPrincipal(current.userId(), current.role(), principal.authenticatedAt(),
+                principal.sessionVersion());
         var updated = UsernamePasswordAuthenticationToken.authenticated(refreshed, null,
                 List.of(new SimpleGrantedAuthority("ROLE_" + current.role().name())));
         var refreshedContext = SecurityContextHolder.createEmptyContext();
@@ -76,9 +78,9 @@ public final class CurrentMemberAuthorizationManager implements AuthorizationMan
         return new AuthorizationDecision(mode != Mode.MASTER || current.role() == AuthRole.MASTER);
     }
 
-    private AuthenticatedUser requireActive(UserSessionPrincipal principal) {
+    private AuthenticatedUser requireActiveSession(UserSessionPrincipal principal) {
         try {
-            return currentMemberService.requireActive(principal.userId());
+            return currentMemberService.requireActiveSession(principal.userId(), principal.sessionVersion());
         }
         catch (BusinessException exception) {
             var code = exception.getErrorCode();

@@ -229,7 +229,7 @@ class InternalSessionControllerIntegrationTest {
     private MockHttpSession sessionOf(UUID userId, AuthRole roleAtLogin) {
         var securityContext = SecurityContextHolder.createEmptyContext();
         securityContext.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
-                new UserSessionPrincipal(userId, roleAtLogin, AT), null,
+                new UserSessionPrincipal(userId, roleAtLogin, AT, 0L), null,
                 List.of(new SimpleGrantedAuthority("ROLE_" + roleAtLogin.name()))));
         var session = new MockHttpSession(context.getServletContext());
         session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, securityContext);

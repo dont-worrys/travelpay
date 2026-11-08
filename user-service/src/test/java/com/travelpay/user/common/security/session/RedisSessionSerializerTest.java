@@ -1,6 +1,8 @@
 package com.travelpay.user.common.security.session;
 
+import java.io.IOException;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.UUID;
 
 import com.travelpay.common.auth.AuthRole;
@@ -10,11 +12,14 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.data.redis.serializer.JdkSerializationRedisSerializer;
 import org.springframework.data.redis.serializer.SerializationException;
+import org.springframework.security.core.context.SecurityContext;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -27,10 +32,25 @@ class RedisSessionSerializerTest {
     void existingJdkSerializedValuesRemainCompatibleInBothDirections() {
         var old = new JdkSerializationRedisSerializer();
         var principal = new UserSessionPrincipal(UUID.randomUUID(), AuthRole.USER,
-                Instant.parse("2026-10-30T00:00:00Z"));
+                Instant.parse("2026-10-30T00:00:00Z"), 0L);
 
         assertEquals(principal, serializer.deserialize(old.serialize(principal)));
         assertEquals(principal, old.deserialize(serializer.serialize(principal)));
+    }
+
+    /** 세션 버전을 추가하기 전 코드가 Redis에 저장한 로그인 정보(MASTER, 2026-11-01 로그인)를 그대로 읽습니다. */
+    @Test
+    void aLoginSessionStoredBeforeSessionVersionsExistedIsReadAsVersionZero() throws IOException {
+        byte[] stored;
+        try (var fixture = getClass().getResourceAsStream("/session/login-context-before-session-version.b64")) {
+            stored = Base64.getDecoder().decode(new String(fixture.readAllBytes(), US_ASCII).strip());
+        }
+
+        var context = assertInstanceOf(SecurityContext.class, serializer.deserialize(stored));
+
+        assertEquals(new UserSessionPrincipal(UUID.fromString("550e8400-e29b-41d4-a716-446655440000"),
+                AuthRole.MASTER, Instant.parse("2026-11-01T00:00:00Z"), 0L),
+                context.getAuthentication().getPrincipal());
     }
 
     @Test
@@ -53,7 +73,7 @@ class RedisSessionSerializerTest {
     @ExtendWith(OutputCaptureExtension.class)
     void aSessionClassMovedByADeploymentIsReportedByItsCauseType(CapturedOutput output) {
         var principal = new UserSessionPrincipal(UUID.randomUUID(), AuthRole.USER,
-                Instant.parse("2026-10-30T00:00:00Z"));
+                Instant.parse("2026-10-30T00:00:00Z"), 0L);
         // 같은 길이의 다른 패키지 이름으로 바꿔, 클래스를 옮긴 배포 뒤 기존 세션을 읽는 상황을 만듭니다.
         var moved = new String(serializer.serialize(principal), ISO_8859_1)
                 .replace("com.travelpay.user.common.security.session.UserSessionPrincipal",

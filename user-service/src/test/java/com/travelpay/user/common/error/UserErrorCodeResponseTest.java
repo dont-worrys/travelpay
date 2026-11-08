@@ -82,7 +82,15 @@ class UserErrorCodeResponseTest {
                 Arguments.of(UserErrorCode.RECIPIENT_NOT_FOUND, 404,
                         "USER_RECIPIENT_NOT_FOUND", "수취인을 찾을 수 없습니다."),
                 Arguments.of(UserErrorCode.NOT_FOUND, 404,
-                        "USER_NOT_FOUND", "회원을 찾을 수 없습니다.")
+                        "USER_NOT_FOUND", "회원을 찾을 수 없습니다."),
+                Arguments.of(UserErrorCode.MASTER_PROTECTION_CONFLICT, 409,
+                        "USER_MASTER_PROTECTION_CONFLICT", "자기 계정은 정지할 수 없습니다."),
+                Arguments.of(UserErrorCode.CLOSED_ACCOUNT_UNCHANGEABLE, 409,
+                        "USER_CLOSED_ACCOUNT_UNCHANGEABLE", "이용이 종료된 계정의 상태는 바꿀 수 없습니다."),
+                Arguments.of(UserErrorCode.TERMS_VERSION_CONFLICT, 409,
+                        "USER_TERMS_VERSION_CONFLICT", "같은 약관 버전이나 같은 시행 시각의 약관이 이미 있습니다."),
+                Arguments.of(UserErrorCode.TERMS_EFFECTIVE_AT_NOT_FUTURE, 400,
+                        "USER_TERMS_EFFECTIVE_AT_NOT_FUTURE", "시행 시각은 등록 시점보다 1분 이상 뒤로 지정해 주세요.")
         );
     }
 

@@ -16,7 +16,7 @@ public class LogoutController {
 
     private final SessionLogoutHandler sessionLogoutHandler;
 
-    /** 명세 B04: 성공은 본문 없는 204입니다. */
+    /** 로그아웃: 성공은 본문 없는 204입니다. */
     @PostMapping("/api/v1/auth/logout")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void logout(HttpServletRequest request, HttpServletResponse response) {

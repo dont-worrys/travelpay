@@ -42,6 +42,9 @@ travelpay:
     password-change:
       # 해시 연산을 제외한 각 DB 작업·잠금 대기의 트랜잭션 제한 시간입니다.
       transaction-timeout: ${USER_PASSWORD_CHANGE_TRANSACTION_TIMEOUT:5s}
+    admin:
+      # 관리자 API(회원 정지·해제·세션 종료·검색, 약관 등록·조회)의 각 DB 작업·잠금 대기 제한 시간입니다.
+      transaction-timeout: ${USER_ADMIN_TRANSACTION_TIMEOUT:5s}
     login-attempt:
       # 같은 이메일+IP로 window 안에 pair-limit번 실패하면 block 동안 로그인을 막습니다.
       pair-limit: 5
@@ -50,7 +53,7 @@ travelpay:
       window: 10m
       block: 20m
     recipient-lookup:
-      # I02 수취인 조회 제한의 요청자별 허용 횟수와 집계 기간입니다.
+      # 수취인 조회 제한의 요청자별 허용 횟수와 집계 기간입니다.
       limit: ${USER_RECIPIENT_LOOKUP_LIMIT:60}
       period: ${USER_RECIPIENT_LOOKUP_PERIOD:60s}
 

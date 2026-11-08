@@ -92,7 +92,7 @@ class UserServiceApplicationTest {
                 .map(migration -> migration.getVersion().getVersion())
                 .toList();
 
-        assertEquals(List.of("1", "2"), applied);
+        assertEquals(List.of("1", "2", "3"), applied);
         assertEquals("validate", context.getBean(EntityManagerFactory.class).getProperties().get("hibernate.hbm2ddl.auto"));
     }
 
