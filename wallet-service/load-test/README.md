@@ -151,7 +151,7 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 
 서비스 지표 구간은 k6 시작 ~ 마지막 종결 시각입니다(접수 뒤에도 SAGA가 은행·원장을 부르므로).
 
-**종료 코드 1**: 202 외 응답, `dropped_iterations` > 0, `MANUAL_REVIEW` 1건 이상, `FAILED`·`REFUNDED` 1건 이상, DB 접수 건수(`charges.accepted`) ≠ k6 202 응답 건수, 종결 대기 시간 초과, 출금 정합성 위반, 대사 status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상. 그 측정은 원인을 확인하기 전까지 기준값으로 쓰지 않습니다.
+**종료 코드 1**: 202 외 응답, `dropped_iterations` > 0, `MANUAL_REVIEW` 1건 이상, `FAILED`·`REFUNDED` 1건 이상, DB 접수 건수(`charges.accepted`) ≠ k6 202 응답 건수, 측정 구간에 Prometheus 표본이 하나도 없는 서비스(user·wallet·ledger·mock-bank 중), 종결 대기 시간 초과, 출금 정합성 위반, 대사 status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상. 그 측정은 원인을 확인하기 전까지 기준값으로 쓰지 않습니다.
 
 ## 주의
 

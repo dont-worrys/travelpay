@@ -406,6 +406,10 @@ def main():
     accepted_202 = summary["statusCounts"]["202"]
     if charges["accepted"] != accepted_202:
         reasons.append(f"DB 접수 {charges['accepted']}건 ≠ k6 202 응답 {accepted_202}건")
+    window = [snapshot for moment, snapshot in service_sampler.samples if window_start <= moment <= window_end]
+    unscraped = [name for name in SERVICES if not any(snapshot.get(name) for snapshot in window)]
+    if unscraped:
+        reasons.append(f"서비스 지표 수집 실패: {', '.join(unscraped)}")
 
     if drain_seconds is None:
         reasons.append(f"{args.drain_timeout}초 안에 종결되지 않은 충전이 있음 (출금 정합성·대사 생략)")

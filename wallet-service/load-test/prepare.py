@@ -22,6 +22,7 @@ from lt_common import DATA_FILE, USER_URL, WALLET_URL, member_headers, psql, req
 PASSWORD = "TravelpayLoad-2026!"   # 로컬 측정 전용 회원. 로그인하지 않으므로 다른 곳에 쓰지 않음
 CONSENTS = [{"termsCode": "SERVICE_TERMS", "termsVersion": "2026-10-01"},
             {"termsCode": "PRIVACY_TERMS", "termsVersion": "2026-10-01"}]
+PHONE_RETRIES = 5   # 무작위 전화번호가 기존 회원과 겹치면(USER_PHONE_ALREADY_EXISTS) 새 번호로 다시 시도하는 횟수
 
 
 def signup(run_id, index, real_name):
@@ -30,14 +31,17 @@ def signup(run_id, index, real_name):
     csrf = request("GET", f"{USER_URL}/api/v1/auth/csrf", opener=opener)
     if csrf.status != 200:
         raise RuntimeError(f"CSRF 토큰 조회 실패: {csrf}")
-    phone = f"010-{random.randint(2000, 9999)}-{random.randint(1000, 9999)}"   # phone은 UNIQUE
-    body = {"loginEmail": f"lt-charge-{run_id}-u{index}@example.com", "password": PASSWORD,
-            "realName": real_name, "phone": phone, "consents": CONSENTS}
-    result = request("POST", f"{USER_URL}/api/v1/users",
-                     {csrf.data["headerName"]: csrf.data["token"]}, body, opener=opener)
-    if result.status != 201:
-        raise RuntimeError(f"회원가입 실패 u{index}: {result} {result.body}")
-    return result.data["userId"]
+    for retry in range(PHONE_RETRIES + 1):
+        phone = f"010-{random.randint(2000, 9999)}-{random.randint(1000, 9999)}"   # phone은 UNIQUE
+        body = {"loginEmail": f"lt-charge-{run_id}-u{index}@example.com", "password": PASSWORD,
+                "realName": real_name, "phone": phone, "consents": CONSENTS}
+        result = request("POST", f"{USER_URL}/api/v1/users",
+                         {csrf.data["headerName"]: csrf.data["token"]}, body, opener=opener)
+        if result.status == 201:
+            return result.data["userId"]
+        if result.code != "USER_PHONE_ALREADY_EXISTS" or retry == PHONE_RETRIES:
+            raise RuntimeError(f"회원가입 실패 u{index}: {result} {result.body}")
+        print(f"  u{index} 전화번호 {phone} 중복, 새 번호로 재시도 ({retry + 1}/{PHONE_RETRIES})", flush=True)
 
 
 def open_wallet(user_id):
