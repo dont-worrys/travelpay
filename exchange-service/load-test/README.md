@@ -85,10 +85,11 @@ git worktree add ../travelpay-v0 <커밋>
 (cd ../travelpay-v0 && ./gradlew :exchange-service:bootJar)
 ./gradlew :exchange-service:bootJar                         # 지금 브랜치 jar (기본값으로 쓰임)
 
-# 2. 측정 폴더에서: APP_JAR는 이 폴더(exchange-service/load-test) 기준 상대 경로 또는 절대 경로
+# 2. 측정 폴더에서: jar 경로는 이 폴더(exchange-service/load-test) 기준 상대 경로 또는 절대 경로
 cd exchange-service/load-test
-APP_JAR=../../../travelpay-v0/exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar ./measure-all.sh db-v0
-./measure-all.sh redis-v1                                   # 기본값: 지금 브랜치에서 빌드한 jar
+J=exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar
+./measure-compare.sh rate v0=../../../travelpay-v0/$J v05=../../../travelpay-v05/$J v1=../../../travelpay-v1/$J
+# 버전 하나만 잴 때: APP_JAR=../../../travelpay-v0/$J ./measure-all.sh db-v0
 
 # 3. 끝나면 정리 (측정 폴더 기준 경로)
 git worktree remove ../../../travelpay-v0
@@ -152,7 +153,7 @@ LIMIT 1;"
 
 ## 부하 측정 (k6)
 
-동시 요청 수 단계마다 한 번씩 실행합니다. 같은 가상 사용자들이 예열 15초 + 측정 1분 내내 쉬지 않고 요청하고, 요청을 **시작한 시각**(k6 테스트 경과 시간)이 15초 이후인 요청만 집계합니다.
+동시 요청 수 단계마다 한 번씩 실행합니다. 같은 가상 사용자들이 예열 + 측정 내내 쉬지 않고 요청하고, 요청을 **시작한 시각**(k6 테스트 경과 시간)이 예열 이후인 요청만 집계합니다. `measure.sh`로 돌리면 **예열 30초 + 측정 2분**입니다(JIT·커넥션 풀·DB 버퍼·캐시가 자리 잡게, 2026-11-09에 15초 + 1분에서 늘림). k6만 직접 돌리면 k6 기본값(15초 + 1분)입니다.
 
 - **`VUS`는 "동시 요청 수"입니다.** 가상 사용자가 쉬는 시간 없이 반복하므로, 서버에는 항상 VUS개의 요청이 들어와 있습니다. 실제 사용자는 조회 사이에 쉬므로 실제 사용자 수로는 훨씬 많습니다. 리틀의 법칙(동시 사용자 ≈ 처리량 × (응답 시간 + 쉬는 시간))으로, 300 TPS에서 쉬는 시간을 10초로 가정하면 약 3,000명 이상입니다.
 - **예열과 측정을 한 시나리오로 둔 이유:** 시나리오 두 개로 나누면 k6가 시나리오마다 다른 가상 사용자를 써서, 경계에서 (1) 예열 요청이 측정 구간으로 넘어와 부하가 겹치거나 (2) 새 사용자들이 한꺼번에 연결을 맺어 일부가 거부(`connect: connection refused`)됐습니다. 한 시나리오면 예열 때 맺은 연결을 이어 쓰고 측정 1분 내내 동시 요청 수가 정확히 유지됩니다.
@@ -169,10 +170,11 @@ docker compose run --rm -e VUS=50 -e LABEL=quote-db k6 run --quiet /scripts/quot
 | `VUS` | 50 | 동시 요청 수(쉬는 시간 없는 가상 사용자 수). 50 / 100 / 300으로 각각 실행 |
 | `LABEL` | run | 결과 파일 이름 구분 (`db`, `redis`) → `results/db-vus50.json` |
 | `DURATION` / `WARMUP` | 1m / 15s | 측정·예열 길이. 비교할 측정끼리는 같게 둠 |
-| `STALE_AFTER_SECONDS` | 6 | (환율 조회) 수집 시각이 이보다 오래된 환율이 있으면 "오래된 응답"으로 셈 (수집 간격 5초 + 여유 1초) |
+| `STALE_AFTER_SECONDS` | 6 | (환율 조회) 수집 시각이 이보다 오래된 환율이 있으면 "오래된 응답"으로 셈 (수집 간격 5초 + 여유 1초). 최신 수집 회차를 제때 반영하는지 보는 **실험용 진단 기준**이며, 서비스 신선도 정책(견적 mock 30초)과 다름 |
 | `QUOTE_AMOUNT` | 100000 | (견적 발급) 보내는 원화 금액. 1회 한도 1,000 ~ 2,000,000 안 |
 
 - 성공은 환율 조회 200, 견적 발급 201입니다.
+- **환율 조회 응답 검증:** 200이어도 지원 통화(JPY·CNY)가 모두 들어 있지 않으면 "불완전 응답"(`incompleteResponses`)으로 셉니다. 측정 환경은 두 통화를 항상 채워 두므로 빠진 응답은 버그이고, 일을 덜 한 응답이 빨라 보여 버전 비교를 흐리지 않게 하나라도 있으면 그 측정을 무효로 멈춥니다. (서비스 자체는 수집 전 통화를 빼고 200을 주는 게 정상이며 바꾸지 않음)
 - 견적 발급은 지갑·원장을 부르지 않아 **`User-Id`와 `User-Role: USER` 헤더**만으로 요청합니다(게이트웨이가 채워 줄 헤더를 직접 넣음. 둘 중 하나라도 없으면 401). 가상 사용자 번호로 고정 UUID(1번 → `00000000-0000-4000-8000-000000000001`)를 만들어, 실행마다 같은 회원들이 각자 견적을 받습니다.
 - 결과 JSON의 `okAll`은 예열 포함 성공 수입니다. 견적 발급 검산(저장된 견적 수와 비교)에 씁니다.
 
@@ -206,10 +208,11 @@ SCRIPT=quote-issue.js ./measure.sh quote-db 50   # 견적 발급
 | `hikariPending` | Actuator `hikaricp_connections_pending` | 연결을 기다리는 요청 수, 측정 구간 표본의 평균·최대 |
 | `hikariActive` | `hikaricp_connections_active` | 사용 중 연결 수(최대 10), 평균·최대 |
 | `acquireMsAvg` | `hikaricp_connections_acquire_seconds` | 연결을 얻는 데 걸린 평균 시간 (구간의 합계·횟수 차이). `_max`는 일정 시간 동안의 최대를 들고 있어 앞 실행 값이 남으므로 쓰지 않음 |
+| `acquireCount` | `hikaricp_connections_acquire_seconds_count` | 측정 구간에 연결을 얻은 횟수(구간 차이). 캐시가 DB 연결을 얼마나 덜 빌리는지 직접 보여 줌. 수집기(5초마다)가 쓴 연결도 포함 |
 | `cpuPercent` | `system_cpu_usage`, `process_cpu_usage` | Docker가 쓰는 CPU 전체(k6·앱·DB 합)와 앱 JVM의 사용률. 평균(전체는 최대도) |
 | `dbActiveSessions` | `pg_stat_activity` (state=active) | DB에서 실제로 실행 중인 쿼리 수, 평균·최대 |
 | `quoteRows` | `exchange_quotes` 행 수 | `all`: 이번 실행(예열 포함)에서 저장된 견적. 측정 직전 적재 SQL이 견적 테이블을 비우므로 그대로 셈. `measure`: `created_at`이 측정 구간 안인 견적(앱·DB 시각이 1초 안에서 어긋나 어림값). 환율 조회 측정이면 0 |
-| `rateSelectCalls` | `pg_stat_statements` | 환율 SELECT 호출 수. 예열·수집기 포함이라 검산용 (≈ 전체 요청 × 2 + 수집기) |
+| `rateSelectCalls` | `pg_stat_statements` | 환율 SELECT 호출 수. `measure`: DB 세션과 같은 1초 표본에서 누적 값을 읽어 구한 **측정 구간만의** 차이(수집기 포함). `all`: 적재 후 전체(예열 포함, 검산용). 적재 때 통계를 초기화하므로 예열 호출이 섞이지 않게 구간 차이를 씀 |
 
 - 측정 구간은 k6가 **실제로 테스트를 시작한 시각**(끝난 시각 − k6 결과의 `testRunDurationMs`)에서 예열을 뺀 1분입니다. 컨테이너를 띄우는 데 걸린 시간과 상관없이 k6 집계 구간과 같습니다.
 - 커넥션·CPU 지표는 **앱 컨테이너 안에서** 1초마다 읽습니다. PC에서 읽으면 포트 전달을 지나 바쁠 때 표본이 빠집니다(60초에 44개 → 안에서 읽으면 약 60개). `samples`에 실제 표본 수가 남습니다.
@@ -225,9 +228,40 @@ cd exchange-service/load-test
 SCRIPT=quote-issue.js ./measure-all.sh quote-db   # 견적 발급: 같은 단계·횟수
 ```
 
-- 요약 표 열: TPS, P50·P95·P99, 연결 대기, 연결 얻는 시간, DB 활성 세션, 스크립트별 열(환율 조회는 오래된 응답 %, 견적 발급은 **견적 저장 / 성공 응답**), 실패율, 실패 건수, CPU, 회차별 TPS
+- 요약 표 열: TPS, 회차별 TPS, TPS 편차, P50·P95·P99, 연결 대기, 연결 얻는 시간, 연결 얻은 횟수, 환율 SELECT(측정 구간), DB 활성 세션, 캐시 hit, 스크립트별 열(환율 조회는 오래된 응답 %, 견적 발급은 **견적 저장 / 성공 응답**), 실패율, 실패 건수, CPU
+- **TPS 편차** = (회차 중 최대 − 최소) / 중앙값. 10%를 넘으면 ⚠가 붙고, **그 버전·단계만 2회 추가 측정**합니다(결과를 보고 유리한 회차를 고르지 않도록 측정 전에 정한 규칙, 2026-11-09)
 - **견적 발급 검산:** 회차마다 저장된 견적 수(`quoteRows.all`)가 예열 포함 성공 응답 수(`okAll`)와 같은지 확인하고, 다르면 멈춥니다. 성공 응답을 받은 만큼 정확히 저장됐는지(응답과 저장이 어긋나지 않는지) 보는 것입니다. 측정 구간 행 수는 시각 경계가 1초 안에서 어긋나 이 검산에 쓰지 않습니다.
 
 - 결과: 회차별 `results/db-r1-vus50.json` … 과 중앙값 표 `results/db-summary.md`(마크다운, 실패율·실패 건수와 회차별 TPS도 함께 적어 흔들림을 확인)
-- 한 회차라도 실패한 요청(4xx·5xx·응답 없음)이 있으면 그 자리에서 멈춥니다. 실패가 섞인 측정은 무효로 보고 원인부터 찾습니다(k6 기준값은 측정을 멈추지 않게 항상 통과하도록 두었으므로 여기서 확인). 시작할 때 앞 실행의 요약을 지우고 모든 회차가 성공해야 새 요약을 만들어, 남은 요약을 이번 결과로 오인하지 않게 합니다.
+- 한 회차라도 실패한 요청(4xx·5xx·응답 없음)이나 불완전 응답이 있으면 그 자리에서 멈춥니다. 실패가 섞인 측정은 무효로 보고 원인부터 찾습니다(k6 기준값은 측정을 멈추지 않게 항상 통과하도록 두었으므로 여기서 확인). 시작할 때 앞 실행의 요약을 지우고 모든 회차가 성공해야 새 요약을 만들어, 남은 요약을 이번 결과로 오인하지 않게 합니다.
 - 단계·횟수는 `STAGES="50 100 300"`, 두 번째 인자(`./measure-all.sh db 5`)로 바꿀 수 있습니다. 비교할 측정끼리는 같게 둡니다.
+
+### 버전 비교 측정: `measure-compare.sh`
+
+버전(jar) 여러 개를 같은 날 비교할 때 씁니다. `measure-all.sh`처럼 버전 하나를 다 재고 다음 버전으로 넘어가면, 노트북이 달아오르며 **뒤에 잰 버전이 불리**해집니다. 그래서 회차마다 **부하 단계 순서와 버전 순서를 돌려** 측정합니다(2026-11-09, 측정 계획 검토에서 반영).
+
+```bash
+cd exchange-service/load-test
+J=exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar
+./measure-compare.sh rate v0=../../../travelpay-v0/$J v05=../../../travelpay-v05/$J v1=../../../travelpay-v1/$J
+START_AT=10 ./measure-compare.sh rate v0=... v05=... v1=...   # 중간에 멈췄으면 진행 기록의 번호부터 이어서
+```
+
+버전 3개 · 단계 3개 · 3회면 27번 측정합니다(한 번에 약 3분 30초, 전체 약 1시간 40분). 순서는 이렇습니다.
+
+| 회차 | 단계 | 버전 순서 |
+| --- | --- | --- |
+| 1 | 50 | v0 → v05 → v1 |
+| 1 | 100 | v05 → v1 → v0 |
+| 1 | 300 | v1 → v0 → v05 |
+| 2 | 100 | v1 → v0 → v05 |
+| 2 | 300 | v0 → v05 → v1 |
+| 2 | 50 | v05 → v1 → v0 |
+| 3 | 300 | v05 → v1 → v0 |
+| 3 | 50 | v1 → v0 → v05 |
+| 3 | 100 | v0 → v05 → v1 |
+
+- 단계 순서는 회차마다 한 칸씩 돌리고, 버전 순서는 같은 단계 안에서 각 버전이 처음·중간·끝에 한 번씩 오게 돌립니다.
+- 결과: 회차별 `results/rate-v0-r1-vus50.json`(-db.json) …, 버전별 요약 `results/rate-v0-summary.md`, 진행 기록 `results/rate-progress.log`(시작 시각, jar와 커밋, 측정마다 TPS·P95)
+- 측정 하나라도 무효(실패 요청·불완전 응답·표본 누락)면 그 자리에서 멈춥니다. 원인을 고친 뒤 `START_AT`으로 이어서 잽니다.
+- 측정 DB는 버전끼리 같이 씁니다. 비교할 버전들의 Flyway 마이그레이션이 같은지 먼저 확인합니다(다르면 새 버전이 적용한 마이그레이션을 옛 버전이 몰라 시작하지 못함).
