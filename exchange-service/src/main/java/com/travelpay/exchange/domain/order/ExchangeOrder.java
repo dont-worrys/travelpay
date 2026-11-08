@@ -12,6 +12,7 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.exchange.domain.ledger.LedgerDirection;
 import com.travelpay.exchange.domain.ledger.LedgerEntry;
 import com.travelpay.exchange.domain.ledger.LedgerEntryType;
+import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
 import com.travelpay.exchange.domain.ledger.LedgerPosting;
 import com.travelpay.exchange.domain.ledger.LedgerSystemAccount;
 import com.travelpay.exchange.domain.money.Currency;
@@ -204,6 +205,14 @@ public class ExchangeOrder extends BaseTimeEntity {
                 LedgerEntryType.EXCHANGE_IN));
         entries.add(LedgerEntry.wallet(walletId, to, LedgerDirection.CREDIT, LedgerEntryType.EXCHANGE_IN));
         return new LedgerPosting(requireId(), userId, entries);
+    }
+
+    /**
+     * 원장 단건 조회 응답의 entries와 비교할 기대 항목 목록입니다.
+     * 원장은 USER 항목에 accountType WALLET을 채워 내려주므로 같은 형식으로 변환합니다.
+     */
+    public List<LedgerLookupResult.Entry> expectedLedgerEntries() {
+        return LedgerLookupResult.Entry.fromEntries(toLedgerPosting().entries());
     }
 
     /** 같은 멱등 키로 다시 온 신청이 처음과 같은 견적·지갑인지 확인합니다. 다르면 키를 다른 신청에 재사용한 것입니다. */

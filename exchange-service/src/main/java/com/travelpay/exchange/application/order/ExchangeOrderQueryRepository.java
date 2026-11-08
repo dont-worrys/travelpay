@@ -1,6 +1,7 @@
 package com.travelpay.exchange.application.order;
 
 import com.travelpay.exchange.domain.order.ExchangeOrder;
+import com.travelpay.exchange.domain.order.ManualReviewReason;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 
@@ -13,4 +14,11 @@ public interface ExchangeOrderQueryRepository {
 
     /** 조건에 맞는 주문을 pageable의 페이지·크기·정렬대로 돌려줍니다. 정렬 검증과 크기 제한은 호출하는 쪽이 합니다. */
     Page<ExchangeOrder> findPage(ExchangeOrderListCondition condition, Pageable pageable);
+
+    /**
+     * 관리자용 MANUAL_REVIEW 주문 목록을 오래된 순으로 조회합니다.
+     *
+     * @param reviewReason 사유 필터. null이면 전체 사유입니다.
+     */
+    Page<ExchangeManualReviewView> findManualReviews(ManualReviewReason reviewReason, Pageable pageable);
 }

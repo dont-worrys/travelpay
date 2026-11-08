@@ -22,7 +22,17 @@ public enum ExchangeOrderErrorCode implements ErrorCode {
     LEDGER_REJECTED_WALLET_SUSPENDED("EXCHANGE_LEDGER_REJECTED_WALLET_SUSPENDED",
             "사용할 수 없는 지갑 계정이라 환전하지 못했습니다.", 422),
     LEDGER_REJECTED_ACCOUNT_NOT_FOUND("EXCHANGE_LEDGER_REJECTED_ACCOUNT_NOT_FOUND",
-            "지갑 계정이 없어 환전하지 못했습니다.", 422);
+            "지갑 계정이 없어 환전하지 못했습니다.", 422),
+    NOT_PROCESSED("EXCHANGE_NOT_PROCESSED",
+            "처리 시간이 초과되어 취소되었습니다.", 422),
+    PROCESSING_ERROR("EXCHANGE_PROCESSING_ERROR",
+            "처리 중 오류로 취소되었습니다.", 422),
+    NOT_MANUAL_REVIEW("EXCHANGE_NOT_MANUAL_REVIEW",
+            "관리자 처리 대상(MANUAL_REVIEW)이 아니거나 이미 처리되었습니다.", 409),
+    LEDGER_CORRECTION_REQUIRED("EXCHANGE_LEDGER_CORRECTION_REQUIRED",
+            "원장 거래 내용이 주문과 달라 처리할 수 없습니다. 원장 보정이 필요합니다.", 409),
+    LEDGER_LOOKUP_UNAVAILABLE("EXCHANGE_LEDGER_LOOKUP_UNAVAILABLE",
+            "원장 거래 결과를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503);
 
     private final String code;
     private final String message;

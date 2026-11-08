@@ -6,6 +6,9 @@ import java.util.UUID;
 
 import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
+import com.travelpay.exchange.domain.order.ManualReviewResolution;
+import com.travelpay.exchange.domain.order.ManualReviewResolutionReason;
 import com.travelpay.exchange.domain.order.OrderFixtures;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
@@ -17,8 +20,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -51,6 +56,50 @@ class ExchangeOrderRepositoryAdapterTest {
         when(jpaRepository.saveAndFlush(order)).thenThrow(overflow);
 
         assertSame(overflow, assertThrows(DataIntegrityViolationException.class, () -> adapter.save(order)));
+    }
+
+    @Test
+    void resolveIfManualReviewReturnsTrueWhenOneRowUpdated() {
+        UUID orderId = UUID.randomUUID();
+        UUID ledgerTxId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-11-01T04:00:00Z");
+        ManualReviewResolution resolution = new ManualReviewResolution(
+                ExchangeOrderStatus.COMPLETED,
+                ledgerTxId,
+                ledgerTxId,
+                null,
+                ManualReviewResolutionReason.LEDGER_POSTED,
+                now,
+                UUID.randomUUID(),
+                null
+        );
+
+        when(jpaRepository.resolveIfManualReview(orderId, ExchangeOrderStatus.COMPLETED, ledgerTxId, null, now, now))
+                .thenReturn(1);
+
+        assertTrue(adapter.resolveIfManualReview(orderId, resolution, now));
+    }
+
+    @Test
+    void resolveIfManualReviewReturnsFalseWhenZeroRowsUpdated() {
+        UUID orderId = UUID.randomUUID();
+        UUID ledgerTxId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-11-01T04:00:00Z");
+        ManualReviewResolution resolution = new ManualReviewResolution(
+                ExchangeOrderStatus.COMPLETED,
+                ledgerTxId,
+                ledgerTxId,
+                null,
+                ManualReviewResolutionReason.LEDGER_POSTED,
+                now,
+                UUID.randomUUID(),
+                null
+        );
+
+        when(jpaRepository.resolveIfManualReview(orderId, ExchangeOrderStatus.COMPLETED, ledgerTxId, null, now, now))
+                .thenReturn(0);
+
+        assertFalse(adapter.resolveIfManualReview(orderId, resolution, now));
     }
 
     private static ExchangeOrder order() {

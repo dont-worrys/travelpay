@@ -25,6 +25,8 @@ import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistoryRepository;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
 import com.travelpay.exchange.domain.order.ManualReviewReason;
+import com.travelpay.exchange.domain.order.ManualReviewResolution;
+import com.travelpay.exchange.domain.order.ManualReviewResolutionReason;
 import com.travelpay.exchange.domain.order.OrderFixtures;
 import com.travelpay.exchange.domain.order.Settlement;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
@@ -331,8 +333,138 @@ class ExchangeOrderPersistenceIntegrationTest {
     }
 
     private Map<String, Object> orderRow(UUID orderId) {
-        return jdbcTemplate.queryForMap("SELECT status, ledger_transaction_id, from_amount, settled_at, updated_at FROM "
+        return jdbcTemplate.queryForMap("SELECT status, ledger_transaction_id, failure_reason, from_amount, settled_at, updated_at FROM "
                 + SCHEMA + ".exchange_orders WHERE order_id = ?", orderId);
+    }
+
+    @Test
+    void resolvesManualReviewOrderToCompletedWithLedgerTxId() {
+        UUID orderId = savedOrder("key-1");
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        orderRepository.settleIfProcessing(orderId, Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), now);
+        historyRepository.save(Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT).history(orderId));
+
+        UUID ledgerTxId = UUID.randomUUID();
+        UUID masterId = UUID.randomUUID();
+        Instant resolvedAt = Instant.parse("2026-11-01T04:00:00Z");
+        ManualReviewResolution resolution = new ManualReviewResolution(
+                ExchangeOrderStatus.COMPLETED,
+                ledgerTxId,
+                ledgerTxId,
+                null,
+                ManualReviewResolutionReason.LEDGER_POSTED,
+                resolvedAt,
+                masterId,
+                "정상 확인"
+        );
+
+        boolean resolved = orderRepository.resolveIfManualReview(orderId, resolution, resolvedAt);
+        assertTrue(resolved);
+        historyRepository.save(resolution.history(orderId));
+
+        Map<String, Object> orderRow = orderRow(orderId);
+        assertEquals("COMPLETED", orderRow.get("status"));
+        assertEquals(ledgerTxId, orderRow.get("ledger_transaction_id"));
+        assertNull(orderRow.get("failure_reason"));
+        assertEquals(resolvedAt, ((Timestamp) orderRow.get("settled_at")).toInstant());
+
+        Map<String, Object> historyRow = jdbcTemplate.queryForMap(
+                "SELECT * FROM " + SCHEMA + ".exchange_order_status_histories WHERE order_id = ? AND changed_by_type = 'MASTER'",
+                orderId);
+        assertEquals("MANUAL_REVIEW", historyRow.get("from_status"));
+        assertEquals("COMPLETED", historyRow.get("to_status"));
+        assertEquals("LEDGER_POSTED", historyRow.get("reason"));
+        assertEquals("MASTER", historyRow.get("changed_by_type"));
+        assertEquals(masterId, historyRow.get("changed_by_id"));
+        assertEquals(ledgerTxId, historyRow.get("ledger_transaction_id"));
+        assertEquals("정상 확인", historyRow.get("memo"));
+    }
+
+    @Test
+    void resolvesManualReviewOrderToFailedWithoutLedgerTxId() {
+        UUID orderId = savedOrder("key-1");
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        orderRepository.settleIfProcessing(orderId, Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), now);
+        historyRepository.save(Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG).history(orderId));
+
+        UUID masterId = UUID.randomUUID();
+        Instant resolvedAt = Instant.parse("2026-11-01T04:00:00Z");
+        ManualReviewResolution resolution = new ManualReviewResolution(
+                ExchangeOrderStatus.FAILED,
+                null,
+                null,
+                ExchangeFailureReason.NOT_PROCESSED,
+                ManualReviewResolutionReason.LEDGER_NOT_FOUND,
+                resolvedAt,
+                masterId,
+                "원장 기록 없음 확인"
+        );
+
+        boolean resolved = orderRepository.resolveIfManualReview(orderId, resolution, resolvedAt);
+        assertTrue(resolved);
+        historyRepository.save(resolution.history(orderId));
+
+        Map<String, Object> orderRow = orderRow(orderId);
+        assertEquals("FAILED", orderRow.get("status"));
+        assertNull(orderRow.get("ledger_transaction_id"));
+        assertEquals("NOT_PROCESSED", orderRow.get("failure_reason"));
+        assertEquals(resolvedAt, ((Timestamp) orderRow.get("settled_at")).toInstant());
+    }
+
+    @Test
+    void concurrentResolveChangesManualReviewOnlyOnce() throws Exception {
+        UUID orderId = savedOrder("key-1");
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        orderRepository.settleIfProcessing(orderId, Settlement.manualReview(ManualReviewReason.LEDGER_BAD_REQUEST), now);
+
+        UUID ledgerTxId = UUID.randomUUID();
+        Instant resolvedAt = Instant.parse("2026-11-01T04:00:00Z");
+        ManualReviewResolution resolution = new ManualReviewResolution(
+                ExchangeOrderStatus.COMPLETED,
+                ledgerTxId,
+                ledgerTxId,
+                null,
+                ManualReviewResolutionReason.LEDGER_POSTED,
+                resolvedAt,
+                UUID.randomUUID(),
+                null
+        );
+
+        int resolved = countTrue(4, () -> orderRepository.resolveIfManualReview(orderId, resolution, resolvedAt));
+        assertEquals(1, resolved);
+        assertEquals("COMPLETED", orderRow(orderId).get("status"));
+    }
+
+    @Test
+    void nonManualReviewOrderCannotBeResolved() {
+        UUID orderId = savedOrder("key-1"); // status is PROCESSING
+        Instant resolvedAt = Instant.parse("2026-11-01T04:00:00Z");
+        UUID ledgerTxId = UUID.randomUUID();
+        ManualReviewResolution resolution = new ManualReviewResolution(
+                ExchangeOrderStatus.COMPLETED,
+                ledgerTxId,
+                ledgerTxId,
+                null,
+                ManualReviewResolutionReason.LEDGER_POSTED,
+                resolvedAt,
+                UUID.randomUUID(),
+                null
+        );
+
+        boolean resolved = orderRepository.resolveIfManualReview(orderId, resolution, resolvedAt);
+        assertFalse(resolved);
+        assertEquals("PROCESSING", orderRow(orderId).get("status"));
+    }
+
+    @Test
+    void findsLatestManualReviewReasonFromHistory() {
+        UUID orderId = savedOrder("key-1");
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        orderRepository.settleIfProcessing(orderId, Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), now);
+        historyRepository.save(Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT).history(orderId));
+
+        assertEquals(ManualReviewReason.LEDGER_CONFLICT,
+                historyRepository.findLatestManualReviewReason(orderId).orElseThrow());
     }
 
     private UUID savedOrder(String idempotencyKey) {

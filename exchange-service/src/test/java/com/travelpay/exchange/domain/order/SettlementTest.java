@@ -79,6 +79,33 @@ class SettlementTest {
         assertEquals(ExchangeOrderStatus.FAILED, history.getToStatus());
         assertEquals("INSUFFICIENT_BALANCE", history.getReason());
         assertEquals(ChangedByType.SYSTEM, history.getChangedByType());
+        assertNull(history.getChangedById());
+        assertNull(history.getLedgerTransactionId());
+        assertNull(history.getMemo());
+    }
+
+    @Test
+    void masterHistoryRecordsActorLedgerTransactionAndMemo() {
+        UUID actorId = UUID.fromString("00000000-0000-0000-0000-0000000000a1");
+        ExchangeOrderStatusHistory history = ExchangeOrderStatusHistory.byMaster(
+                ORDER_ID, ExchangeOrderStatus.MANUAL_REVIEW, ExchangeOrderStatus.COMPLETED,
+                "LEDGER_POSTED", actorId, TX_ID, "원장 반영 확인");
+
+        assertEquals(ORDER_ID, history.getOrderId());
+        assertEquals(ExchangeOrderStatus.MANUAL_REVIEW, history.getFromStatus());
+        assertEquals(ExchangeOrderStatus.COMPLETED, history.getToStatus());
+        assertEquals("LEDGER_POSTED", history.getReason());
+        assertEquals(ChangedByType.MASTER, history.getChangedByType());
+        assertEquals(actorId, history.getChangedById());
+        assertEquals(TX_ID, history.getLedgerTransactionId());
+        assertEquals("원장 반영 확인", history.getMemo());
+
+        assertThrows(IllegalArgumentException.class, () -> ExchangeOrderStatusHistory.of(
+                ORDER_ID, ExchangeOrderStatus.MANUAL_REVIEW, ExchangeOrderStatus.COMPLETED,
+                "LEDGER_POSTED", ChangedByType.MASTER));
+        assertThrows(IllegalArgumentException.class, () -> ExchangeOrderStatusHistory.byMaster(
+                ORDER_ID, ExchangeOrderStatus.MANUAL_REVIEW, ExchangeOrderStatus.COMPLETED,
+                "LEDGER_POSTED", actorId, TX_ID, "x".repeat(256)));
     }
 
     @Test

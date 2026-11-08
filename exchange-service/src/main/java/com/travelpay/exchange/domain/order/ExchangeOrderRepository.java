@@ -46,6 +46,13 @@ public interface ExchangeOrderRepository {
     boolean settleIfProcessing(UUID orderId, Settlement settlement, Instant now);
 
     /**
+     * MANUAL_REVIEW인 주문만 관리자 처리 결과로 바꿉니다.
+     * true면 이 호출이 바꾼 것이고, false면 이미 다른 흐름(다른 관리자)이 먼저 바꿨거나 MANUAL_REVIEW가 아닌 주문입니다.
+     * 상태 이력은 true일 때만 같은 트랜잭션에서 남깁니다.
+     */
+    boolean resolveIfManualReview(UUID orderId, ManualReviewResolution resolution, Instant now);
+
+    /**
      * 원장에 다시 보낼 PROCESSING 주문입니다. 마지막 확인(없으면 신청) 뒤 대기 시간이 지난 것만,
      * 확인 횟수가 적은 순, 오래 확인하지 않은 순으로 돌려줍니다.
      * 대기 시간은 30초 × 2^확인 횟수이고 최대 16분입니다(확인 5회부터).

@@ -9,6 +9,7 @@ import com.travelpay.common.response.ApiResponse;
 import com.travelpay.exchange.domain.ledger.LedgerDirection;
 import com.travelpay.exchange.domain.ledger.LedgerEntry;
 import com.travelpay.exchange.domain.ledger.LedgerEntryType;
+import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult.InvalidKind;
 import com.travelpay.exchange.domain.ledger.LedgerPosting;
@@ -30,6 +31,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -188,6 +190,123 @@ class LedgerClientAdapterTest {
         assertEquals("SYSTEM", system.get("ownerType").asString());
         assertEquals("FX_POSITION", system.get("accountType").asString());
         assertFalse(system.has("walletId"));
+    }
+
+    @Test
+    void readsLookupJsonWithEntriesAndRejectReason() {
+        ApiResponse<LedgerTransactionResponse> response = JsonMapper.builder().build().readValue("""
+                {
+                  "success": true,
+                  "data": {
+                    "transactionId": "%s",
+                    "status": "POSTED",
+                    "rejectReason": null,
+                    "referenceType": "EXCHANGE",
+                    "referenceId": "%s",
+                    "createdAt": "2026-11-02T01:02:03.123456Z",
+                    "entries": [
+                      {
+                        "ownerType": "USER",
+                        "walletId": "%s",
+                        "accountType": "WALLET",
+                        "currency": "KRW",
+                        "direction": "DEBIT",
+                        "amount": 100000,
+                        "entryType": "EXCHANGE_OUT"
+                      },
+                      {
+                        "ownerType": "SYSTEM",
+                        "walletId": null,
+                        "accountType": "FX_POSITION",
+                        "currency": "KRW",
+                        "direction": "CREDIT",
+                        "amount": 100000,
+                        "entryType": "EXCHANGE_OUT"
+                      }
+                    ]
+                  },
+                  "error": null
+                }
+                """.formatted(TX_ID, ORDER_ID, WALLET_ID), new TypeReference<ApiResponse<LedgerTransactionResponse>>() {
+        });
+
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenReturn(response);
+
+        assertEquals(new LedgerLookupResult.Posted(TX_ID, List.of(
+                new LedgerLookupResult.Entry("USER", WALLET_ID, "WALLET", "KRW", "DEBIT", 100000, "EXCHANGE_OUT"),
+                new LedgerLookupResult.Entry("SYSTEM", null, "FX_POSITION", "KRW", "CREDIT", 100000, "EXCHANGE_OUT")
+        )), adapter.findByOrderId(ORDER_ID));
+    }
+
+    @Test
+    void lookupReturnsRejectedWithReason() {
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenReturn(ApiResponse.success(
+                new LedgerTransactionResponse(TX_ID, "REJECTED", "INSUFFICIENT_BALANCE", "EXCHANGE", ORDER_ID,
+                        List.of())));
+
+        assertEquals(new LedgerLookupResult.Rejected(TX_ID, "INSUFFICIENT_BALANCE"), adapter.findByOrderId(ORDER_ID));
+    }
+
+    @Test
+    void lookupReturnsNotFoundOnlyWhen404HasTransactionNotFoundCode() {
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenThrow(error(404,
+                "{\"success\":false,\"data\":null,\"error\":{\"code\":\"LEDGER_TRANSACTION_NOT_FOUND\"}}"));
+
+        assertEquals(new LedgerLookupResult.NotFound(), adapter.findByOrderId(ORDER_ID));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"success\":false,\"data\":null,\"error\":{\"code\":\"COMMON_NOT_FOUND\"}}",
+            "{}",
+            ""
+    })
+    void lookup404WithoutTransactionNotFoundCodeIsUnavailable(String body) {
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenThrow(error(404, body));
+
+        assertInstanceOf(LedgerLookupResult.Unavailable.class, adapter.findByOrderId(ORDER_ID));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {400, 409, 422, 500, 502, 503, 504})
+    void lookupOtherHttpErrorsAreUnavailable(int status) {
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenThrow(error(status, "{}"));
+
+        assertInstanceOf(LedgerLookupResult.Unavailable.class, adapter.findByOrderId(ORDER_ID));
+    }
+
+    @Test
+    void lookupTimeoutIsUnavailable() {
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenThrow(
+                new RetryableException(-1, "Connect timed out", Request.HttpMethod.GET, (Long) null, REQUEST));
+
+        assertInstanceOf(LedgerLookupResult.Unavailable.class, adapter.findByOrderId(ORDER_ID));
+    }
+
+    @Test
+    void lookupMalformedResponsesAreUnavailable() {
+        // POSTED인데 항목 없음
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenReturn(ApiResponse.success(
+                new LedgerTransactionResponse(TX_ID, "POSTED", null, "EXCHANGE", ORDER_ID, List.of())));
+        assertInstanceOf(LedgerLookupResult.Unavailable.class, adapter.findByOrderId(ORDER_ID));
+
+        // POSTED인데 항목 금액 없음
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenReturn(ApiResponse.success(
+                new LedgerTransactionResponse(TX_ID, "POSTED", null, "EXCHANGE", ORDER_ID, List.of(
+                        new LedgerTransactionResponse.Entry("USER", WALLET_ID, "WALLET", "KRW", "DEBIT", null,
+                                "EXCHANGE_OUT")))));
+        assertInstanceOf(LedgerLookupResult.Unavailable.class, adapter.findByOrderId(ORDER_ID));
+
+        // 알 수 없는 상태
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenReturn(ApiResponse.success(
+                new LedgerTransactionResponse(TX_ID, "PENDING", null, "EXCHANGE", ORDER_ID, List.of())));
+        assertInstanceOf(LedgerLookupResult.Unavailable.class, adapter.findByOrderId(ORDER_ID));
+
+        // 다른 referenceId 응답
+        when(feignClient.findByReference("EXCHANGE", ORDER_ID)).thenReturn(ApiResponse.success(
+                new LedgerTransactionResponse(TX_ID, "REJECTED", "INSUFFICIENT_BALANCE", "EXCHANGE",
+                        UUID.randomUUID(), List.of())));
+        assertInstanceOf(LedgerLookupResult.Unavailable.class, adapter.findByOrderId(ORDER_ID));
     }
 
     private static LedgerPostResult invalid(InvalidKind kind) {

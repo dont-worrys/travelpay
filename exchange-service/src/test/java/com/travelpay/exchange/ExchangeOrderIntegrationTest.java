@@ -22,6 +22,7 @@ import java.util.function.Function;
 import com.jayway.jsonpath.JsonPath;
 import com.travelpay.exchange.application.order.ExchangeOrderRecoveryService;
 import com.travelpay.exchange.domain.ledger.LedgerClient;
+import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult;
 import com.travelpay.exchange.domain.ledger.LedgerPosting;
 import com.travelpay.exchange.domain.money.Currency;
@@ -594,11 +595,22 @@ class ExchangeOrderIntegrationTest {
 
         private final List<LedgerPosting> postings = new CopyOnWriteArrayList<>();
         private volatile Function<LedgerPosting, LedgerPostResult> responder;
+        private volatile Function<UUID, LedgerLookupResult> lookupResponder =
+                orderId -> new LedgerLookupResult.NotFound();
 
         @Override
         public LedgerPostResult post(LedgerPosting posting) {
             postings.add(posting);
             return responder.apply(posting);
+        }
+
+        @Override
+        public LedgerLookupResult findByOrderId(UUID orderId) {
+            return lookupResponder.apply(orderId);
+        }
+
+        void respondLookup(Function<UUID, LedgerLookupResult> lookupResponder) {
+            this.lookupResponder = lookupResponder;
         }
 
         void respond(Function<LedgerPosting, LedgerPostResult> responder) {
@@ -612,6 +624,7 @@ class ExchangeOrderIntegrationTest {
         void reset() {
             postings.clear();
             respond(posting -> new LedgerPostResult.Unknown("test"));
+            respondLookup(orderId -> new LedgerLookupResult.NotFound());
         }
 
         int calls() {

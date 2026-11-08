@@ -12,7 +12,9 @@ import java.util.UUID;
 import com.jayway.jsonpath.JsonPath;
 import com.travelpay.exchange.application.rate.ExchangeRateCollector;
 import com.travelpay.exchange.domain.ledger.LedgerClient;
+import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult;
+import com.travelpay.exchange.domain.ledger.LedgerPosting;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.rate.CollectedRate;
@@ -242,7 +244,17 @@ class ExchangeRateMockModeIntegrationTest {
         @Bean
         @Primary
         LedgerClient testLedgerClient() {
-            return posting -> new LedgerPostResult.Posted(UUID.randomUUID());
+            return new LedgerClient() {
+                @Override
+                public LedgerPostResult post(LedgerPosting posting) {
+                    return new LedgerPostResult.Posted(UUID.randomUUID());
+                }
+
+                @Override
+                public LedgerLookupResult findByOrderId(UUID orderId) {
+                    return new LedgerLookupResult.NotFound();
+                }
+            };
         }
     }
 }
