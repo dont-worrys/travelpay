@@ -1,0 +1,15 @@
+# 충전 부하 측정용 k6 컨테이너입니다. 서비스(wallet·user·ledger·mock-bank 등)는 로컬 전체 스택으로 PC에서 띄워 둔 것을 씁니다.
+# k6는 host.docker.internal로 PC의 wallet-service(8082)를 직접 호출합니다(Gateway 제외, User-Id·User-Role 헤더).
+# 실행은 measure.py가 합니다. 직접 실행: docker compose run --rm -e COUNT=20 -e RATE=5 k6 run --quiet /scripts/charge-request.js
+name: travelpay-charge-load-test
+
+services:
+  k6:
+    image: grafana/k6:1.3.0
+    volumes:
+      - ./:/scripts:ro
+      - ./results:/results
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      BASE_URL: ${BASE_URL:-http://host.docker.internal:8082}
