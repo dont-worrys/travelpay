@@ -17,6 +17,7 @@ public record PaymentResult(
         String paymentInfo,
         String declineReason,
         List<RefundResult> refunds,
+        RefundRequestSummary refundRequest,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -25,10 +26,14 @@ public record PaymentResult(
     }
 
     public static PaymentResult from(Payment payment, List<RefundResult> refunds) {
+        return from(payment, refunds, null);
+    }
+
+    public static PaymentResult from(Payment payment, List<RefundResult> refunds, RefundRequestSummary refundRequest) {
         return new PaymentResult(
                 payment.getId(), payment.getStatus(), payment.getAmount(), payment.getCurrency(),
                 payment.getMerchantName(), payment.getPaymentInfo(), payment.getDeclineReason(),
-                List.copyOf(refunds),
+                List.copyOf(refunds), refundRequest,
                 payment.getCreatedAt(), payment.getUpdatedAt());
     }
 }

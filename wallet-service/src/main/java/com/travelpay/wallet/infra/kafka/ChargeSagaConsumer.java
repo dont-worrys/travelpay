@@ -30,7 +30,7 @@ public class ChargeSagaConsumer {
     private final JsonMapper jsonMapper;
 
     @KafkaListener(id = GROUP_ID, groupId = GROUP_ID, topics = WalletKafkaTopicConfig.CHARGE_REQUESTED,
-            containerFactory = ChargeSagaKafkaConfig.CONTAINER_FACTORY, concurrency = "1")
+            containerFactory = ChargeSagaKafkaConfig.CONTAINER_FACTORY)
     public void onChargeRequested(ConsumerRecord<String, String> record) {
         executor.execute(chargeId(record.value()), eventId(record));
     }

@@ -12,10 +12,12 @@ import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTran
 import com.travelpay.payment.application.payment.client.wallet.PaymentWallet;
 import com.travelpay.payment.application.payment.client.wallet.PaymentWalletClient;
 import com.travelpay.payment.application.payment.dto.MerchantPaymentListResult;
+import com.travelpay.payment.application.payment.dto.OverdueRefundRequestResult;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
+import com.travelpay.payment.application.payment.dto.RefundRequestSummary;
 import com.travelpay.payment.application.payment.dto.RefundResult;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
 import com.travelpay.payment.domain.merchant.Merchant;
@@ -36,6 +38,8 @@ import org.springframework.transaction.support.TransactionOperations;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -50,6 +54,11 @@ public class PaymentService {
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
     private static final Set<String> LIST_SORT_FIELDS = Set.of("createdAt", "id");
+    private static final Sort OLDEST_UPDATED_FIRST = Sort.by(Sort.Order.asc("updatedAt"), Sort.Order.asc("id"));
+    // 가맹점이 이 기간 넘게 처리하지 않은 환불 신청은 운영자 확인 대상
+    private static final Duration REFUND_REQUEST_OVERDUE_AFTER = Duration.ofDays(3);
+    private static final Set<PaymentStatus> NEVER_APPROVED =
+            Set.of(PaymentStatus.PENDING, PaymentStatus.DECLINED, PaymentStatus.MANUAL_REVIEW);
 
     private final PaymentRepository paymentRepository;
     private final PaymentHistoryRepository paymentHistoryRepository;
@@ -161,11 +170,11 @@ public class PaymentService {
         Payment payment = paymentRepository.findById(paymentId)
                 .filter(found -> found.getMerchantId().equals(merchantId))
                 .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
-        return toResult(payment);
+        return toDetailResult(payment);
     }
 
     public PaymentResult getPayment(UUID userId, UUID paymentId) {
-        return toResult(findOwnPayment(userId, paymentId));
+        return toDetailResult(findOwnPayment(userId, paymentId));
     }
 
     public PaymentResult refundRequest(RefundCommand command) {
@@ -180,13 +189,8 @@ public class PaymentService {
             return replayRefund(existing.get(), payment, command.amount());
         }
 
-        // 결제 승인 후 환불 기간이 지났으면 환불 불가
+        // 환불 기간은 고객이 신청할 때 확인합니다. 기간 안에 들어온 신청은 가맹점 처리가 늦어도 실행할 수 있고, MASTER 직접 환불은 기간 제한이 없습니다.
         payment.validateRefundable();
-        Instant approvedAt = paymentHistoryRepository.findApprovedAt(payment.getId())
-                .orElseThrow(() -> new BusinessException(PaymentErrorCode.NOT_REFUNDABLE));
-        if (Instant.now().isAfter(approvedAt.plus(REFUND_PERIOD))) {
-            throw new BusinessException(PaymentErrorCode.REFUND_PERIOD_EXPIRED);
-        }
 
         // 환불 요청 REFUND_PENDING 상태 저장
         RefundProgress started;
@@ -210,6 +214,80 @@ public class PaymentService {
             throw new PaymentDeclinedException(PaymentErrorCode.REFUND_DECLINED, settled.refund().getDeclineReason());
         }
         return toResult(settled.payment());
+    }
+
+    // 고객 환불 신청. 이미 신청한 결제는 상태를 바꾸지 않고 현재 상태로 응답
+    public PaymentResult requestRefund(UUID userId, UUID paymentId, String reason) {
+        try {
+            return transactionOperations.execute(status -> {
+                Payment payment = findOwnPayment(userId, paymentId);
+                if (payment.getStatus() == PaymentStatus.REFUND_REQUESTED) {
+                    return toDetailResult(payment);
+                }
+                payment.validateRefundable();
+                validateRefundPeriod(payment);
+                PaymentHistory history = payment.refundRequestedByCustomerHistory(reason);
+                Payment saved = paymentRepository.save(payment);
+                paymentHistoryRepository.save(history);
+                return toDetailResult(saved);
+            });
+        } catch (OptimisticLockingFailureException e) {
+            // 같은 고객의 동시 신청이 먼저 저장됐으면 그 결과로 응답, 다른 변경이 먼저면 충돌
+            Payment latest = findOwnPayment(userId, paymentId);
+            if (latest.getStatus() == PaymentStatus.REFUND_REQUESTED) {
+                return toDetailResult(latest);
+            }
+            throw new BusinessException(CommonErrorCode.CONFLICT);
+        }
+    }
+
+    // 고객이 환불 신청을 취소합니다. 신청 중이 아니면 422, 가맹점이 이미 실행했으면 409
+    public PaymentResult cancelRefundRequest(UUID userId, UUID paymentId) {
+        return changeRefundRequest(() -> findOwnPayment(userId, paymentId),
+                Payment::refundRequestCancelledHistory);
+    }
+
+    // 가맹점 주인(MERCHANT) 또는 MASTER가 환불 신청을 거절합니다. 다른 가맹점의 결제면 404
+    public PaymentResult rejectRefundRequest(AuthenticatedUser user, UUID paymentId, String reason) {
+        PaymentActor actor = user.role() == AuthRole.MASTER ? PaymentActor.MASTER : PaymentActor.MERCHANT;
+        return changeRefundRequest(() -> findMerchantActionPayment(user.userId(), user.role(), paymentId),
+                payment -> payment.refundRequestRejectedHistory(reason, actor));
+    }
+
+    private PaymentResult changeRefundRequest(Supplier<Payment> loader, Function<Payment, PaymentHistory> change) {
+        try {
+            return transactionOperations.execute(status -> {
+                Payment payment = loader.get();
+                PaymentHistory history = change.apply(payment);
+                Payment saved = paymentRepository.save(payment);
+                paymentHistoryRepository.save(history);
+                return toDetailResult(saved);
+            });
+        } catch (OptimisticLockingFailureException e) {
+            throw new BusinessException(CommonErrorCode.CONFLICT);
+        }
+    }
+
+    // 신청 후 3일 넘게 가맹점이 처리하지 않은 환불 신청 (MASTER 확인용, 오래된 순)
+    public Page<OverdueRefundRequestResult> getOverdueRefundRequests(int page, int size) {
+        if (page < 0 || size < 1) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        Pageable pageable = PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE), OLDEST_UPDATED_FIRST);
+        Page<Payment> payments = paymentRepository.findRefundRequestsUpdatedBefore(
+                Instant.now().minus(REFUND_REQUEST_OVERDUE_AFTER), pageable);
+        Map<UUID, String> reasons = paymentHistoryRepository.findRefundRequestReasons(
+                payments.map(Payment::getId).getContent());
+        return payments.map(payment -> OverdueRefundRequestResult.from(payment, reasons.get(payment.getId())));
+    }
+
+    // 결제 승인 시각에서 환불 기간이 지났으면 환불할 수 없습니다.
+    private void validateRefundPeriod(Payment payment) {
+        Instant approvedAt = paymentHistoryRepository.findApprovedAt(payment.getId())
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.NOT_REFUNDABLE));
+        if (Instant.now().isAfter(approvedAt.plus(REFUND_PERIOD))) {
+            throw new BusinessException(PaymentErrorCode.REFUND_PERIOD_EXPIRED);
+        }
     }
 
     // 재시도 대기 시간이 지난 PENDING 결제를 선점해 원장에 다시 요청 (배치)
@@ -267,6 +345,11 @@ public class PaymentService {
 
     public long countManualReviewRefunds() {
         return refundRepository.countByStatus(RefundStatus.MANUAL_REVIEW);
+    }
+
+    // 신청 후 3일 넘게 처리되지 않은 환불 신청 수
+    public long countOverdueRefundRequests() {
+        return paymentRepository.countRefundRequestsUpdatedBefore(Instant.now().minus(REFUND_REQUEST_OVERDUE_AFTER));
     }
 
     public StuckSettlementResult findStuckSettlements(Instant createdBefore, int sampleSize) {
@@ -477,8 +560,8 @@ public class PaymentService {
 
     private RefundProgress startRefund(RefundCommand command) {
         Payment payment = reloadPayment(command.paymentId());
-        PaymentActor actor = command.role() == AuthRole.MASTER ? PaymentActor.MASTER : PaymentActor.USER;
-        PaymentHistory history = payment.refundRequestedHistory(command.reason(), actor);
+        PaymentActor actor = command.role() == AuthRole.MASTER ? PaymentActor.MASTER : PaymentActor.MERCHANT;
+        PaymentHistory history = payment.refundStartedHistory(command.reason(), actor);
 
         // 남은 금액 = 결제 금액 - (완료된 환불 + 결과를 모르는 환불(REQUESTED·MANUAL_REVIEW)), 트랜잭션 안에서 다시 읽은 결제 기준
         long refunded = refundRepository.findAllByPaymentId(payment.getId()).stream()
@@ -518,10 +601,22 @@ public class PaymentService {
     }
 
     private PaymentResult toResult(Payment payment) {
-        List<RefundResult> refunds = refundRepository.findAllByPaymentId(payment.getId()).stream()
+        return PaymentResult.from(payment, findRefunds(payment));
+    }
+
+    // 상세 응답: 환불 내역 + 고객 환불 신청 요약. 결제 생성·환불 실행 응답에서는 이력 조회를 늘리지 않도록 쓰지 않습니다.
+    // 승인된 적 없는 결제(PENDING, DECLINED, MANUAL_REVIEW)는 신청할 수 없어 이력을 조회하지 않습니다.
+    private PaymentResult toDetailResult(Payment payment) {
+        RefundRequestSummary refundRequest = NEVER_APPROVED.contains(payment.getStatus())
+                ? null
+                : RefundRequestSummary.from(paymentHistoryRepository.findAllByPaymentId(payment.getId()));
+        return PaymentResult.from(payment, findRefunds(payment), refundRequest);
+    }
+
+    private List<RefundResult> findRefunds(Payment payment) {
+        return refundRepository.findAllByPaymentId(payment.getId()).stream()
                 .map(RefundResult::from)
                 .toList();
-        return PaymentResult.from(payment, refunds);
     }
 
     private Payment findOwnPayment(UUID userId, UUID paymentId) {
@@ -543,15 +638,30 @@ public class PaymentService {
     private RefundTarget findRefundTarget(RefundCommand command) {
         Payment payment = reloadPayment(command.paymentId());
         Optional<Merchant> merchant = merchantRepository.findById(payment.getMerchantId());
-        if (command.role() != AuthRole.MASTER
-                && !merchant.map(found -> found.getOwnerUserId().equals(command.userId())).orElse(false)) {
-            throw new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND);
+        if (command.role() != AuthRole.MASTER) {
+            requireMerchantOwner(merchant, command.userId());
         }
         // 결제 시 ledgerWalletId가 있는 가맹점만 통과하므로, 없으면 데이터 이상
         UUID merchantWalletId = merchant.map(Merchant::getLedgerWalletId)
                 .orElseThrow(() -> new IllegalStateException(
                         "가맹점 원장 지갑을 찾을 수 없습니다. merchantId=" + payment.getMerchantId()));
         return new RefundTarget(payment, merchantWalletId);
+    }
+
+    // 결제한 가맹점의 주인 또는 MASTER만, 아니면 결제가 없는 것처럼 404
+    private Payment findMerchantActionPayment(UUID userId, AuthRole role, UUID paymentId) {
+        Payment payment = reloadPayment(paymentId);
+        // MASTER는 가맹점 조회 없이 통과
+        if (role != AuthRole.MASTER) {
+            requireMerchantOwner(merchantRepository.findById(payment.getMerchantId()), userId);
+        }
+        return payment;
+    }
+
+    // 결제한 가맹점의 주인이 아니면 결제가 없는 것처럼 404
+    private static void requireMerchantOwner(Optional<Merchant> merchant, UUID userId) {
+        merchant.filter(found -> found.getOwnerUserId().equals(userId))
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
     }
 
     private Payment reloadPayment(UUID paymentId) {

@@ -1,6 +1,8 @@
 package com.travelpay.payment.application.payment;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -18,10 +20,12 @@ import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTran
 import com.travelpay.payment.application.payment.client.wallet.PaymentWallet;
 import com.travelpay.payment.application.payment.client.wallet.PaymentWalletClient;
 import com.travelpay.payment.application.payment.dto.MerchantPaymentListResult;
+import com.travelpay.payment.application.payment.dto.OverdueRefundRequestResult;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
+import com.travelpay.payment.application.payment.dto.RefundRequestSummary;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.domain.merchant.Merchant;
@@ -538,7 +542,7 @@ class PaymentServiceTest {
 
     @Test
     void refundsPaymentWhenLedgerApproves() {
-        Payment payment = approvedPayment();
+        Payment payment = refundRequestedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
@@ -551,10 +555,10 @@ class PaymentServiceTest {
         assertEquals(REFUND_REASON, result.refunds().get(0).reason());
 
         List<PaymentHistory> histories = savedHistories(2);
-        assertEquals(PaymentStatus.APPROVED, histories.get(0).getPreviousStatus());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, histories.get(0).getPreviousStatus());
         assertEquals(PaymentStatus.REFUND_PENDING, histories.get(0).getCurrentStatus());
         assertEquals(REFUND_REASON, histories.get(0).getReason());
-        assertEquals(PaymentActor.USER, histories.get(0).getCreatedBy());
+        assertEquals(PaymentActor.MERCHANT, histories.get(0).getCreatedBy());
         assertEquals(PaymentStatus.REFUND_PENDING, histories.get(1).getPreviousStatus());
         assertEquals(PaymentStatus.REFUNDED, histories.get(1).getCurrentStatus());
         assertEquals(PaymentActor.SYSTEM, histories.get(1).getCreatedBy());
@@ -562,7 +566,7 @@ class PaymentServiceTest {
 
     @Test
     void recordsRefundLedgerIdWhenLedgerApproves() {
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
@@ -572,7 +576,7 @@ class PaymentServiceTest {
 
     @Test
     void sendsOriginalTransactionAndRefundIdToLedger() {
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
@@ -591,7 +595,7 @@ class PaymentServiceTest {
 
     @Test
     void keepsRefundPendingWhenLedgerResultIsUnknown() {
-        Payment payment = approvedPayment();
+        Payment payment = refundRequestedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
@@ -605,7 +609,7 @@ class PaymentServiceTest {
 
     @Test
     void marksRefundManualReviewWhenLedgerDoesNotAcceptRefund() {
-        Payment payment = approvedPayment();
+        Payment payment = refundRequestedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.notAccepted());
         when(refundRepository.markManualReview(eq(REFUND_ID), eq(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED), any()))
@@ -624,7 +628,7 @@ class PaymentServiceTest {
 
     @Test
     void returnsToApprovedAndThrowsDeclinedWhenLedgerDeclines() {
-        Payment payment = approvedPayment();
+        Payment payment = refundRequestedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.declined("원거래를 찾을 수 없습니다."));
 
@@ -667,7 +671,7 @@ class PaymentServiceTest {
         Refund existing = existingRefund();
         existing.decline("원거래를 찾을 수 없습니다.");
         when(refundRepository.findByUserIdAndIdempotencyKey(OWNER_ID, REFUND_KEY)).thenReturn(Optional.of(existing));
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
 
         PaymentDeclinedException exception = assertThrows(PaymentDeclinedException.class,
                 () -> paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID)));
@@ -734,11 +738,24 @@ class PaymentServiceTest {
         verify(refundRepository, never()).save(any());
     }
 
+    // 환불 기간은 고객 신청 시점에만 확인합니다.
     @Test
-    void refundsPaymentJustBeforeRefundPeriodEnds() {
+    void customerRequestsRefundJustBeforeRefundPeriodEnds() {
         when(paymentHistoryRepository.findApprovedAt(PAYMENT_ID))
                 .thenReturn(Optional.of(Instant.now().minus(Duration.ofDays(3)).plus(Duration.ofMinutes(1))));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+
+        PaymentResult result = paymentService.requestRefund(USER_ID, PAYMENT_ID, REFUND_REASON);
+
+        assertEquals(PaymentStatus.REFUND_REQUESTED, result.status());
+    }
+
+    // 기간 안에 들어온 신청은 가맹점 처리가 늦어 기간이 지나도 실행할 수 있습니다.
+    @Test
+    void merchantRefundsRequestedPaymentEvenAfterRefundPeriod() {
+        when(paymentHistoryRepository.findApprovedAt(PAYMENT_ID))
+                .thenReturn(Optional.of(Instant.now().minus(Duration.ofDays(3)).minus(Duration.ofMinutes(1))));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
@@ -747,16 +764,27 @@ class PaymentServiceTest {
     }
 
     @Test
-    void throwsPeriodExpiredWhenRefundPeriodHasPassed() {
+    void masterRefundsApprovedPaymentWithoutPeriodLimit() {
         when(paymentHistoryRepository.findApprovedAt(PAYMENT_ID))
-                .thenReturn(Optional.of(Instant.now().minus(Duration.ofDays(3)).minus(Duration.ofMinutes(1))));
+                .thenReturn(Optional.of(Instant.now().minus(Duration.ofDays(10))));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
+
+        PaymentResult result = paymentService.refundRequest(
+                refundCommand(OTHER_USER_ID, AuthRole.MASTER, PAYMENT_ID, 10_000L));
+
+        assertEquals(PaymentStatus.REFUNDED, result.status());
+    }
+
+    @Test
+    void throwsNotRequestedWhenMerchantRefundsWithoutCustomerRequest() {
         Payment payment = approvedPayment();
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID)));
 
-        assertEquals(PaymentErrorCode.REFUND_PERIOD_EXPIRED, exception.getErrorCode());
+        assertEquals(PaymentErrorCode.REFUND_NOT_REQUESTED, exception.getErrorCode());
         assertEquals(PaymentStatus.APPROVED, payment.getStatus());
         verifyNoInteractions(ledgerClient);
         verify(refundRepository, never()).save(any());
@@ -782,16 +810,15 @@ class PaymentServiceTest {
     }
 
     @Test
-    void throwsNotRefundableWhenApprovalHistoryIsMissing() {
+    void throwsNotRefundableWhenRequestingRefundWithoutApprovalHistory() {
         when(paymentHistoryRepository.findApprovedAt(PAYMENT_ID)).thenReturn(Optional.empty());
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
 
         BusinessException exception = assertThrows(BusinessException.class,
-                () -> paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID)));
+                () -> paymentService.requestRefund(USER_ID, PAYMENT_ID, REFUND_REASON));
 
         assertEquals(PaymentErrorCode.NOT_REFUNDABLE, exception.getErrorCode());
-        verifyNoInteractions(ledgerClient);
-        verify(refundRepository, never()).save(any());
+        verify(paymentHistoryRepository, never()).save(any());
     }
 
     @Test
@@ -821,7 +848,7 @@ class PaymentServiceTest {
     @Test
     void throwsNotFoundWhenRefundingOtherUsersPayment() {
         when(refundRepository.findByUserIdAndIdempotencyKey(OTHER_USER_ID, REFUND_KEY)).thenReturn(Optional.empty());
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> paymentService.refundRequest(refundCommand(OTHER_USER_ID, PAYMENT_ID)));
@@ -834,7 +861,7 @@ class PaymentServiceTest {
     void throwsRefundInProgressWhenConcurrentRefundWonFirst() {
         // 요청 시작 확인, 트랜잭션 안 조회, 충돌 후 재조회 순서로 결제를 읽습니다.
         when(paymentRepository.findById(PAYMENT_ID))
-                .thenReturn(Optional.of(approvedPayment()), Optional.of(approvedPayment()),
+                .thenReturn(Optional.of(refundRequestedPayment()), Optional.of(refundRequestedPayment()),
                         Optional.of(refundPendingPayment()));
         when(paymentRepository.save(any(Payment.class)))
                 .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
@@ -850,7 +877,7 @@ class PaymentServiceTest {
     void returnsRequestedRefundWhenSameKeyIsRequestedConcurrently() {
         Refund existing = existingRefund();
         when(paymentRepository.findById(PAYMENT_ID))
-                .thenReturn(Optional.of(approvedPayment()), Optional.of(approvedPayment()),
+                .thenReturn(Optional.of(refundRequestedPayment()), Optional.of(refundRequestedPayment()),
                         Optional.of(refundPendingPayment()));
         when(refundRepository.findByUserIdAndIdempotencyKey(OWNER_ID, REFUND_KEY))
                 .thenReturn(Optional.empty(), Optional.of(existing));
@@ -872,7 +899,7 @@ class PaymentServiceTest {
     void throwsKeyReusedWhenSameKeyIsUsedConcurrentlyForOtherPayment() {
         Refund otherPaymentRefund = Refund.request(
                 OTHER_PAYMENT_ID, OWNER_ID, REFUND_KEY, 10_000L, CurrencyCode.KRW, REFUND_REASON);
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(refundRepository.findByUserIdAndIdempotencyKey(OWNER_ID, REFUND_KEY))
                 .thenReturn(Optional.empty(), Optional.of(otherPaymentRefund));
         when(refundRepository.save(any(Refund.class)))
@@ -887,7 +914,7 @@ class PaymentServiceTest {
 
     @Test
     void rethrowsConstraintViolationWhenNoRefundHasSameKey() {
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(refundRepository.save(any(Refund.class)))
                 .thenThrow(new DataIntegrityViolationException("ck_refunds_amount"));
 
@@ -926,7 +953,7 @@ class PaymentServiceTest {
 
     @Test
     void partialRefundReturnsPaymentToApproved() {
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(
@@ -947,7 +974,7 @@ class PaymentServiceTest {
     @Test
     void refundsRemainingAmountAfterPartialRefund() {
         savedRefunds.add(earlierRefund(3_000L, RefundStatus.COMPLETED));
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(
@@ -960,7 +987,7 @@ class PaymentServiceTest {
     @Test
     void throwsAmountExceededWhenRequestIsOverRemainingAmount() {
         savedRefunds.add(earlierRefund(3_000L, RefundStatus.COMPLETED));
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> paymentService.refundRequest(refundCommand(OWNER_ID, AuthRole.USER, PAYMENT_ID, 8_000L)));
@@ -975,7 +1002,7 @@ class PaymentServiceTest {
     @Test
     void declinedRefundDoesNotReduceRemainingAmount() {
         savedRefunds.add(earlierRefund(3_000L, RefundStatus.DECLINED));
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
         PaymentResult result = paymentService.refundRequest(
@@ -989,7 +1016,7 @@ class PaymentServiceTest {
         Refund existing = existingRefund();
         existing.complete(REFUND_TRANSACTION_ID);
         when(refundRepository.findByUserIdAndIdempotencyKey(OWNER_ID, REFUND_KEY)).thenReturn(Optional.of(existing));
-        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
 
         BusinessException exception = assertThrows(BusinessException.class,
                 () -> paymentService.refundRequest(refundCommand(OWNER_ID, AuthRole.USER, PAYMENT_ID, 3_000L)));
@@ -1030,10 +1057,286 @@ class PaymentServiceTest {
         return payment;
     }
 
+    // 고객이 신청하고 가맹점이 실행해 원장 결과를 기다리는 결제
     private Payment refundPendingPayment() {
-        Payment payment = approvedPayment();
-        payment.refundRequestedHistory(REFUND_REASON, PaymentActor.USER);
+        Payment payment = refundRequestedPayment();
+        payment.refundStartedHistory(REFUND_REASON, PaymentActor.MERCHANT);
         return payment;
+    }
+
+    private Payment refundRequestedPayment() {
+        Payment payment = approvedPayment();
+        payment.refundRequestedByCustomerHistory(REFUND_REASON);
+        return payment;
+    }
+
+    // 고객 환불 신청
+
+    @Test
+    void customerRequestsRefundOfOwnApprovedPayment() {
+        Payment payment = approvedPayment();
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+
+        PaymentResult result = paymentService.requestRefund(USER_ID, PAYMENT_ID, "사이즈가 맞지 않음");
+
+        assertEquals(PaymentStatus.REFUND_REQUESTED, result.status());
+        PaymentHistory history = savedHistories(1).get(0);
+        assertEquals(PaymentStatus.APPROVED, history.getPreviousStatus());
+        assertEquals(PaymentStatus.REFUND_REQUESTED, history.getCurrentStatus());
+        assertEquals("사이즈가 맞지 않음", history.getReason());
+        assertEquals(PaymentActor.USER, history.getCreatedBy());
+        verifyNoInteractions(ledgerClient);
+    }
+
+    @Test
+    void returnsCurrentStateWithoutSavingWhenAlreadyRequested() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
+
+        PaymentResult result = paymentService.requestRefund(USER_ID, PAYMENT_ID, "다시 신청");
+
+        assertEquals(PaymentStatus.REFUND_REQUESTED, result.status());
+        verify(paymentRepository, never()).save(any());
+        verify(paymentHistoryRepository, never()).save(any());
+    }
+
+    @Test
+    void throwsNotFoundWhenRequestingRefundOfOtherUsersPayment() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.requestRefund(OTHER_USER_ID, PAYMENT_ID, "사유"));
+
+        assertEquals(PaymentErrorCode.PAYMENT_NOT_FOUND, exception.getErrorCode());
+        verify(paymentHistoryRepository, never()).save(any());
+    }
+
+    @Test
+    void throwsPeriodExpiredWhenRequestingRefundAfterRefundPeriod() {
+        when(paymentHistoryRepository.findApprovedAt(PAYMENT_ID))
+                .thenReturn(Optional.of(Instant.now().minus(Duration.ofDays(3)).minus(Duration.ofMinutes(1))));
+        Payment payment = approvedPayment();
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.requestRefund(USER_ID, PAYMENT_ID, "사유"));
+
+        assertEquals(PaymentErrorCode.REFUND_PERIOD_EXPIRED, exception.getErrorCode());
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        verify(paymentHistoryRepository, never()).save(any());
+    }
+
+    @Test
+    void throwsRefundInProgressWhenRequestingRefundWhileRefundPending() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundPendingPayment()));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.requestRefund(USER_ID, PAYMENT_ID, "사유"));
+
+        assertEquals(PaymentErrorCode.REFUND_IN_PROGRESS, exception.getErrorCode());
+    }
+
+    @Test
+    void returnsRequestedStateWhenConcurrentRequestWonFirst() {
+        // 트랜잭션 안 조회, 충돌 후 재조회 순서로 결제를 읽습니다.
+        when(paymentRepository.findById(PAYMENT_ID))
+                .thenReturn(Optional.of(approvedPayment()), Optional.of(refundRequestedPayment()));
+        when(paymentRepository.save(any(Payment.class)))
+                .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
+
+        PaymentResult result = paymentService.requestRefund(USER_ID, PAYMENT_ID, "사유");
+
+        assertEquals(PaymentStatus.REFUND_REQUESTED, result.status());
+    }
+
+    @Test
+    void throwsConflictWhenOtherChangeWonFirstDuringRequest() {
+        when(paymentRepository.findById(PAYMENT_ID))
+                .thenReturn(Optional.of(approvedPayment()), Optional.of(refundPendingPayment()));
+        when(paymentRepository.save(any(Payment.class)))
+                .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.requestRefund(USER_ID, PAYMENT_ID, "사유"));
+
+        assertEquals(CommonErrorCode.CONFLICT, exception.getErrorCode());
+    }
+
+    // 고객 환불 신청 취소
+
+    @Test
+    void customerCancelsRefundRequest() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
+
+        PaymentResult result = paymentService.cancelRefundRequest(USER_ID, PAYMENT_ID);
+
+        assertEquals(PaymentStatus.APPROVED, result.status());
+        PaymentHistory history = savedHistories(1).get(0);
+        assertEquals(PaymentStatus.REFUND_REQUESTED, history.getPreviousStatus());
+        assertEquals(PaymentStatus.APPROVED, history.getCurrentStatus());
+        assertEquals(PaymentActor.USER, history.getCreatedBy());
+    }
+
+    @Test
+    void throwsNotRequestedWhenCancellingWithoutRequest() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.cancelRefundRequest(USER_ID, PAYMENT_ID));
+
+        assertEquals(PaymentErrorCode.REFUND_NOT_REQUESTED, exception.getErrorCode());
+        verify(paymentHistoryRepository, never()).save(any());
+    }
+
+    @Test
+    void throwsNotFoundWhenCancellingOtherUsersRequest() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.cancelRefundRequest(OTHER_USER_ID, PAYMENT_ID));
+
+        assertEquals(PaymentErrorCode.PAYMENT_NOT_FOUND, exception.getErrorCode());
+    }
+
+    // 결제 상세의 환불 신청 요약
+
+    @Test
+    void ownPaymentDetailIncludesRefundRequestSummary() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
+        when(paymentHistoryRepository.findAllByPaymentId(PAYMENT_ID)).thenReturn(List.of(
+                PaymentHistory.of(PAYMENT_ID, PaymentStatus.APPROVED, PaymentStatus.REFUND_REQUESTED,
+                        REFUND_REASON, PaymentActor.USER)));
+
+        PaymentResult result = paymentService.getPayment(USER_ID, PAYMENT_ID);
+
+        assertEquals(RefundRequestSummary.Result.REQUESTED, result.refundRequest().result());
+        assertEquals(REFUND_REASON, result.refundRequest().requestReason());
+    }
+
+    @Test
+    void merchantPaymentDetailIncludesRejectedRefundRequest() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+        when(paymentHistoryRepository.findAllByPaymentId(PAYMENT_ID)).thenReturn(List.of(
+                PaymentHistory.of(PAYMENT_ID, PaymentStatus.APPROVED, PaymentStatus.REFUND_REQUESTED,
+                        REFUND_REASON, PaymentActor.USER),
+                PaymentHistory.of(PAYMENT_ID, PaymentStatus.REFUND_REQUESTED, PaymentStatus.APPROVED,
+                        "사용 흔적이 있음", PaymentActor.MERCHANT)));
+
+        PaymentResult result = paymentService.getMerchantPayment(OWNER, MERCHANT_ID, PAYMENT_ID);
+
+        assertEquals(RefundRequestSummary.Result.REJECTED, result.refundRequest().result());
+        assertEquals("사용 흔적이 있음", result.refundRequest().rejectReason());
+    }
+
+    @Test
+    void detailOfNeverApprovedPaymentSkipsHistoryLookup() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(paymentWithId(existingPayment(10_000L))));
+
+        PaymentResult result = paymentService.getPayment(USER_ID, PAYMENT_ID);
+
+        assertNull(result.refundRequest());
+        verify(paymentHistoryRepository, never()).findAllByPaymentId(any());
+    }
+
+    // 결제 생성 응답에는 요약을 넣지 않아 이력 조회가 늘지 않습니다.
+    @Test
+    void paymentRequestDoesNotLookUpHistories() {
+        givenWallet();
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
+
+        PaymentResult result = paymentService.paymentRequest(command(10_000L));
+
+        assertNull(result.refundRequest());
+        verify(paymentHistoryRepository, never()).findAllByPaymentId(any());
+    }
+
+    // 3일 넘게 처리되지 않은 환불 신청 목록
+
+    @Test
+    void listsOverdueRefundRequestsOldestFirstWithReasons() {
+        Payment withReason = refundRequestedPayment();
+        Payment other = existingPayment(5_000L);
+        ReflectionTestUtils.setField(other, "id", OTHER_PAYMENT_ID);
+        other.approvedHistory(LEDGER_TRANSACTION_ID);
+        other.refundRequestedByCustomerHistory("색상 변경");
+        when(paymentRepository.findRefundRequestsUpdatedBefore(any(), any()))
+                .thenReturn(new PageImpl<>(List.of(withReason, other)));
+        Map<UUID, String> reasons = new HashMap<>();
+        reasons.put(PAYMENT_ID, REFUND_REASON);
+        reasons.put(OTHER_PAYMENT_ID, "색상 변경");
+        when(paymentHistoryRepository.findRefundRequestReasons(List.of(PAYMENT_ID, OTHER_PAYMENT_ID))).thenReturn(reasons);
+
+        Instant before = Instant.now();
+        Page<OverdueRefundRequestResult> result = paymentService.getOverdueRefundRequests(0, 20);
+
+        ArgumentCaptor<Instant> cutoff = ArgumentCaptor.forClass(Instant.class);
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(paymentRepository).findRefundRequestsUpdatedBefore(cutoff.capture(), pageable.capture());
+        // 기준 시각은 지금으로부터 3일 전
+        assertTrue(!cutoff.getValue().isAfter(before.minus(Duration.ofDays(3)).plusSeconds(1)));
+        assertTrue(cutoff.getValue().isAfter(before.minus(Duration.ofDays(3)).minusSeconds(5)));
+        assertEquals(Sort.by(Sort.Order.asc("updatedAt"), Sort.Order.asc("id")), pageable.getValue().getSort());
+
+        assertEquals(2, result.getContent().size());
+        assertEquals(PAYMENT_ID, result.getContent().get(0).paymentId());
+        assertEquals(REFUND_REASON, result.getContent().get(0).requestReason());
+        assertEquals(USER_ID, result.getContent().get(0).userId());
+        assertEquals(MERCHANT_ID, result.getContent().get(0).merchantId());
+        assertEquals("색상 변경", result.getContent().get(1).requestReason());
+    }
+
+    @Test
+    void throwsInvalidRequestForInvalidOverduePage() {
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.getOverdueRefundRequests(-1, 20));
+
+        assertEquals(CommonErrorCode.INVALID_REQUEST, exception.getErrorCode());
+    }
+
+    // 가맹점 환불 신청 거절
+
+    @Test
+    void merchantOwnerRejectsRefundRequestAsMerchant() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
+
+        PaymentResult result = paymentService.rejectRefundRequest(OWNER, PAYMENT_ID, "사용 흔적이 있음");
+
+        assertEquals(PaymentStatus.APPROVED, result.status());
+        PaymentHistory history = savedHistories(1).get(0);
+        assertEquals(PaymentStatus.REFUND_REQUESTED, history.getPreviousStatus());
+        assertEquals("사용 흔적이 있음", history.getReason());
+        assertEquals(PaymentActor.MERCHANT, history.getCreatedBy());
+    }
+
+    @Test
+    void masterRejectsRefundRequestAsMaster() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
+
+        paymentService.rejectRefundRequest(new AuthenticatedUser(OTHER_USER_ID, AuthRole.MASTER), PAYMENT_ID,
+                "고객센터 확인 결과 환불 대상 아님");
+
+        assertEquals(PaymentActor.MASTER, savedHistories(1).get(0).getCreatedBy());
+    }
+
+    @Test
+    void throwsNotFoundWhenOtherUserRejectsRefundRequest() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundRequestedPayment()));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.rejectRefundRequest(new AuthenticatedUser(USER_ID, AuthRole.USER), PAYMENT_ID,
+                        "사유"));
+
+        assertEquals(PaymentErrorCode.PAYMENT_NOT_FOUND, exception.getErrorCode());
+        verify(paymentHistoryRepository, never()).save(any());
+    }
+
+    @Test
+    void throwsNotRequestedWhenRejectingWithoutRequest() {
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(approvedPayment()));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> paymentService.rejectRefundRequest(OWNER, PAYMENT_ID, "사유"));
+
+        assertEquals(PaymentErrorCode.REFUND_NOT_REQUESTED, exception.getErrorCode());
     }
 
     private Refund existingRefund() {

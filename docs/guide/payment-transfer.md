@@ -2,6 +2,8 @@
 
 송금은 별도 서비스가 아니라 payment-service 안의 기능입니다(`com.travelpay.payment.transfer`). 회원 사이의 같은 통화 지갑 송금을 접수하고, 원장(ledger-service)에 거래를 등록해 실제 자금을 옮기며, 송금 상태와 내역을 관리합니다. 잔액은 송금이 직접 바꾸지 않고 원장이 차감·입금을 한 거래로 처리합니다. 브라우저는 Gateway를 통해 호출합니다([Gateway 가이드](gateway.md)).
 
+왜 이렇게 만들었는지(검토한 대안과 감수한 점)는 [설계 결정](#설계-결정) 절에 있습니다. 처리 흐름은 [송금 요청 처리 순서](#처리-순서), [송금 상태](#송금-상태), [복구 스케줄러](#복구-스케줄러), [MANUAL_REVIEW 확정](#manual_review-확정)의 다이어그램으로 볼 수 있습니다.
+
 ## 로컬 실행
 
 필요한 것: JDK 21, Docker.
@@ -118,6 +120,44 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 4. 수취인이 `ACTIVE` 회원인지(user-service I02), 수취인 지갑이 `ACTIVE`인지 확인합니다. 아니면 422 `TRANSFER_RECEIVER_UNAVAILABLE`.
 5. 송금을 `PROCESSING`으로 저장(커밋)한 뒤 원장에 거래를 등록합니다. 원장 호출 중에는 DB 트랜잭션을 잡지 않습니다.
 6. 원장 결과로 상태를 정하고 응답합니다([원장 연동](#원장-연동과-복구)).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as 클라이언트(Gateway)
+    participant P as payment-service
+    participant DB as payment DB
+    participant W as wallet-service
+    participant U as user-service
+    participant L as ledger-service
+
+    C->>P: POST /api/v1/transfers (Idempotency-Key)
+    P->>DB: 송금인·키로 기존 송금 조회
+    alt 같은 키의 송금이 있음
+        P-->>C: 요청 해시가 같으면 현재 상태로 응답, 다르면 409 (원장 호출 없음)
+    else 처음 요청
+        P->>W: 송금인 지갑 조회 (ACTIVE인지)
+        P->>U: 수취인 회원 확인 (I02)
+        P->>W: 수취인 지갑 조회 (ACTIVE인지)
+        Note over P,U: 여기서 실패하면 송금을 저장하지 않음. 같은 키로 다시 요청 가능
+        P->>DB: PROCESSING으로 저장·커밋 (UNIQUE 충돌이면 먼저 저장된 송금으로 응답)
+        Note over P,L: 원장 호출 동안 DB 트랜잭션·커넥션을 잡지 않음
+        P->>L: 거래 등록 (TRANSFER + 송금 ID, 송금인 DEBIT·수취인 CREDIT)
+        alt POSTED
+            P->>DB: PROCESSING일 때만 COMPLETED
+            P-->>C: 201 COMPLETED
+        else 422 거절
+            P->>DB: PROCESSING일 때만 FAILED + 실패 사유
+            P-->>C: 422
+        else 타임아웃·연결 실패·5xx
+            P->>DB: 시도 횟수 +1 (PROCESSING 유지)
+            P-->>C: 202 PROCESSING (이후 복구 스케줄러가 재전송)
+        else 409·400
+            P->>DB: MANUAL_REVIEW
+            P-->>C: 202 MANUAL_REVIEW
+        end
+    end
+```
 
 회원당 지갑은 하나이고, 통화별 계정은 원장이 `walletId + currency`로 찾습니다. 지갑·회원 확인은 빠른 거절용이며 최종 판단(잔액, 계정 상태)은 원장 거래 등록 결과입니다.
 
@@ -255,6 +295,26 @@ user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니�
 | `REJECTED` | `FAILED`(`ledgerTransactionId` = 원장 거래 ID) | `FAILED`, 실패 사유는 원장 거절 사유(`INSUFFICIENT_BALANCE` / 그 밖 `ACCOUNT_UNAVAILABLE`). 원장 미수락 송금은 `NOT_PROCESSED` |
 | 기록 없음(404 `LEDGER_TRANSACTION_NOT_FOUND`) | `PROCESSING`(`ledgerTransactionId` 없음) | 시도 횟수 0으로 되돌려 복구 스케줄러가 약 30초 뒤 같은 reference로 재전송 |
 
+```mermaid
+flowchart TD
+    A["POST /api/v1/admin/transfers/{id}/resolve"] --> B{"User-Role이 MASTER인가"}
+    B -->|아니오| X1["403 COMMON_FORBIDDEN"]
+    B -->|예| C{"송금이 MANUAL_REVIEW인가"}
+    C -->|아니오| R{"마지막 운영자 확정과<br/>운영자·내용이 같은가"}
+    R -->|"예 (응답 유실 후 재시도)"| OK["200 현재 상태<br/>원장 다시 조회하지 않음"]
+    R -->|아니오| X2["409 COMMON_CONFLICT"]
+    C -->|예| L["원장 reference 조회<br/>(DB 트랜잭션 밖)"]
+    L -->|"조회 실패"| X3["502·503·504<br/>상태 그대로"]
+    L -->|POSTED| E{"원장 항목이<br/>송금과 같은가"}
+    E -->|아니오| X4["409 TRANSFER_RESOLUTION_MISMATCH"]
+    E -->|예| T1["COMPLETED"]
+    L -->|REJECTED| T2["FAILED<br/>원장 거절 사유<br/>(원장 미수락 건은 NOT_PROCESSED)"]
+    L -->|기록 없음| T3["PROCESSING<br/>시도 횟수 0"]
+    T1 --> U["targetStatus·원장 거래 ID가 결과와 맞는지 확인 (다르면 409)<br/>→ MANUAL_REVIEW일 때만 조건부 UPDATE + 이력 저장 (같은 트랜잭션)"]
+    T2 --> U
+    T3 --> U
+```
+
 - `reason`에는 확정 판단 근거를 적습니다. 원장 조회 결과(상태·거래 ID), 거절 사유, `NOT_PROCESSED`로 확정한 이유처럼 나중에 이력만 보고도 판단을 다시 확인할 수 있는 내용을 씁니다(예: `원장 POSTED(c92b2030-…), 항목 일치 확인`, `원장 REJECTED(INSUFFICIENT_BALANCE), 원장 409로 미수락된 요청이라 NOT_PROCESSED로 확정`). 실패 사유는 `transfer.failure_reason`에만 저장되고 이력에는 별도 컬럼이 없으므로, 근거는 이 문장으로 남깁니다
 - 맞지 않으면 `409 TRANSFER_RESOLUTION_MISMATCH`, `MANUAL_REVIEW`가 아니면 `409 COMMON_CONFLICT`. 형식 오류는 `400 COMMON_INVALID_REQUEST`
 - 이미 확정된 송금에 같은 운영자가 같은 본문(`targetStatus`·`reason`·`ledgerTransactionId`)으로 다시 요청하면(응답 유실 후 재시도) 원장을 다시 조회하지 않고 현재 송금 상태를 200으로 돌려줍니다. 마지막 운영자 확정 이력과 비교하며, 다른 운영자·다른 내용이면 `409 COMMON_CONFLICT`입니다. `Idempotency-Key`는 받지 않습니다(자금을 직접 옮기지 않고 조건부 UPDATE로 한 번만 반영됨)
@@ -267,17 +327,21 @@ user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니�
 
 ## 송금 상태
 
-```txt
-REQUESTED ──취소──▶ CANCELLED            (원장 연동 전 접수 건만)
-
-PROCESSING ──원장 반영──▶ COMPLETED
-           ──원장 거절──▶ FAILED
-           ──결과 모름 1~4회──▶ PROCESSING   (시도 횟수 +1, 대기 후 복구 스케줄러가 재전송)
-           ──결과 모름 5회 / 원장이 요청을 받지 않음──▶ MANUAL_REVIEW
-
-MANUAL_REVIEW ──운영자 확정(원장 POSTED)──▶ COMPLETED
-              ──운영자 확정(원장 REJECTED)──▶ FAILED
-              ──운영자 확정(원장 기록 없음)──▶ PROCESSING   (시도 횟수 0)
+```mermaid
+stateDiagram-v2
+    [*] --> PROCESSING : 송금 요청
+    [*] --> REQUESTED : 원장 연동 전 접수
+    REQUESTED --> CANCELLED : 송금인 취소
+    PROCESSING --> COMPLETED : 원장 POSTED
+    PROCESSING --> FAILED : 원장 거절 422
+    PROCESSING --> PROCESSING : 결과 모름 1~4회, 시도 횟수 +1
+    PROCESSING --> MANUAL_REVIEW : 결과 모름 5회 또는 원장 409·400
+    MANUAL_REVIEW --> COMPLETED : 운영자 확정, 원장 POSTED·항목 일치
+    MANUAL_REVIEW --> FAILED : 운영자 확정, 원장 REJECTED
+    MANUAL_REVIEW --> PROCESSING : 운영자 확정, 원장 기록 없음, 시도 횟수 0
+    COMPLETED --> [*]
+    FAILED --> [*]
+    CANCELLED --> [*]
 ```
 
 - 상태를 바꾸는 경로는 조건부 UPDATE뿐이고, 각 UPDATE의 시작 상태 조건이 위 전이만 허용합니다. DB CHECK는 상태와 사유 컬럼의 조합만 검사합니다.
@@ -334,6 +398,22 @@ MANUAL_REVIEW ──운영자 확정(원장 POSTED)──▶ COMPLETED
 | 한도 | 결과 모름 5회(첫 요청 포함)면 `MANUAL_REVIEW`(`RETRY_EXHAUSTED`) |
 | 원장 장애 판단 | 한 주기에서 결과 모름이 연달아 3번이면 남은 건은 다음 주기로 |
 | 끄기 | `transfer.recovery.enabled=false` (테스트·수동 확인용) |
+
+```mermaid
+flowchart TD
+    A["10초마다: 재시도 시각이 지난 PROCESSING 송금을<br/>오래된 순으로 최대 10건 조회"] --> B{"선점 UPDATE<br/>상태·수정 시각이 조회 때와 같은가"}
+    B -->|"아니오 (다른 인스턴스·재요청이 먼저 처리)"| S["건너뜀"]
+    B -->|예| C["저장된 값으로 같은 reference 원장 재전송"]
+    C --> D{"원장 결과"}
+    D -->|"POSTED / 422 거절"| E["COMPLETED / FAILED<br/>(PROCESSING일 때만 반영)"]
+    D -->|"409·400"| F["MANUAL_REVIEW<br/>LEDGER_REQUEST_NOT_ACCEPTED"]
+    D -->|"타임아웃·5xx·해석 불가"| G{"시도 횟수 +1 이 5인가"}
+    G -->|예| H["MANUAL_REVIEW<br/>RETRY_EXHAUSTED"]
+    G -->|아니오| I["PROCESSING 유지<br/>30초 × 2^(n−1) 뒤 다시 대상"]
+    I --> J{"이번 주기에 결과 모름이<br/>연달아 3번인가"}
+    J -->|"예 (원장 장애로 봄)"| K["남은 건은 다음 주기로"]
+    J -->|아니오| L["다음 건 처리"]
+```
 
 - 선점: 조회한 송금의 상태·수정 시각이 그대로일 때만 조건부 UPDATE로 가져갑니다. 여러 인스턴스가 함께 돌아도 같은 송금을 동시에 처리하지 않고, 결과 반영도 `PROCESSING`일 때만 하므로 잔액·상태는 한 번만 바뀝니다. 분산 락은 쓰지 않습니다.
 - 한 건의 오류는 로그만 남기고 다음 건을 계속 처리합니다.
@@ -521,6 +601,123 @@ k6 스크립트·실행 방법·전체 결과는 [`payment-service/load-test/REA
 - 응답 없음이 0.01~0.09% 있었는데, 모두 k6 컨테이너에서 PC로 새 연결을 맺다 실패한 것(`dial: i/o timeout`)이라 서버에 닿지 않은 요청입니다. 이 실패로 상세 측정은 가상 사용자가 몇 초씩 멈춰 TPS가 낮게 나왔으므로 상세는 서버 평균(4.0ms)으로 봅니다.
 - 목록·반반 측정도 PC CPU가 98%로 포화됐습니다. payment 커넥션 풀이 찼지만 DB에서 실행 중인 쿼리는 평균 1개 미만이었습니다. 원인은 CPU이고 풀이 아닙니다.
 - 쿼리 자체는 빠릅니다. 보낸 내역 첫 페이지 0.15ms, 건수 0.7ms(인덱스만 읽음). `direction`을 생략한 전체 조회는 두 인덱스를 합쳐 회원 송금을 모두 읽고 정렬해 6.2ms이며(부하 측정은 하지 않음), 건수 조회와 함께 회원 송금 수에 비례해 느려집니다.
+
+## 설계 결정
+
+송금을 만들면서 내린 주요 결정입니다. 각 결정마다 상황, 결정, 검토한 대안, 감수한 점, 근거(테스트·검증)를 적습니다. 팀 최종 확정 전에 정한 결정은 (임시)로 표시합니다.
+
+| # | 결정 | 한 줄 요약 |
+|---|---|---|
+| D1 | [잔액 변경은 원장에 맡긴다](#d1-잔액-변경은-원장에-맡긴다) | 송금 하나 = 원장 거래 하나(차변·대변 두 줄), 분산 트랜잭션 없음 |
+| D2 | [멱등성은 송금 테이블의 UNIQUE와 요청 해시로](#d2-멱등성은-송금-테이블의-unique와-요청-해시로) | 키와 송금이 한 행이라 "키만 저장된" 상태가 없음 |
+| D3 | [원장 호출 전에 PROCESSING으로 커밋하고, 호출은 트랜잭션 밖에서](#d3-원장-호출-전에-processing으로-커밋하고-호출은-트랜잭션-밖에서) | 어느 시점에 죽어도 송금 행이 먼저 남아 복구 대상이 됨 |
+| D4 | [결과 모름은 실패로 보지 않는다](#d4-결과-모름은-실패로-보지-않는다) | 타임아웃·5xx는 202 `PROCESSING`, 재전송은 스케줄러만 |
+| D5 | [복구는 선점 UPDATE, 지수 백오프, 시도 한도로](#d5-복구는-선점-update-지수-백오프-시도-한도로) | 분산 락 없이 중복 처리 무해, 끝나지 않는 건은 사람에게 넘김 |
+| D6 | [상태 변경은 조건부 UPDATE로만](#d6-상태-변경은-조건부-update로만) | 허용 전이가 WHERE 조건에 드러나고 테스트로 고정됨 |
+| D7 | [운영자 확정은 서버가 원장을 직접 대조한다](#d7-운영자-확정은-서버가-원장을-직접-대조한다) | 운영자 입력을 믿지 않고 원장 항목과 맞을 때만 확정 |
+| D8 | [도입하지 않은 것](#d8-도입하지-않은-것) | Kafka·Outbox, Saga, Redis 멱등성, 분산 락, 잔액 사전 조회 |
+
+```mermaid
+flowchart LR
+    subgraph payment["payment-service (송금)"]
+        T["transfer 행<br/>상태·멱등성 키·시도 횟수"]
+        S["복구 스케줄러"]
+        A["운영자 확정 API"]
+    end
+    W["wallet-service<br/>지갑 상태"]
+    U["user-service<br/>회원 상태 (I02, Redis 호출 제한)"]
+    L["ledger-service<br/>잔액·잠금·reference 멱등"]
+
+    T -- "빠른 거절용 조회" --> W
+    T -- "빠른 거절용 조회" --> U
+    T -- "거래 등록 (D1)" --> L
+    S -- "같은 reference 재전송 (D4·D5)" --> L
+    A -- "reference·항목 조회 (D7)" --> L
+```
+
+### D1. 잔액 변경은 원장에 맡긴다
+
+- **상황**: 서비스마다 DB가 따로 있고, 잔액은 ledger-service가 가집니다(wallet-service는 지갑 상태만 가짐). 송금인 차감과 수취인 입금이 한쪽만 반영되면 안 됩니다.
+- **결정**: 송금 하나를 원장 거래 하나로 등록합니다. 송금인 지갑 DEBIT `TRANSFER_OUT`과 수취인 지갑 CREDIT `TRANSFER_IN` 두 줄을 reference `TRANSFER + 송금 ID`로 보내면, 원장이 한 DB 트랜잭션에서 잔액 확인·잠금·반영을 하거나 둘 다 거절합니다. 송금은 잔액을 직접 바꾸지 않고 상태만 관리합니다. 지갑·회원 조회는 빠른 거절용이고, 최종 판단은 원장 결과입니다. (임시)
+- **검토한 대안**:
+  - 지갑 차감 API와 입금 API를 따로 부르고 실패하면 보상(Saga): 차감만 된 구간이 생기고, 보상이 실패했을 때의 처리가 또 필요합니다.
+  - 송금이 잔액을 먼저 조회하고 차감: 조회와 차감 사이에 다른 송금이 끼어들어 동시성을 보장하지 못합니다.
+- **감수한 점**: 원장 응답을 받지 못하면 결과를 모르는 구간이 생깁니다(D3·D4). 한 계정에 거래가 몰리면 원장 행 잠금으로 처리가 직렬화됩니다([부하 측정](#부하-측정)).
+- **근거**: 잔액보다 많은 동시 송금·양방향 동시 송금에서 음수·교착 없음(2026-11-02 E2E), 부하 측정 후 송금·원장·잔액 대사 위반 0.
+
+### D2. 멱등성은 송금 테이블의 UNIQUE와 요청 해시로
+
+- **상황**: 금전 POST는 `Idempotency-Key`가 필수입니다. 같은 키·같은 내용은 같은 결과, 같은 키·다른 내용은 409여야 하고, 동시에 들어온 중복도 막아야 합니다.
+- **결정**: 송금 행에 `idempotency_key`와 `request_hash`(수취인·금액·통화·정규화한 메모의 SHA-256)를 저장하고 `UNIQUE(sender_id, idempotency_key)`를 둡니다. 먼저 조회하고, 동시 요청이 UNIQUE에 걸리면 먼저 저장된 송금을 다시 읽어 응답합니다.
+- **검토한 대안**:
+  - 별도 멱등성 테이블: 팀 공통 정책이 없었고, 송금 행과 따로 두면 "키는 있는데 송금은 없는" 상태를 다뤄야 합니다.
+  - Redis에 키 저장: 만료나 Redis 장애 때 중복 송금 경로가 생기고, 거래 기록을 Redis에만 두지 않는다는 원칙에 어긋납니다.
+  - 조회만으로 판단: 조회와 저장 사이에 같은 키 요청이 끼어듭니다.
+- **감수한 점**: 키는 송금인 범위로만 구분하고 만료가 없습니다(송금 행과 수명이 같음).
+- **근거**: 같은 키 20건 동시 요청 → 송금 1건, 원장 호출 1번(`TransferConsistencyIntegrationTest`). 지갑·회원 확인에서 실패하면 저장 전이라 같은 키를 다시 쓸 수 있습니다.
+
+### D3. 원장 호출 전에 PROCESSING으로 커밋하고, 호출은 트랜잭션 밖에서
+
+- **상황**: 원장 호출은 최대 약 6초 걸릴 수 있고, 호출 도중 payment-service가 죽거나 응답이 사라질 수 있습니다.
+- **결정**: 송금을 `PROCESSING`으로 저장·커밋한 뒤 DB 트랜잭션 없이 원장을 부르고, 결과는 `PROCESSING`일 때만 바꾸는 조건부 UPDATE로 반영합니다.
+- **검토한 대안**:
+  - 한 트랜잭션 안에서 원장 호출: 원장을 기다리는 동안 DB 커넥션을 잡고, 롤백되면 원장은 반영했는데 송금 기록이 사라져 추적할 수 없습니다.
+  - 원장 호출 뒤에 저장: 저장 전에 죽으면 원장 거래만 남고 송금이 없습니다.
+- **감수한 점**: 요청당 커밋이 2번입니다. 처음부터 `PROCESSING`이라 접수 직후 취소는 할 수 없습니다(원장 호출과 취소가 겹치는 경합을 막기 위해 의도한 것).
+- **근거**: 원장 반영 후 기록 실패를 결과 모름으로 처리해 복구(`TransferLedgerFlowTest`). 수취인 집중 부하 측정에서 원장 처리 시간이 평균 166ms로 늘어도 payment 커넥션 사용은 평균 1.1개, 대기 0이었습니다.
+
+### D4. 결과 모름은 실패로 보지 않는다
+
+- **상황**: 타임아웃·연결 실패·5xx는 원장이 이미 처리했을 수도 있습니다. 실패로 응답하면 사용자가 새 키로 다시 보내 이중 송금이 될 수 있습니다.
+- **결정**: 송금을 `PROCESSING`으로 두고 202로 응답합니다. 같은 키 재요청은 원장을 다시 부르지 않고 현재 상태로 응답하며, 재전송은 복구 스케줄러만 합니다. 원장은 같은 reference를 한 번만 처리하므로(잔액 확인 전에 기존 거래를 돌려줌) 재전송해도 잔액은 한 번만 바뀝니다.
+- **바뀐 점**: 처음에는 같은 키 재요청이 원장에 재전송했습니다. 재요청이 없으면 영원히 `PROCESSING`으로 남고, 클라이언트 재시도가 몰리면 원장 부하가 커져 재전송을 스케줄러 하나로 모았습니다.
+- **검토한 대안**: 503·504 응답(이중 송금 위험), 요청 안에서 자동 재시도(응답 시간이 길어지고 원장 장애 때 부하 증폭, Feign 재시도는 끔).
+- **근거**: 원장 정지 → 202 → 원장 재기동 후 재요청 없이 약 30초 뒤 `COMPLETED`, 응답 유실(읽기 타임아웃 1ms) → 재전송 → 잔액 1회 변경(2026-11-04 E2E).
+
+### D5. 복구는 선점 UPDATE, 지수 백오프, 시도 한도로
+
+- **상황**: 여러 인스턴스와 같은 키 재요청이 같은 송금을 동시에 다룰 수 있습니다. 원장 장애가 길면 재전송이 원장을 더 누르고, 끝나지 않는 송금도 생깁니다.
+- **결정**:
+  - 선점: 조회 때의 상태·수정 시각이 그대로일 때만 조건부 UPDATE로 가져갑니다. 결과 반영도 `PROCESSING`일 때만 합니다.
+  - 간격: 30초 × 2^(n−1)(30초, 1분, 2분, 4분). 한 주기에서 결과 모름이 연달아 3번이면 원장 장애로 보고 남은 건을 미룹니다.
+  - 한도: 결과 모름 5번이면 `MANUAL_REVIEW`(`RETRY_EXHAUSTED`). 원장 409·400은 다시 보내도 같으므로 바로 `MANUAL_REVIEW`(`LEDGER_REQUEST_NOT_ACCEPTED`)이며 `FAILED`로 끝내지 않습니다. 409는 같은 reference 거래가 이미 있다는 뜻일 수 있어서입니다. (임시, 충전 복구와 같은 간격·한도)
+- **검토한 대안**:
+  - 분산 락(ShedLock 등): 의존성이 늘고, 선점 UPDATE·원장 reference 멱등·조건부 반영으로 겹쳐도 결과가 한 번만 반영되므로 필요 없습니다.
+  - 고정 1분 간격: 원장이 회복될 때 재전송이 한꺼번에 몰립니다.
+  - 한도 없는 재시도: 400·409처럼 다시 보내도 같은 건이 영원히 돌고 사람이 알 수 없습니다.
+- **감수한 점**: 결과 모름 횟수를 올리는 UPDATE 자체가 계속 실패하면 한도에 닿지 않습니다([알려진 한계](#알려진-한계)). 30분 넘은 `PROCESSING` 지표로 드러납니다.
+- **근거**: `TransferRecoverySchedulerIntegrationTest`, 복구 4번 + 재요청 4번 동시 → 재전송 1번(`TransferConsistencyIntegrationTest`).
+
+### D6. 상태 변경은 조건부 UPDATE로만
+
+- **상황**: 송금 요청, 복구 스케줄러, 취소, 운영자 확정이 같은 송금 행을 바꿀 수 있습니다.
+- **결정**: 모든 상태 변경을 시작 상태를 조건으로 건 UPDATE(`WHERE id = ? AND status = ?` 등)로 합니다. 0행이면 다른 경로가 먼저 바꾼 것이므로 다시 읽은 상태를 따릅니다.
+- **검토한 대안**:
+  - JPA 낙관적 락(`@Version`): 충돌을 예외로 받아 다시 처리해야 하는데, 여기서 필요한 것은 누가 먼저 바꿨는지뿐입니다.
+  - 비관적 락(`SELECT ... FOR UPDATE`): 원장 호출 동안 잠금을 쥐거나, 잠금과 호출 경계를 따로 관리해야 합니다.
+- **이유**: 확인과 변경이 한 문장이라 원자적이고 잠금 대기가 없습니다. 허용 전이가 WHERE 조건에 그대로 드러나 테스트로 고정하기 쉽습니다.
+- **근거**: 조건부 UPDATE 10가지 × 시작 상태 6개 = 60건(`TransferStatusTransitionIntegrationTest`), 운영자 동시 확정 8건 → 이력 1건.
+
+### D7. 운영자 확정은 서버가 원장을 직접 대조한다
+
+- **상황**: `MANUAL_REVIEW`는 자동으로 끝나지 않습니다. 특히 `RETRY_EXHAUSTED`는 원장에 이미 반영됐을 수 있어, 근거 없이 상태만 바꾸면 잔액과 송금 상태가 어긋납니다.
+- **결정**: 확정 API가 원장 reference를 직접 조회합니다. `POSTED`이고 원장 항목(지갑·방향·통화·금액·entryType)이 송금과 같으면 `COMPLETED`, `REJECTED`면 `FAILED`, 기록이 없으면 시도 횟수 0의 `PROCESSING`으로 돌려 재처리합니다. 운영자 입력(`targetStatus`·원장 거래 ID)이 원장 결과와 다르면 409입니다. 상태 변경과 이력 저장은 한 트랜잭션입니다. 이력은 운영자 확정만 남깁니다. (임시)
+- **세부 판단**:
+  - 원장 409로 미수락된 송금인데 원장에 `REJECTED`가 있으면, 그 거절은 이전의 다른 요청 것일 수 있어 원장 사유를 쓰지 않고 `NOT_PROCESSED`로 확정합니다. (임시)
+  - `Idempotency-Key` 대신 마지막 운영자 이력과 비교해 같은 요청이면 200을 돌려줍니다. 자금을 직접 옮기지 않고 조건부 UPDATE로 한 번만 반영되기 때문입니다.
+- **검토한 대안**: 운영자가 상태만 바꾸는 API(빠르지만 잘못 확정할 수 있음), 운영자가 근거를 입력하고 서버는 저장만 하는 방식(입력 오류를 막지 못함).
+- **근거**: `AdminTransferResolveIntegrationTest`(원장 결과별 확정, 항목 불일치 9종 × 사유 2종, 동시 확정, 재요청).
+
+### D8. 도입하지 않은 것
+
+| 후보 | 도입하지 않은 이유 |
+|---|---|
+| Kafka·Outbox | 송금 완료 이벤트를 구독할 서비스가 없습니다. 원장 결과는 응답에 바로 필요해 비동기로 바꿀 이유도 없습니다. 수취인 알림 같은 요구가 생기면 Outbox로 검토합니다 |
+| Saga·분산 트랜잭션 | 원장이 두 줄을 한 거래로 처리해 서비스 간 보상이 필요 없습니다(D1) |
+| Redis 멱등성 키·캐시 | DB UNIQUE가 기준이고, Redis 만료·장애 때 중복 경로만 늘어납니다(D2) |
+| 분산 락 | 선점 UPDATE와 원장 멱등으로 충분합니다(D5) |
+| 송금 쪽 호출 제한 구현 | 수취인 대량 조회는 user-service I02의 Redis 호출 제한(요청자별 60초 60회)이 이미 막습니다. 송금은 429를 그대로 전달합니다. Redis가 멈추면 I02가 503으로 막으며(fail-closed), 이미 `PROCESSING`인 송금의 복구는 I02를 부르지 않아 계속 돕니다 |
+| 잔액 사전 조회 | 원장 호출이 한 번 늘고, 조회와 차감 사이 경합 때문에 최종 판단은 어차피 원장 거래 등록 결과입니다 |
 
 ## 알려진 한계
 
