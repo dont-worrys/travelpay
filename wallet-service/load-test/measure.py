@@ -400,6 +400,12 @@ def main():
     manual = charges["statuses"].get("MANUAL_REVIEW", {}).get("count", 0)
     if manual:
         reasons.append(f"MANUAL_REVIEW {manual}건")
+    failed = {status: charges["statuses"].get(status, {}).get("count", 0) for status in ("FAILED", "REFUNDED")}
+    if any(failed.values()):
+        reasons.append(", ".join(f"{status} {count}건" for status, count in failed.items() if count))
+    accepted_202 = summary["statusCounts"]["202"]
+    if charges["accepted"] != accepted_202:
+        reasons.append(f"DB 접수 {charges['accepted']}건 ≠ k6 202 응답 {accepted_202}건")
 
     if drain_seconds is None:
         reasons.append(f"{args.drain_timeout}초 안에 종결되지 않은 충전이 있음 (출금 정합성·대사 생략)")
