@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
+import com.travelpay.exchange.application.order.ExchangeManualReviewView;
 import com.travelpay.exchange.application.order.ExchangeOrderListCondition;
 import com.travelpay.exchange.application.order.ExchangeOrderQueryRepository;
 import com.travelpay.exchange.domain.money.Currency;
@@ -19,7 +20,9 @@ import com.travelpay.exchange.domain.order.ExchangeFailureReason;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistoryRepository;
 import com.travelpay.exchange.domain.order.ExchangeOrderType;
+import com.travelpay.exchange.domain.order.ManualReviewReason;
 import com.travelpay.exchange.domain.order.OrderFixtures;
 import com.travelpay.exchange.domain.order.Settlement;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
@@ -95,6 +98,9 @@ class ExchangeOrderListQueryIntegrationTest {
 
     @Autowired
     private ExchangeOrderRepository orderRepository;
+
+    @Autowired
+    private ExchangeOrderStatusHistoryRepository historyRepository;
 
     @Autowired
     private ExchangeQuoteRepository quoteRepository;
@@ -230,6 +236,43 @@ class ExchangeOrderListQueryIntegrationTest {
             String plan = explainWithoutSeqScan(query);
             assertTrue(plan.contains("ix_exchange_orders_user_created"), plan);
         }
+    }
+
+    @Test
+    void findsManualReviewsOldestFirstAndFiltersByReason() {
+        // order 1: oldest MANUAL_REVIEW, reason LEDGER_CONFLICT
+        UUID order1 = order(OWNER, Currency.KRW, Currency.JPY, T0);
+        orderRepository.settleIfProcessing(order1, Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), T0);
+        historyRepository.save(Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT).history(order1));
+
+        // order 2: newer MANUAL_REVIEW, reason LEDGER_UNCONFIRMED_TOO_LONG
+        UUID order2 = order(OWNER, Currency.KRW, Currency.JPY, T0.plusSeconds(10));
+        orderRepository.settleIfProcessing(order2, Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), T0.plusSeconds(10));
+        historyRepository.save(Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG).history(order2));
+
+        // order 3: COMPLETED order (should be excluded)
+        UUID order3 = order(OWNER, Currency.KRW, Currency.JPY, T0.plusSeconds(20));
+        orderRepository.settleIfProcessing(order3, Settlement.completed(UUID.randomUUID(), T0.plusSeconds(20)), T0.plusSeconds(20));
+
+        // 1. 전체 조회 (사유 필터 없음): 오래된 순(order1 -> order2)
+        Page<ExchangeManualReviewView> all = queryRepository.findManualReviews(null, PageRequest.of(0, 10));
+        assertEquals(2, all.getTotalElements());
+        assertEquals(order1, all.getContent().get(0).order().getId());
+        assertEquals(ManualReviewReason.LEDGER_CONFLICT, all.getContent().get(0).reviewReason());
+        assertEquals(order2, all.getContent().get(1).order().getId());
+        assertEquals(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG, all.getContent().get(1).reviewReason());
+
+        // 2. LEDGER_CONFLICT 필터: order1만 반환
+        Page<ExchangeManualReviewView> conflict = queryRepository.findManualReviews(
+                ManualReviewReason.LEDGER_CONFLICT, PageRequest.of(0, 10));
+        assertEquals(1, conflict.getTotalElements());
+        assertEquals(order1, conflict.getContent().get(0).order().getId());
+        assertEquals(ManualReviewReason.LEDGER_CONFLICT, conflict.getContent().get(0).reviewReason());
+
+        // 3. LEDGER_BAD_REQUEST 필터: 0건
+        Page<ExchangeManualReviewView> badRequest = queryRepository.findManualReviews(
+                ManualReviewReason.LEDGER_BAD_REQUEST, PageRequest.of(0, 10));
+        assertEquals(0, badRequest.getTotalElements());
     }
 
     private String explainWithoutSeqScan(String query) {
