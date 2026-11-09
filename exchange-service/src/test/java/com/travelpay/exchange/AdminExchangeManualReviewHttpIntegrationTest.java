@@ -16,6 +16,7 @@ import java.util.UUID;
 import com.jayway.jsonpath.JsonPath;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.travelpay.exchange.application.order.ExchangeOrderBacklogMonitor;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.rate.CollectedRate;
@@ -26,6 +27,7 @@ import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -112,6 +114,12 @@ class AdminExchangeManualReviewHttpIntegrationTest {
 
     @Autowired
     private ExchangeQuoteIntegrationTest.MutableClock clock;
+
+    @Autowired
+    private ExchangeOrderBacklogMonitor backlogMonitor;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     private MockMvc mockMvc;
     private String quoteId;
@@ -289,6 +297,23 @@ class AdminExchangeManualReviewHttpIntegrationTest {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("EXCHANGE_NOT_MANUAL_REVIEW"));
         assertEquals(1, masterHistoryCount());
+    }
+
+    /** 사람 확인 대기 지표는 모니터가 센 값을 보여 주고, 관리자가 처리하면 다음 갱신에서 줄어든다 */
+    @Test
+    void manualReviewGaugeFollowsMonitorRefresh() throws Exception {
+        backlogMonitor.refresh();
+        assertEquals(1.0, meterRegistry.get("exchange.order.manual_review").gauge().value());
+        assertEquals(0.0, meterRegistry.get("exchange.order.processing.stuck").gauge().value());
+
+        lookupReply = new LedgerReply(404, """
+                {"success":false,"data":null,"error":{"code":"LEDGER_TRANSACTION_NOT_FOUND","message":"없음"}}
+                """);
+        resolve(null).andExpect(status().isOk());
+        assertEquals(1.0, meterRegistry.get("exchange.order.manual_review").gauge().value(), "갱신 전에는 이전 값");
+
+        backlogMonitor.refresh();
+        assertEquals(0.0, meterRegistry.get("exchange.order.manual_review").gauge().value());
     }
 
     /** MASTER가 아니면 원장을 조회하기 전에 막는다 */
