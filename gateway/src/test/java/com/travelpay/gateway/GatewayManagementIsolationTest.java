@@ -2,7 +2,10 @@ package com.travelpay.gateway;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.UUID;
 
 import com.travelpay.gateway.support.StubServer;
 import org.junit.jupiter.api.AfterAll;
@@ -15,9 +18,12 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
+import org.slf4j.LoggerFactory;
+import tools.jackson.databind.json.JsonMapper;
 
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 로컬 YAML의 관리 포트 분리·API 차단·Actuator 수집을 실제 HTTP로 확인합니다. */
@@ -38,6 +44,9 @@ class GatewayManagementIsolationTest {
 
     @Value("${local.management.port:${local.server.port}}")
     private int managementPort;
+
+    @Value("${logging.file.name:}")
+    private String logFile;
 
     @DynamicPropertySource
     static void userServiceOnAStubServer(DynamicPropertyRegistry registry) {
@@ -78,6 +87,35 @@ class GatewayManagementIsolationTest {
                 .value(body -> assertTrue(body.contains("# HELP") && body.contains("# TYPE")));
 
         assertTrue(USER.received().isEmpty());
+    }
+
+    @Test
+    void localRunWritesStructuredExceptionLogsToAServiceFile() throws IOException {
+        assertFalse(logFile.isBlank(), "Alloy가 읽을 로그 파일이 필요합니다.");
+        var marker = "monitoring-log-verification-" + UUID.randomUUID();
+        LoggerFactory.getLogger(getClass()).warn(marker, new IllegalStateException("verification exception"));
+
+        var lines = Files.readAllLines(Path.of(logFile));
+        var line = lines.stream().filter(value -> value.contains(marker)).findFirst().orElseThrow();
+        var log = JsonMapper.builder().build().readTree(line);
+
+        assertEquals("gateway.log", Path.of(logFile).getFileName().toString());
+        assertEquals("gateway", log.path("service").asString());
+        assertEquals(marker, log.path("message").asString());
+        assertTrue(log.path("stack_trace").asString().contains("verification exception"));
+        assertFalse(log.path("@timestamp").asString().isBlank());
+    }
+
+    @Test
+    void localRunPublishesHttpHistogramBucketsForApplicationRequests() {
+        client(apiPort).get().uri("/api/v1/terms").exchange().expectStatus().isOk();
+
+        client(managementPort).get().uri("/actuator/prometheus").exchange()
+                .expectStatus().isOk().expectBody(String.class)
+                .value(body -> assertTrue(body.lines().anyMatch(line ->
+                        line.startsWith("http_server_requests_seconds_bucket{")
+                                && !line.contains("uri=\"/actuator/")),
+                        "p95·p99 계산에 사용할 실제 API 요청의 bucket 지표가 필요합니다."));
     }
 
     @Test

@@ -101,6 +101,11 @@ eureka:
       defaultZone: http://localhost:8761/eureka/
 
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # Prometheus에서 HTTP p95·p99를 계산할 수 있도록 bucket을 발행합니다.
+        http.server.requests: true
   tracing:
     propagation:
       # 외부 부모 trace는 추출하지 않고 Gateway에서 새 trace를 시작합니다.
@@ -110,18 +115,28 @@ management:
     baggage:
       enabled: false
   server:
-    # API와 다른 양수 고정 포트 사용(0 자동 할당 제외), 기본 주소는 로컬 전용
+    # API와 다른 양수 고정 포트 사용(0 자동 할당 제외).
+    # Docker의 Prometheus가 host.docker.internal로 수집하도록 모든 인터페이스에서 수신합니다.
     port: ${GATEWAY_MANAGEMENT_PORT:18080}
-    address: ${GATEWAY_MANAGEMENT_ADDRESS:127.0.0.1}
+    address: ${GATEWAY_MANAGEMENT_ADDRESS:0.0.0.0}
   endpoints:
     web:
       exposure:
         include: health,prometheus
 
 logging:
+  # IntelliJ 작업 디렉터리는 프로젝트 루트입니다. Alloy가 앱별 파일을 읽습니다.
+  file:
+    name: infra/monitoring/.local-logs/${spring.application.name}.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 3
+      total-size-cap: 50MB
   structured:
     format:
       console: logstash
+      file: logstash
     json:
       add:
         service: ${spring.application.name}

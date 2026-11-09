@@ -1,0 +1,33 @@
+# TRAVELPAY 로컬 Prometheus 설정
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus 자체 상태 확인
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - prometheus:9090
+
+  # Loki 자체 상태 확인
+  - job_name: loki
+    static_configs:
+      - targets:
+          - loki:3100
+
+  # Alloy 자체 상태 확인
+  - job_name: alloy
+    static_configs:
+      - targets:
+          - alloy:12345
+
+  # TRAVELPAY Spring Boot 서비스 메트릭
+  - job_name: spring-jvm
+    metrics_path: /actuator/prometheus
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.yml
+        refresh_interval: 15s

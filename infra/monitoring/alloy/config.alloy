@@ -1,0 +1,75 @@
+// TRAVELPAY 로컬 로그 수집 설정
+
+// 1. 기존 개발용 Compose 컨테이너 발견
+discovery.docker "travelpay" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "15s"
+
+	filter {
+		name   = "label"
+		values = ["com.docker.compose.project=travelpay-local"]
+	}
+}
+
+// 2. Docker Compose 서비스 이름을 로그 레이블로 변환
+discovery.relabel "docker_service" {
+	targets = []
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service_name"
+	}
+}
+
+// 3. Docker 컨테이너 로그 수집
+loki.source.docker "development" {
+	host          = "unix:///var/run/docker.sock"
+	targets       = discovery.docker.travelpay.targets
+	labels        = {job = "docker-local", environment = "local"}
+	relabel_rules = discovery.relabel.docker_service.rules
+	forward_to    = [loki.write.local.receiver]
+}
+
+// Spring Boot 로그 파일 탐색
+local.file_match "spring_jvm" {
+	path_targets = [{
+		"__path__"    = "/var/log/travelpay/*.log",
+		"job"         = "spring-local",
+		"environment" = "local",
+	}]
+	sync_period = "10s"
+}
+
+loki.source.file "spring_jvm" {
+	targets    = local.file_match.spring_jvm.targets
+	forward_to = [loki.process.spring_jvm.receiver]
+}
+
+// JSON 예외 로그는 한 줄로 기록됩니다. 서비스만 레이블로 올리고 traceId는 원문에 유지합니다.
+loki.process "spring_jvm" {
+	stage.json {
+		expressions = {
+			service   = "service",
+			timestamp = "\"@timestamp\"",
+		}
+	}
+
+	stage.labels {
+		values = {service_name = "service"}
+	}
+
+	stage.timestamp {
+		source            = "timestamp"
+		format            = "RFC3339Nano"
+		action_on_failure = "skip"
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+// 5. 수집한 로그를 Loki로 전송
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
