@@ -51,7 +51,7 @@ docker compose up -d postgres redis-session kafka
 docker compose ps
 ```
 
-환전을 확인할 때는 캐시 Redis도 실행합니다. 환전은 충전한 지갑으로 확인하므로 충전에 필요한 인프라와 함께 띄웁니다.
+환전을 확인할 때는 캐시 Redis도 **반드시** 실행합니다(견적 저장소). 환전은 충전한 지갑으로 확인하므로 충전에 필요한 인프라와 함께 띄웁니다.
 
 ```bash
 docker compose up -d postgres redis-session kafka redis-cache
@@ -68,7 +68,12 @@ docker compose ps
 
 Kafka UI가 필요하면 `docker compose up -d kafka-ui`로 추가합니다. 포트를 바꿨다면 `.env`와 해당 앱의 연결 설정도 함께 맞춥니다. 인프라의 호스트 포트는 로컬 루프백에 바인딩됩니다.
 
-캐시 Redis는 Exchange가 사용합니다. 환율 조회와 견적 발급에서 최신 환율을 캐시 Redis에서 먼저 읽고, 연결 정보는 `.env`의 `REDIS_CACHE_HOST`·`REDIS_CACHE_PORT`·`REDIS_CACHE_PASSWORD`를 씁니다. 견적은 지금처럼 PostgreSQL에 저장합니다. 캐시 Redis가 꺼져 있어도 환전은 DB에서 환율을 읽어 정상 동작합니다. 대신 시작할 때 한 번, 이후 환율 조회·수집이 캐시를 쓰려다 실패하면 1분에 한 번 경고 로그가 남습니다.
+캐시 Redis는 Exchange가 사용합니다. 연결 정보는 `.env`의 `REDIS_CACHE_HOST`·`REDIS_CACHE_PORT`·`REDIS_CACHE_PASSWORD`를 씁니다. 두 가지 용도가 있고, 꺼졌을 때 동작이 다릅니다.
+
+- 최신 환율 캐시: 환율 조회와 견적 발급이 최신 환율을 먼저 읽습니다. 꺼져 있으면 DB에서 읽어 정상 동작하고, 1분에 한 번 경고 로그가 남습니다.
+- 견적 저장소: 견적은 캐시 Redis에만 저장합니다(#223). **꺼져 있으면 견적 발급·조회·환전 신청이 503 `EXCHANGE_QUOTE_STORE_UNAVAILABLE`입니다.** 환율 조회는 정상입니다.
+
+캐시 Redis는 메모리가 차도 키를 지우지 않는 `noeviction` 정책입니다(`infra/redis/cache/redis.conf`). 자세한 내용은 [환전 서비스 가이드](exchange-service.md)를 봅니다.
 
 ## IntelliJ에서 애플리케이션 실행
 
@@ -127,7 +132,7 @@ set +a
 | Mock Bank | 8090 | PostgreSQL, 직접 URL로 호출하며 Eureka에 등록하지 않음 |
 | Wallet | 8082 | PostgreSQL·Kafka, 실행에 필요한 암호화 키 |
 | Payment | 8083 | PostgreSQL, 기능별 User·Wallet·Ledger 연동 |
-| Exchange | 8084 | PostgreSQL, 환율 수집 모드와 기능별 연동 |
+| Exchange | 8084 | PostgreSQL·캐시 Redis(견적 저장소라 필수), 환율 수집 모드와 기능별 연동 |
 | Gateway | 8080 | Eureka·User 및 호출할 업무 서비스 |
 
 Gateway 관리 포트는 별도 `18080`이며 헬스체크 경로는 `/actuator/health`입니다. 표는 기본 설정이며 실제 값은 각 모듈의 실행 설정과 인자를 기준으로 합니다.
