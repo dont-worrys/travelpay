@@ -2,6 +2,7 @@ package com.travelpay.payment.presentation.payment;
 
 import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
+import com.travelpay.payment.application.merchant.SettlementService;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
@@ -15,7 +16,7 @@ import java.time.Instant;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 결과를 모른 채 남은 결제·환불을 주기적으로 같은 referenceId로 원장에 다시 요청해 확정
+ * 결과를 모른 채 남은 결제·환불·정산을 주기적으로 같은 referenceId로 원장에 다시 요청해 확정
  * 원장 장애로 밀린 건이 회복 시점에 한꺼번에 몰리지 않도록 건마다 대기 시간을 늘리고, 한 주기에 다루는 건수를 제한
  */
 @Slf4j
@@ -30,15 +31,20 @@ public class PendingSettlementScheduler {
     private static final int STUCK_SAMPLE_SIZE = 10;
 
     private final PaymentService paymentService;
+    private final SettlementService settlementService;
 
     private final AtomicLong stuckPayments = new AtomicLong();
     private final AtomicLong stuckRefunds = new AtomicLong();
+    private final AtomicLong stuckSettlements = new AtomicLong();
     private final AtomicLong manualReviewPayments = new AtomicLong();
     private final AtomicLong manualReviewRefunds = new AtomicLong();
+    private final AtomicLong manualReviewSettlements = new AtomicLong();
     private final AtomicLong overdueRefundRequests = new AtomicLong();
 
-    public PendingSettlementScheduler(PaymentService paymentService, MeterRegistry meterRegistry) {
+    public PendingSettlementScheduler(PaymentService paymentService, SettlementService settlementService,
+                                      MeterRegistry meterRegistry) {
         this.paymentService = paymentService;
+        this.settlementService = settlementService;
         Gauge.builder("payment.settlement.stuck", stuckPayments, AtomicLong::get)
                 .description("요청 후 30분이 지나도 확정되지 않은 건수")
                 .tag("type", "payment")
@@ -47,6 +53,10 @@ public class PendingSettlementScheduler {
                 .description("요청 후 30분이 지나도 확정되지 않은 건수")
                 .tag("type", "refund")
                 .register(meterRegistry);
+        Gauge.builder("payment.settlement.stuck", stuckSettlements, AtomicLong::get)
+                .description("요청 후 30분이 지나도 확정되지 않은 건수")
+                .tag("type", "settlement")
+                .register(meterRegistry);
         Gauge.builder("payment.settlement.manual_review", manualReviewPayments, AtomicLong::get)
                 .description("자동 처리를 멈추고 운영자 확인을 기다리는 건수")
                 .tag("type", "payment")
@@ -54,6 +64,10 @@ public class PendingSettlementScheduler {
         Gauge.builder("payment.settlement.manual_review", manualReviewRefunds, AtomicLong::get)
                 .description("자동 처리를 멈추고 운영자 확인을 기다리는 건수")
                 .tag("type", "refund")
+                .register(meterRegistry);
+        Gauge.builder("payment.settlement.manual_review", manualReviewSettlements, AtomicLong::get)
+                .description("자동 처리를 멈추고 운영자 확인을 기다리는 건수")
+                .tag("type", "settlement")
                 .register(meterRegistry);
         Gauge.builder("payment.refund_request.overdue", overdueRefundRequests, AtomicLong::get)
                 .description("고객이 신청한 뒤 3일 넘게 가맹점이 처리하지 않은 환불 신청 건수")
@@ -75,12 +89,18 @@ public class PendingSettlementScheduler {
             log.error("환불 복구 주기가 실패했습니다.", e);
         }
         try {
+            settlementService.recoverSettlements(now, BATCH_SIZE);
+        } catch (RuntimeException e) {
+            log.error("정산 복구 주기가 실패했습니다.", e);
+        }
+        try {
             reportStuck(now.minus(STUCK_AFTER));
             manualReviewPayments.set(paymentService.countManualReviewPayments());
             manualReviewRefunds.set(paymentService.countManualReviewRefunds());
+            manualReviewSettlements.set(settlementService.countManualReviewSettlements());
             overdueRefundRequests.set(paymentService.countOverdueRefundRequests());
         } catch (RuntimeException e) {
-            log.error("확정되지 않은 결제·환불 수를 조회하지 못했습니다.", e);
+            log.error("확정되지 않은 결제·환불·정산 수를 조회하지 못했습니다.", e);
         }
     }
 
@@ -95,6 +115,12 @@ public class PendingSettlementScheduler {
         if (stuck.refundCount() > 0) {
             log.error("30분 넘게 확정되지 않은 환불 {}건, 오래된 순 refundIds={}",
                     stuck.refundCount(), stuck.refundIds());
+        }
+        long settlementCount = settlementService.countStuckSettlements(createdBefore);
+        stuckSettlements.set(settlementCount);
+        if (settlementCount > 0) {
+            log.error("30분 넘게 확정되지 않은 정산 {}건, 오래된 순 settlementIds={}",
+                    settlementCount, settlementService.findStuckSettlementIds(createdBefore, STUCK_SAMPLE_SIZE));
         }
     }
 }
