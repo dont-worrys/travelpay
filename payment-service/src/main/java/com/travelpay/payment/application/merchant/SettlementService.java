@@ -12,6 +12,7 @@ import com.travelpay.payment.application.payment.client.wallet.PaymentWallet;
 import com.travelpay.payment.application.payment.client.wallet.PaymentWalletClient;
 import com.travelpay.payment.application.merchant.dto.SettlementDetailResult;
 import com.travelpay.payment.application.merchant.dto.SettlementPreviewResult;
+import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
 import com.travelpay.payment.application.merchant.dto.SettlementResult;
 import com.travelpay.payment.domain.merchant.Merchant;
 import com.travelpay.payment.domain.merchant.MerchantRepository;
@@ -188,9 +189,10 @@ public class SettlementService {
     }
 
     // 재시도 대기가 지난 REQUESTED 정산을 선점해 같은 정산 ID로 원장에 다시 보냄
-    public void recoverSettlements(Instant now, int limit) {
+    public RecoveryBatchResult recoverSettlements(Instant now, int limit) {
         int consecutiveUnknown = 0;
-        for (Settlement target : settlementRepository.findRecoveryTargets(now, limit)) {
+        List<Settlement> targets = settlementRepository.findRecoveryTargets(now, limit);
+        for (Settlement target : targets) {
             boolean unknown;
             try {
                 if (settlementRepository.claimForRecovery(target.getId(), target.getUpdatedAt(), Instant.now()) == 0) {
@@ -215,9 +217,10 @@ public class SettlementService {
             consecutiveUnknown = unknown ? consecutiveUnknown + 1 : 0;
             if (consecutiveUnknown >= MAX_CONSECUTIVE_UNKNOWN) {
                 log.warn("원장 응답 불가로 정산 복구를 다음 주기로 미룹니다.");
-                return;
+                return new RecoveryBatchResult(targets.size(), true);
             }
         }
+        return new RecoveryBatchResult(targets.size(), false);
     }
 
     // 생성 후 기준 시각이 지나도 REQUESTED인 정산 수와 오래된 순 ID
