@@ -58,4 +58,16 @@ public interface ExchangeOrderRepository {
      * 대기 시간은 30초 × 2^확인 횟수이고 최대 16분입니다(확인 5회부터).
      */
     List<ExchangeOrder> findRecoveryTargets(Instant now, int limit);
+
+    /**
+     * 신청 시각이 cutoff 이전(같은 시각 포함)인데 아직 PROCESSING인 주문 수입니다. 원장 결과를 오래 확정하지 못한(정체) 주문을 셉니다.
+     * 상태는 바꾸지 않습니다. 재시도와 24시간 뒤 사람 확인으로 넘기는 규칙은 그대로입니다.
+     */
+    long countProcessingRequestedAtOrBefore(Instant cutoff);
+
+    /** 위와 같은 정체 주문의 ID를 신청이 오래된 순으로 최대 limit개 돌려줍니다. 정체 알림 로그에 몇 건만 남길 때 씁니다. */
+    List<UUID> findProcessingIdsRequestedAtOrBefore(Instant cutoff, int limit);
+
+    /** 사람 확인(MANUAL_REVIEW)을 기다리는 주문 수입니다. */
+    long countManualReview();
 }

@@ -16,6 +16,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import com.travelpay.exchange.application.order.ExchangeOrderQueryRepository;
+import com.travelpay.exchange.application.order.ExchangeResolutionCondition;
+import com.travelpay.exchange.application.order.ExchangeResolutionView;
 import com.travelpay.exchange.domain.order.ChangedByType;
 import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
 import com.travelpay.exchange.domain.order.ExchangeFailureReason;
@@ -44,6 +47,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -94,6 +99,9 @@ class ExchangeOrderPersistenceIntegrationTest {
 
     @Autowired
     private ExchangeOrderStatusHistoryRepository historyRepository;
+
+    @Autowired
+    private ExchangeOrderQueryRepository queryRepository;
 
     @Autowired
     private ExchangeQuoteRepository quoteRepository;
@@ -307,6 +315,66 @@ class ExchangeOrderPersistenceIntegrationTest {
         assertEquals(1, orderRepository.findRecoveryTargets(now, 1).size());
     }
 
+    /**
+     * 정체 = 신청 시각이 기준(지금 - 30분) 이전이고 아직 PROCESSING인 주문. 기준과 같은 시각은 세고, 1초라도 늦으면 세지 않는다.
+     * 확정된 주문(COMPLETED·MANUAL_REVIEW)은 아무리 오래됐어도 세지 않는다.
+     */
+    @Test
+    void countsOnlyProcessingOrdersRequestedAtOrBeforeCutoff() {
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        Instant cutoff = now.minus(Duration.ofMinutes(30));
+        UUID oldest = processingOrder("a", 3, null, now.minus(Duration.ofHours(2)));
+        UUID exactlyAtCutoff = processingOrder("b", 1, null, cutoff);
+        processingOrder("c", 0, null, cutoff.plusSeconds(1));
+        UUID completed = processingOrder("d", 0, null, now.minus(Duration.ofHours(3)));
+        orderRepository.settleIfProcessing(completed, Settlement.completed(UUID.randomUUID(), now), now);
+        UUID manualReview = processingOrder("e", 0, null, now.minus(Duration.ofHours(30)));
+        orderRepository.settleIfProcessing(manualReview,
+                Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), now);
+
+        assertEquals(2, orderRepository.countProcessingRequestedAtOrBefore(cutoff));
+        assertEquals(List.of(oldest, exactlyAtCutoff), orderRepository.findProcessingIdsRequestedAtOrBefore(cutoff, 10));
+        assertEquals(List.of(oldest), orderRepository.findProcessingIdsRequestedAtOrBefore(cutoff, 1));
+        assertEquals(0, orderRepository.countProcessingRequestedAtOrBefore(cutoff.minus(Duration.ofHours(5))));
+    }
+
+    @Test
+    void countsOnlyManualReviewOrders() {
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        assertEquals(0, orderRepository.countManualReview());
+
+        UUID first = processingOrder("a", 0, null, now.minus(Duration.ofHours(25)));
+        UUID second = processingOrder("b", 0, null, now.minus(Duration.ofHours(25)));
+        processingOrder("c", 0, null, now.minus(Duration.ofHours(25)));
+        orderRepository.settleIfProcessing(first, Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), now);
+        orderRepository.settleIfProcessing(second,
+                Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), now);
+
+        assertEquals(2, orderRepository.countManualReview());
+    }
+
+    /**
+     * 지표는 30초마다 세므로 주문이 많아져도 PROCESSING·MANUAL_REVIEW 주문만 담은 부분 인덱스를 써야 한다.
+     * 주문 수가 적으면 순차 읽기가 더 싸다고 판단할 수 있어, 순차 읽기를 끄고 인덱스를 쓸 수 있는 쿼리인지 본다.
+     */
+    @Test
+    void backlogCountsCanUsePartialIndexes() {
+        String processing = explainWithoutSeqScan("SELECT count(*) FROM " + SCHEMA + ".exchange_orders"
+                + " WHERE status = 'PROCESSING' AND requested_at <= now()");
+        String manualReview = explainWithoutSeqScan("SELECT count(*) FROM " + SCHEMA + ".exchange_orders"
+                + " WHERE status = 'MANUAL_REVIEW'");
+
+        assertTrue(processing.contains("ix_exchange_orders_processing"), processing);
+        assertTrue(manualReview.contains("ix_exchange_orders_manual_review"), manualReview);
+    }
+
+    private String explainWithoutSeqScan(String query) {
+        return transactionTemplate.execute(status -> {
+            jdbcTemplate.execute("SET LOCAL enable_seqscan = off");
+            return String.join("\n", jdbcTemplate.queryForList("EXPLAIN " + query, String.class));
+        });
+    }
+
     @Test
     void jpaDoesNotUpdateOrderEvenIfEntityChanges() {
         ExchangeOrder saved = orderRepository.save(OrderFixtures.placed(savedQuote(USER_ID), WALLET_ID, "key-1"));
@@ -465,6 +533,100 @@ class ExchangeOrderPersistenceIntegrationTest {
 
         assertEquals(ManualReviewReason.LEDGER_CONFLICT,
                 historyRepository.findLatestManualReviewReason(orderId).orElseThrow());
+    }
+
+    /**
+     * 관리자 처리 이력만 최신순으로 나오고(사람 확인으로 넘긴 SYSTEM 이력은 빠짐),
+     * 사람 확인 사유와 주문 실패 사유가 붙는다.
+     */
+    @Test
+    void findsResolutionsNewestFirstWithReviewAndFailureReasons() {
+        UUID master = UUID.randomUUID();
+        UUID completed = resolvedOrder("key-1", ManualReviewReason.LEDGER_CONFLICT, master,
+                Instant.parse("2026-11-01T04:00:00Z"), false);
+        UUID failed = resolvedOrder("key-2", ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG, master,
+                Instant.parse("2026-11-01T05:00:00Z"), true);
+
+        Page<ExchangeResolutionView> page = queryRepository.findResolutions(
+                new ExchangeResolutionCondition(null, null, null, null), PageRequest.of(0, 20));
+
+        assertEquals(2, page.getTotalElements());
+        ExchangeResolutionView newest = page.getContent().get(0);
+        assertEquals(failed, newest.history().getOrderId());
+        assertEquals(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG, newest.reviewReason());
+        assertEquals(ExchangeFailureReason.NOT_PROCESSED, newest.failureReason());
+        assertEquals("LEDGER_NOT_FOUND", newest.history().getReason());
+        ExchangeResolutionView older = page.getContent().get(1);
+        assertEquals(completed, older.history().getOrderId());
+        assertEquals(ManualReviewReason.LEDGER_CONFLICT, older.reviewReason());
+        assertNull(older.failureReason());
+        assertEquals(master, older.history().getChangedById());
+    }
+
+    /** 관리자·주문·기간(from 포함, to 제외) 조건으로 거른다 */
+    @Test
+    void filtersResolutionsByActorOrderAndPeriod() {
+        UUID masterA = UUID.randomUUID();
+        UUID masterB = UUID.randomUUID();
+        UUID first = resolvedOrder("key-1", ManualReviewReason.LEDGER_CONFLICT, masterA,
+                Instant.parse("2026-11-01T04:00:00Z"), false);
+        UUID second = resolvedOrder("key-2", ManualReviewReason.LEDGER_CONFLICT, masterB,
+                Instant.parse("2026-11-01T05:00:00Z"), true);
+        resolvedOrder("key-3", ManualReviewReason.LEDGER_CONFLICT, masterA,
+                Instant.parse("2026-11-01T06:00:00Z"), true);
+
+        assertEquals(List.of(second), resolutionOrderIds(new ExchangeResolutionCondition(masterB, null, null, null)));
+        assertEquals(List.of(first), resolutionOrderIds(new ExchangeResolutionCondition(null, first, null, null)));
+        assertEquals(List.of(second, first), resolutionOrderIds(new ExchangeResolutionCondition(null, null,
+                Instant.parse("2026-11-01T04:00:00Z"), Instant.parse("2026-11-01T06:00:00Z"))));
+        assertEquals(List.of(), resolutionOrderIds(new ExchangeResolutionCondition(masterA, second, null, null)));
+    }
+
+    /** 관리자 처리 이력 목록은 부분 인덱스를 최신순으로 읽어 정렬 없이 앞에서부터 가져올 수 있다 */
+    @Test
+    void resolutionListCanUsePartialIndex() {
+        String plan = explainWithoutSeqScan("SELECT * FROM " + SCHEMA + ".exchange_order_status_histories"
+                + " WHERE changed_by_type = 'MASTER' AND created_at >= now() - interval '1 day'"
+                + " ORDER BY created_at DESC, history_id DESC LIMIT 20");
+
+        assertTrue(plan.contains("ix_exchange_order_status_histories_master"), plan);
+        assertFalse(plan.contains("Sort"), plan);
+    }
+
+    private List<UUID> resolutionOrderIds(ExchangeResolutionCondition condition) {
+        return queryRepository.findResolutions(condition, PageRequest.of(0, 20)).stream()
+                .map(view -> view.history().getOrderId())
+                .toList();
+    }
+
+    /**
+     * 사람 확인을 거쳐 관리자가 처리한 주문입니다. 관리자 이력의 처리 시각(created_at)을 resolvedAt으로 맞춥니다.
+     *
+     * @param failed true면 원장 기록 없음으로 실패 처리, false면 원장 반영으로 완료 처리
+     */
+    private UUID resolvedOrder(String idempotencyKey, ManualReviewReason reviewReason, UUID masterId,
+                               Instant resolvedAt, boolean failed) {
+        UUID orderId = savedOrder(idempotencyKey);
+        Settlement manualReview = Settlement.manualReview(reviewReason);
+        orderRepository.settleIfProcessing(orderId, manualReview, resolvedAt.minusSeconds(600));
+        historyRepository.save(manualReview.history(orderId));
+
+        UUID ledgerTxId = failed ? null : UUID.randomUUID();
+        ManualReviewResolution resolution = new ManualReviewResolution(
+                failed ? ExchangeOrderStatus.FAILED : ExchangeOrderStatus.COMPLETED,
+                ledgerTxId,
+                ledgerTxId,
+                failed ? ExchangeFailureReason.NOT_PROCESSED : null,
+                failed ? ManualReviewResolutionReason.LEDGER_NOT_FOUND : ManualReviewResolutionReason.LEDGER_POSTED,
+                resolvedAt,
+                masterId,
+                null
+        );
+        assertTrue(orderRepository.resolveIfManualReview(orderId, resolution, resolvedAt));
+        historyRepository.save(resolution.history(orderId));
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_order_status_histories SET created_at = ?"
+                + " WHERE order_id = ? AND changed_by_type = 'MASTER'", Timestamp.from(resolvedAt), orderId);
+        return orderId;
     }
 
     private UUID savedOrder(String idempotencyKey) {

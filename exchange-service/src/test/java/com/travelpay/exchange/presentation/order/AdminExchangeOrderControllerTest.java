@@ -14,10 +14,13 @@ import com.travelpay.exchange.application.order.AdminExchangeResolveResult;
 import com.travelpay.exchange.application.order.AdminExchangeReviewDetailResult;
 import com.travelpay.exchange.application.order.ExchangeAdminService;
 import com.travelpay.exchange.application.order.ExchangeManualReviewView;
+import com.travelpay.exchange.application.order.ExchangeResolutionCondition;
+import com.travelpay.exchange.application.order.ExchangeResolutionView;
 import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
 import com.travelpay.exchange.domain.order.ExchangeFailureReason;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistory;
 import com.travelpay.exchange.domain.order.ManualReviewReason;
 import com.travelpay.exchange.domain.order.ManualReviewResolution;
 import com.travelpay.exchange.domain.order.ManualReviewResolutionReason;
@@ -77,6 +80,10 @@ class AdminExchangeOrderControllerTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("COMMON_FORBIDDEN"));
 
+        mockMvc.perform(get("/api/v1/admin/exchanges/resolutions"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("COMMON_FORBIDDEN"));
+
         mockMvc.perform(post("/api/v1/admin/exchanges/" + ORDER_ID + "/resolve")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"memo\":\"test\"}"))
@@ -104,6 +111,63 @@ class AdminExchangeOrderControllerTest {
                 .andExpect(jsonPath("$.data.items[0].reviewReason").value("LEDGER_CONFLICT"))
                 .andExpect(jsonPath("$.data.items[0].fromCurrency").value("KRW"))
                 .andExpect(jsonPath("$.data.items[0].toCurrency").value("JPY"));
+    }
+
+    /** /resolutions는 /{orderId}로 해석되지 않고(400 주문 ID 형식 오류가 아님) 처리 이력 목록으로 갑니다. */
+    @Test
+    void listResolutionsReturns200WithFiltersAndAttachedReasons() throws Exception {
+        UUID ledgerTxId = UUID.randomUUID();
+        ExchangeOrderStatusHistory history = ExchangeOrderStatusHistory.byMaster(ORDER_ID,
+                ExchangeOrderStatus.MANUAL_REVIEW, ExchangeOrderStatus.FAILED, "LEDGER_REJECTED",
+                MASTER_ID, ledgerTxId, "원장 거절 확인");
+        ReflectionTestUtils.setField(history, "createdAt", NOW);
+        ExchangeResolutionCondition condition = new ExchangeResolutionCondition(
+                MASTER_ID, ORDER_ID, Instant.parse("2026-11-01T00:00:00Z"), Instant.parse("2026-11-02T00:00:00Z"));
+        when(adminService.getResolutions(MASTER_ID, condition, 1, 10)).thenReturn(new PageImpl<>(List.of(
+                new ExchangeResolutionView(history, ManualReviewReason.LEDGER_UNKNOWN_REJECTION,
+                        ExchangeFailureReason.INSUFFICIENT_BALANCE))));
+
+        mockMvc.perform(get("/api/v1/admin/exchanges/resolutions")
+                        .param("actorId", MASTER_ID.toString())
+                        .param("orderId", ORDER_ID.toString())
+                        .param("from", "2026-11-01T00:00:00Z")
+                        .param("to", "2026-11-02T00:00:00Z")
+                        .param("page", "1")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items[0].orderId").value(ORDER_ID.toString()))
+                .andExpect(jsonPath("$.data.items[0].actorId").value(MASTER_ID.toString()))
+                .andExpect(jsonPath("$.data.items[0].fromStatus").value("MANUAL_REVIEW"))
+                .andExpect(jsonPath("$.data.items[0].toStatus").value("FAILED"))
+                .andExpect(jsonPath("$.data.items[0].resolutionReason").value("LEDGER_REJECTED"))
+                .andExpect(jsonPath("$.data.items[0].reviewReason").value("LEDGER_UNKNOWN_REJECTION"))
+                .andExpect(jsonPath("$.data.items[0].failureReason").value("INSUFFICIENT_BALANCE"))
+                .andExpect(jsonPath("$.data.items[0].ledgerTransactionId").value(ledgerTxId.toString()))
+                .andExpect(jsonPath("$.data.items[0].memo").value("원장 거절 확인"))
+                .andExpect(jsonPath("$.data.items[0].resolvedAt").value("2026-11-01T05:00:00Z"));
+    }
+
+    @Test
+    void listResolutionsWithoutFiltersPassesNullConditions() throws Exception {
+        when(adminService.getResolutions(MASTER_ID, new ExchangeResolutionCondition(null, null, null, null), 0, 20))
+                .thenReturn(new PageImpl<>(List.of()));
+
+        mockMvc.perform(get("/api/v1/admin/exchanges/resolutions"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items").isEmpty());
+    }
+
+    /** 형식이 틀린 조건은 서비스에 닿기 전에 400입니다. */
+    @Test
+    void listResolutionsRejectsMalformedFilters() throws Exception {
+        mockMvc.perform(get("/api/v1/admin/exchanges/resolutions").param("actorId", "not-a-uuid"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+        mockMvc.perform(get("/api/v1/admin/exchanges/resolutions").param("from", "2026-11-01"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("COMMON_INVALID_REQUEST"));
+
+        verifyNoInteractions(adminService);
     }
 
     @Test

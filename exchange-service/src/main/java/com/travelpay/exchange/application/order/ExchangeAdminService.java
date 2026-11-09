@@ -60,6 +60,27 @@ public class ExchangeAdminService {
     }
 
     /**
+     * 관리자(MASTER) 처리 이력을 처리 시각 최신순으로 조회합니다. 누가 언제 어떤 근거로 처리했는지 확인하는 용도입니다.
+     * page가 음수, size가 1보다 작거나 시작 시각이 끝 시각보다 늦지 않으면 COMMON_INVALID_REQUEST(400)이고,
+     * size는 다른 목록과 같이 최대 100으로 줄여 조회합니다.
+     */
+    @Transactional(readOnly = true)
+    public Page<ExchangeResolutionView> getResolutions(UUID viewerId, ExchangeResolutionCondition condition,
+                                                       int page, int size) {
+        Objects.requireNonNull(viewerId, "viewerId");
+        Objects.requireNonNull(condition, "condition");
+        if (page < 0 || size < 1) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        if (condition.from() != null && condition.to() != null && !condition.from().isBefore(condition.to())) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        log.info("관리자 처리 이력 조회: viewerId={}, actorId={}, orderId={}, from={}, to={}, page={}, size={}",
+                viewerId, condition.actorId(), condition.orderId(), condition.from(), condition.to(), page, size);
+        return orderQueryRepository.findResolutions(condition, PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE)));
+    }
+
+    /**
      * 단건 주문 및 원장 조회 결과, 예상 처리 결과를 조회합니다.
      * 트랜잭션을 걸지 않습니다. 걸면 원장 HTTP 호출(최대 수 초)을 기다리는 동안 DB 연결을 붙잡습니다.
      * 안의 DB 조회는 각각 쿼리 하나라 같은 시점으로 묶을 필요가 없습니다.

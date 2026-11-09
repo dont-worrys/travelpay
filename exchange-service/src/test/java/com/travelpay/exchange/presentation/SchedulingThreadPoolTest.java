@@ -1,5 +1,6 @@
 package com.travelpay.exchange.presentation;
 
+import com.travelpay.exchange.application.order.ExchangeOrderBacklogMonitor;
 import com.travelpay.exchange.application.order.ExchangeOrderRecoveryService;
 import com.travelpay.exchange.application.rate.ExchangeRateCollector;
 import com.travelpay.exchange.application.rate.RateCollectionPolicy;
@@ -93,6 +94,7 @@ class SchedulingThreadPoolTest {
                 .withBean(ExchangeRateCollector.class, () -> collector)
                 .withBean(RateCollectionPolicy.class, () -> policy)
                 .withBean(ExchangeOrderRecoveryService.class, () -> recoveryService)
+                .withBean(ExchangeOrderBacklogMonitor.class, () -> mock(ExchangeOrderBacklogMonitor.class))
                 .withPropertyValues(
                         "spring.task.scheduling.pool.size=" + poolSize,
                         "exchange.order.recovery.fixed-delay=10ms");

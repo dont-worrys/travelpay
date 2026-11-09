@@ -150,4 +150,35 @@ interface ExchangeOrderJpaRepository extends JpaRepository<ExchangeOrder, UUID> 
              limit :limit
             """)
     List<ExchangeOrder> findRecoveryTargets(@Param("now") Instant now, @Param("limit") int limit);
+
+    /**
+     * 신청 시각이 cutoff 이전인 PROCESSING 주문 수(정체 지표). status = 'PROCESSING' 조건을 그대로 적어
+     * 부분 인덱스 ix_exchange_orders_processing(PROCESSING 주문만 담음)을 쓸 수 있게 한다.
+     */
+    @Query(nativeQuery = true, value = """
+            select count(*)
+              from exchange_orders
+             where status = 'PROCESSING'
+               and requested_at <= :cutoff
+            """)
+    long countProcessingRequestedAtOrBefore(@Param("cutoff") Instant cutoff);
+
+    /** 정체 주문 ID를 신청이 오래된 순으로. 정렬 대상은 PROCESSING 주문뿐이라 작다 */
+    @Query(nativeQuery = true, value = """
+            select order_id
+              from exchange_orders
+             where status = 'PROCESSING'
+               and requested_at <= :cutoff
+             order by requested_at, order_id
+             limit :limit
+            """)
+    List<UUID> findProcessingIdsRequestedAtOrBefore(@Param("cutoff") Instant cutoff, @Param("limit") int limit);
+
+    /** MANUAL_REVIEW 주문 수(대기 지표). 부분 인덱스 ix_exchange_orders_manual_review를 쓸 수 있게 조건을 그대로 적는다 */
+    @Query(nativeQuery = true, value = """
+            select count(*)
+              from exchange_orders
+             where status = 'MANUAL_REVIEW'
+            """)
+    long countManualReview();
 }
