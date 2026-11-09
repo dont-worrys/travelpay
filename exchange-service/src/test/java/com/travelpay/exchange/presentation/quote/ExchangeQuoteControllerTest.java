@@ -24,7 +24,6 @@ import com.travelpay.exchange.domain.quote.QuoteType;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -175,7 +174,6 @@ class ExchangeQuoteControllerTest {
         ExchangeQuote quote = ExchangeQuote.issue(USER_ID, QuoteType.USER,
                 new QuoteCurrencies(Currency.CNY, Currency.KRW), new Money(Currency.CNY, 10050),
                 QuoteFixtures.savedRate(ForeignCurrency.CNY, "198.69000000"), QuoteFixtures.policy(), NOW);
-        ReflectionTestUtils.setField(quote, "id", QUOTE_ID);
-        return quote;
+        return QuoteFixtures.withId(quote, QUOTE_ID);
     }
 }
