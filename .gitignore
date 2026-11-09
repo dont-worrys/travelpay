@@ -38,3 +38,7 @@ out/
 
 ### VS Code ###
 .vscode/
+
+# TRAVELPAY 로컬 모니터링 로그
+**/.local-logs/**
+!/infra/monitoring/.local-logs/.gitkeep

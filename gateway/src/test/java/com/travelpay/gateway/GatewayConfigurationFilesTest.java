@@ -113,7 +113,7 @@ class GatewayConfigurationFilesTest {
     }
 
     @Test
-    void localManagementDefaultsUseADifferentPortAndALoopbackAddress() throws IOException {
+    void localManagementDefaultsUseADifferentPortAndAcceptDockerHostConnections() throws IOException {
         var environment = environmentFor("application.yml");
         var apiPort = environment.getRequiredProperty("server.port", Integer.class);
         var managementPort = environment.getProperty("management.server.port", Integer.class);
@@ -122,7 +122,7 @@ class GatewayConfigurationFilesTest {
         assertTrue(managementPort > 0 && managementPort <= 65535);
         assertNotEquals(apiPort, managementPort);
         assertTrue(InetAddress.getByName(environment.getRequiredProperty("management.server.address"))
-                .isLoopbackAddress());
+                .isAnyLocalAddress());
     }
 
     @Test

@@ -29,7 +29,7 @@ Gateway는 브라우저 요청을 받아 User에 세션 검증을 요청하고, 
 |---|---|---|
 | 프런트 | `http://localhost:<확정할 포트>` | `https://travelpay.store`, `https://www.travelpay.store` |
 | API | `http://localhost:8080` | `https://api.travelpay.store` |
-| Gateway 관리 | `127.0.0.1:18080` | 내부망의 `18080` |
+| Gateway 관리 | `0.0.0.0:18080`에서 수신, PC에서는 `localhost:18080`로 접근 | 내부망의 `18080` |
 
 프런트의 Vercel 배포 여부와 백엔드의 EC2·ECS 선택은 API 코드와 분리합니다. 현재 실제 DNS·인증서·AWS 리소스는 연결하지 않았습니다.
 
