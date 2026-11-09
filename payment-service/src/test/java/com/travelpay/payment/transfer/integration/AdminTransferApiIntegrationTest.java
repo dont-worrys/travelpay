@@ -188,8 +188,11 @@ class AdminTransferApiIntegrationTest extends TransferApiIntegrationSupport {
                 .andExpect(jsonPath("$.info.title").value("TravelPay 송금 관리 API"))
                 .andExpect(jsonPath("$.paths.keys()", containsInAnyOrder(
                         "/api/v1/admin/transfers", "/api/v1/admin/transfers/{transferId}",
+                        "/api/v1/admin/transfers/{transferId}/resolution",
                         "/api/v1/admin/transfers/{transferId}/resolve",
                         "/api/v1/admin/transfers/{transferId}/history")))
+                .andExpect(jsonPath("$.paths['/api/v1/admin/transfers/{transferId}/resolution'].get.responses.keys()",
+                        hasItems("200", "403", "404", "409", "502", "503", "504")))
                 .andExpect(jsonPath("$.paths['/api/v1/admin/transfers/{transferId}/resolve'].post.responses.keys()",
                         hasItems("200", "400", "403", "404", "409", "503")))
                 .andExpect(jsonPath("$.paths['/api/v1/admin/transfers'].get.parameters[*].name", containsInAnyOrder(
