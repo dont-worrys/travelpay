@@ -137,7 +137,7 @@ public class ExchangeOrder extends BaseTimeEntity {
         this.walletId = walletId;
         this.idempotencyKey = idempotencyKey.value();
         this.quoteId = quote.getId();
-        this.quoteIssuedAt = quote.getCreatedAt();
+        this.quoteIssuedAt = quote.getIssuedAt();
         this.quoteExpiresAt = quote.getExpiresAt();
         this.rateId = quote.getRateId();
         this.rateDate = quote.getRateDate();
@@ -166,8 +166,6 @@ public class ExchangeOrder extends BaseTimeEntity {
     public static ExchangeOrder place(ExchangeQuote quote, UUID walletId, IdempotencyKey idempotencyKey,
                                       Instant requestedAt) {
         Objects.requireNonNull(quote, "quote");
-        Objects.requireNonNull(quote.getId(), "quote must be saved");
-        Objects.requireNonNull(quote.getCreatedAt(), "quote must have issued time");
         Objects.requireNonNull(walletId, "walletId");
         Objects.requireNonNull(idempotencyKey, "idempotencyKey");
         Objects.requireNonNull(requestedAt, "requestedAt");

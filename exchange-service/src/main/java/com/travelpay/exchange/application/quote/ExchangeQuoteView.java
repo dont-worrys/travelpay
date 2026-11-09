@@ -1,11 +1,17 @@
 package com.travelpay.exchange.application.quote;
 
+import java.util.Objects;
+
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
+import com.travelpay.exchange.domain.quote.QuoteStatus;
 
 /**
- * 조회 시각 기준으로 만료 여부를 함께 담은 견적입니다.
- *
- * @param expired 조회 시각에 만료됐는지. DB 상태는 ISSUED로 남아 있습니다.
+ * 견적과 응답 시점의 상태입니다. 상태는 견적에 저장하지 않고 응답할 때 계산합니다.
  */
-public record ExchangeQuoteView(ExchangeQuote quote, boolean expired) {
+public record ExchangeQuoteView(ExchangeQuote quote, QuoteStatus status) {
+
+    public ExchangeQuoteView {
+        Objects.requireNonNull(quote, "quote");
+        Objects.requireNonNull(status, "status");
+    }
 }

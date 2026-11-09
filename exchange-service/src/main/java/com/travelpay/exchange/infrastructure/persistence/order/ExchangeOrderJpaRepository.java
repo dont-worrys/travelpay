@@ -23,6 +23,9 @@ interface ExchangeOrderJpaRepository extends JpaRepository<ExchangeOrder, UUID> 
 
     Optional<ExchangeOrder> findByIdAndUserId(UUID id, UUID userId);
 
+    /** 견적 ID로 주문이 있는지. uk_exchange_orders_quote(UNIQUE) 인덱스로 찾는다 */
+    boolean existsByQuoteId(UUID quoteId);
+
     /**
      * 회원 주문 목록. 조건이 null이면 그 조건으로 거르지 않는다. 정렬·페이지는 pageable을 따른다.
      * 환전·재환전은 원화가 어느 쪽에 있는지로 거르므로 보내는(또는 받는) 통화를 KRW로 넘긴다.

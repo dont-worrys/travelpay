@@ -281,8 +281,6 @@ class ExchangeOrderControllerTest {
     private static ExchangeOrder order() {
         ExchangeQuote quote = OrderFixtures.wonToYenQuote(USER_ID,
                 QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), ISSUED_AT);
-        ReflectionTestUtils.setField(quote, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(quote, "createdAt", ISSUED_AT);
         ExchangeOrder order = OrderFixtures.placed(quote, WALLET_ID, "key-1");
         ReflectionTestUtils.setField(order, "id", ORDER_ID);
         return order;

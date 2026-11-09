@@ -10,7 +10,6 @@ import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
-import com.travelpay.exchange.domain.quote.QuoteStatus;
 import com.travelpay.exchange.domain.quote.QuoteType;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
@@ -91,25 +90,6 @@ class ExchangeOrderTest {
     }
 
     @Test
-    void ignoresQuoteUsedStatus() {
-        ExchangeQuote quote = savedQuote(Currency.KRW, Currency.JPY, "100000");
-        ReflectionTestUtils.setField(quote, "status", QuoteStatus.USED);
-
-        // 1회 사용은 주문 UNIQUE(quote_id)가 막는다. 견적 상태로 판단하지 않는다.
-        ExchangeOrder order = ExchangeOrder.place(quote, WALLET_ID, KEY, ISSUED_AT.plusSeconds(60));
-
-        assertEquals(ExchangeOrderStatus.PROCESSING, order.getStatus());
-    }
-
-    @Test
-    void requiresSavedQuote() {
-        ExchangeQuote unsaved = issue(Currency.KRW, Currency.JPY, "100000");
-
-        assertThrows(NullPointerException.class,
-                () -> ExchangeOrder.place(unsaved, WALLET_ID, KEY, ISSUED_AT.plusSeconds(60)));
-    }
-
-    @Test
     void sameRequestNeedsSameQuoteAndWallet() {
         ExchangeQuote quote = savedQuote(Currency.KRW, Currency.JPY, "100000");
         ExchangeOrder order = ExchangeOrder.place(quote, WALLET_ID, KEY, ISSUED_AT.plusSeconds(60));
@@ -159,8 +139,6 @@ class ExchangeOrderTest {
     /** 저장된 것처럼 ID와 발급 시각(created_at)이 있는 견적입니다. */
     private static ExchangeQuote savedQuote(Currency from, Currency to, String amount) {
         ExchangeQuote quote = issue(from, to, amount);
-        ReflectionTestUtils.setField(quote, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(quote, "createdAt", ISSUED_AT);
         return quote;
     }
 

@@ -134,8 +134,6 @@ class ExchangeOrderLedgerPostingTest {
         ExchangeQuote quote = ExchangeQuote.issue(USER_ID, QuoteType.USER, new QuoteCurrencies(from, to),
                 Money.of(from, new BigDecimal(amount)), QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"),
                 QuoteFixtures.policy(), ISSUED_AT);
-        ReflectionTestUtils.setField(quote, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(quote, "createdAt", ISSUED_AT);
         ExchangeOrder order = OrderFixtures.placed(quote, WALLET_ID, "key-1");
         ReflectionTestUtils.setField(order, "id", ORDER_ID);
         return order;

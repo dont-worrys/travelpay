@@ -6,7 +6,9 @@ public enum ExchangeQuoteErrorCode implements ErrorCode {
 
     UNSUPPORTED_PAIR("EXCHANGE_UNSUPPORTED_PAIR", "원화와 외화 사이의 환전만 지원합니다.", 400),
     RATE_UNAVAILABLE("EXCHANGE_RATE_UNAVAILABLE", "지금은 환율을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503),
-    QUOTE_NOT_FOUND("EXCHANGE_QUOTE_NOT_FOUND", "견적을 찾을 수 없습니다.", 404);
+    QUOTE_NOT_FOUND("EXCHANGE_QUOTE_NOT_FOUND", "견적을 찾을 수 없습니다.", 404),
+    /** 견적 저장소(Redis)에 연결하지 못함. 견적은 Redis에만 있어 DB로 대신할 수 없다 */
+    QUOTE_STORE_UNAVAILABLE("EXCHANGE_QUOTE_STORE_UNAVAILABLE", "지금은 견적을 처리할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503);
 
     private final String code;
     private final String message;

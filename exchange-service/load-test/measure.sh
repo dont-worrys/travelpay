@@ -15,8 +15,12 @@
 #   DB 활성 세션: pg_stat_activity에서 state=active인 세션 수(이 조회 자신은 제외)의 평균·최대
 #   환율 조회 쿼리 수: pg_stat_statements의 exchange_rates SELECT 호출 수
 #     measure = 1초 표본의 구간 차이(측정 구간만, 수집기 포함), all = 적재 후 전체(예열 포함, 검산용)
-#   견적 행 수: exchange_quotes 행 수 (all = 예열 포함 전체, measure = created_at이 측정 구간 안). 환율 조회 측정이면 0
+#   견적 수: 견적이 DB에 있는 jar는 exchange_quotes 행, Redis에 있는 jar(#223 이후)는 exchange:quote:* 키를 센다
+#     db = DB 행(예열 포함), redis = Redis 키(예열 포함, 키 수명 10분이라 측정 중에 사라지지 않음), all = 둘의 합(검산용)
+#     measure = DB 행 중 created_at이 측정 구간 안 (Redis 견적은 시각으로 고르지 않음). 환율 조회 측정이면 모두 0
 #   캐시 조회 수: Actuator exchange_rate_cache_lookups_total{result=hit/miss/error}의 구간 차이 (통화 하나당 1). 캐시를 쓰지 않는 jar면 null
+#   Redis: 측정이 끝난 시점의 사용 메모리·최대 메모리·정책, 이번 측정 동안 지운 키(evicted)·메모리 부족으로 거절한 쓰기(OOM)
+#     지운 키나 거절한 쓰기가 하나라도 있으면 무효로 끝낸다. 환율 캐시가 비거나 견적이 사라져, Redis 상태가 측정 결과에 섞이기 때문이다
 set -euo pipefail
 
 LABEL=${1:?LABEL(db/redis)을 주세요}
@@ -43,16 +47,35 @@ rm -f "$summary" "results/${LABEL}-vus${VUS}.json"
 psql_q() {
     docker compose exec -T measure-postgres psql -U exchange_app -d travelpay -qAt "$@"
 }
+redis_q() {   # redis-cli 응답의 줄 끝(\r)을 지운다
+    docker compose exec -T measure-redis redis-cli "$@" | tr -d '\r'
+}
+redis_info() {   # redis_info <섹션> <항목>: INFO의 값 하나 (없으면 0)
+    redis_q INFO "$1" | awk -F: -v k="$2" '$1 == k { print $2; found = 1 } END { if (!found) print 0 }'
+}
 
 # 측정마다 앱을 새로 띄운다. 앞 측정의 JIT·커넥션·메모리 상태가 다음 측정에 넘어가지 않게
 echo "[1/4] 환전 서비스 재시작 (준비될 때까지 대기)"
 docker compose --profile app up -d --force-recreate --wait app >/dev/null 2>&1
 
+redis_maxmemory=$(redis_q CONFIG GET maxmemory | sed -n 2p)
+redis_policy=$(redis_q CONFIG GET maxmemory-policy | sed -n 2p)
+# 견적 발급은 견적이 Redis 키로 쌓이므로(Redis 견적 jar) 128MB 기본값이면 측정 중에 찬다. 같은 비교의 모든 jar를 같은 Redis로 재도록
+# 견적 발급 측정은 1GB 이상일 때만 진행한다 (compose.yaml의 MEASURE_REDIS_MAXMEMORY)
+if [ "$SCRIPT" = quote-issue.js ] && [ "${redis_maxmemory:-0}" -lt 1073741824 ]; then
+    echo "견적 발급 측정은 측정 Redis 메모리 1GB 이상에서 합니다 (지금 ${redis_maxmemory}바이트)." >&2
+    echo "  export MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction 후 다시 실행합니다 (README \"견적 발급 측정\")." >&2
+    exit 1
+fi
+
 echo "[2/4] 환율 이력 적재 (hours=${HOURS}), 캐시 Redis 비우기"
 psql_q -v hours="${HOURS}" -f /load-test/seed-rate-history.sql >/dev/null
 # 적재 SQL이 환율 표를 비우고 새로 채우므로, 앱이 시작하며 캐시에 넣은 환율은 DB에 없는 행이 된다.
-# 그대로 두면 다음 수집(최대 5초) 전까지 그 환율로 견적을 내다 외래 키에 막힌다. 그래서 적재 직후 캐시를 비운다
+# 그대로 두면 다음 수집(최대 5초) 전까지 그 환율로 견적을 내다 외래 키에 막힌다. 그래서 적재 직후 캐시를 비운다.
+# 앞 측정의 견적 키도 함께 지워져, 견적 수는 이번 실행에서 만든 것만 센다.
+# 통계(지운 키·거절한 쓰기 수)도 0으로 돌려 이번 측정 동안의 값만 보게 한다
 docker compose exec -T measure-redis redis-cli FLUSHALL >/dev/null
+docker compose exec -T measure-redis redis-cli CONFIG RESETSTAT >/dev/null
 
 echo "[3/4] k6 실행 (${SCRIPT}, VUS=${VUS}), DB 지표 1초 간격 기록"
 # 지표는 Docker 네트워크 안에서 읽는다(앱 컨테이너 안에서 curl). PC에서 읽으면 포트 전달을 지나 표본이 빠짐.
@@ -102,14 +125,31 @@ wait "$session_pid" 2>/dev/null || true
 
 echo "[4/4] DB 지표 정리"
 rate_selects=$(psql_q -c "SELECT coalesce(sum(calls), 0) FROM public.pg_stat_statements WHERE query ILIKE 'select%' AND query ILIKE '%exchange_rates%'")
-# 견적 행 수. 측정 직전 적재 SQL이 견적 테이블을 비우므로 all = 이번 실행(예열 포함)에서 만든 견적이다
+# 견적 수. 측정 직전 적재 SQL이 견적 테이블을, FLUSHALL이 견적 키를 비우므로 둘 다 이번 실행(예열 포함)에서 만든 견적이다.
+# 견적이 DB에 있는 jar는 Redis 키가 0이고, Redis에 있는 jar는 DB 행이 0이라 합(all)이 저장된 견적 수다
 quote_rows=$(psql_q -F ' ' -c "SELECT count(*), count(*) FILTER (WHERE created_at >= to_timestamp(${measure_from}) AND created_at < to_timestamp(${measure_to})) FROM exchange_service.exchange_quotes")
-quote_all=${quote_rows% *}
+quote_db=${quote_rows% *}
 quote_measure=${quote_rows#* }
+# SCAN은 같은 키를 두 번 돌려줄 수 있어(Redis 문서) 중복을 지운 뒤 센다. 그대로 세면 검산이 맞는 측정을 무효로 볼 수 있다
+quote_redis=$(redis_q --scan --pattern 'exchange:quote:*' --count 1000 | sort -u | wc -l | tr -d ' ')
+quote_all=$((quote_db + quote_redis))
+
+# Redis 상태: 측정이 끝난 시점의 메모리(견적 키는 10분 동안 남아 있어 이때가 가장 큼)와 이번 측정 동안 지운 키·거절한 쓰기
+redis_used=$(redis_info memory used_memory)
+redis_evicted=$(redis_info stats evicted_keys)
+redis_oom=$(redis_q INFO errorstats | awk -F'[:=,]' '$1 == "errorstat_OOM" { print $3; found = 1 } END { if (!found) print 0 }')
+if [ "${redis_evicted:-0}" -gt 0 ] || [ "${redis_oom:-0}" -gt 0 ]; then
+    echo "무효 측정: 측정 Redis가 키를 지웠거나(${redis_evicted}개) 메모리 부족으로 쓰기를 거절했습니다(${redis_oom}번)." >&2
+    echo "  사용 ${redis_used}바이트 / 최대 ${redis_maxmemory}바이트 (${redis_policy}). MEASURE_REDIS_MAXMEMORY를 늘려 다시 잽니다." >&2
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
 
 # 측정 구간 표본만 골라 평균·최대를 낸다
 awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects" \
-    -v quoteAll="$quote_all" -v quoteMeasure="$quote_measure" -v label="$LABEL" -v vus="$VUS" '
+    -v quoteAll="$quote_all" -v quoteMeasure="$quote_measure" -v quoteDb="$quote_db" -v quoteRedis="$quote_redis" \
+    -v redisUsed="$redis_used" -v redisMax="$redis_maxmemory" -v redisPolicy="$redis_policy" \
+    -v label="$LABEL" -v vus="$VUS" '
     FNR == 1 { file++ }
     $1 < from || $1 > to || $2 == "" { next }
     # 커넥션 풀 표본은 지표 6개가 모두 있어야 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 더해져
@@ -180,7 +220,9 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         # PC 전체(system)와 환전 서비스 JVM(app)의 CPU 사용률. 한 PC에서 k6·Docker·DB와 CPU를 나눠 쓰는지 본다
         printf "  \"cpuPercent\": {\"systemAvg\": %.1f, \"systemMax\": %.1f, \"appAvg\": %.1f},\n", sys / n * 100, sysMax * 100, proc / n * 100
         printf "  \"dbActiveSessions\": {\"avg\": %.2f, \"max\": %d},\n", (m ? ses / m : 0), sesMax
-        printf "  \"quoteRows\": {\"all\": %d, \"measure\": %d},\n", quoteAll, quoteMeasure
+        printf "  \"quoteRows\": {\"all\": %d, \"measure\": %d, \"db\": %d, \"redis\": %d},\n", quoteAll, quoteMeasure, quoteDb, quoteRedis
+        # 측정 Redis: 끝난 시점 사용 메모리(MB)·최대(MB)·정책. 견적이 Redis에 있으면 발급 수 × 키 크기만큼 늘어난다
+        printf "  \"redis\": {\"usedMb\": %.1f, \"maxMb\": %.0f, \"policy\": \"%s\"},\n", redisUsed / 1048576, redisMax / 1048576, redisPolicy
         # 측정 구간 동안 늘어난 캐시 조회 수 (통화 하나당 1). 캐시를 쓰지 않는 jar면 null
         if (k > 0) printf "  \"cacheLookups\": {\"hit\": %d, \"miss\": %d, \"error\": %d},\n", hit1 - hit0, miss1 - miss0, err1 - err0
         else printf "  \"cacheLookups\": null,\n"

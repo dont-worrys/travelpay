@@ -26,6 +26,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 import org.testcontainers.containers.GenericContainer;
@@ -37,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -117,7 +119,10 @@ class ExchangeRateCacheOutageIntegrationTest {
         assertEquals(hitsBefore + ALL.size(), lookups("hit"));
     }
 
-    /** 응답 없음: 환율 조회·견적 발급 모두 명령 타임아웃(200ms)까지 기다린 뒤 DB 값으로 처리한다. 다시 답하면 캐시를 쓴다. */
+    /**
+     * 응답 없음: 환율 조회는 명령 타임아웃(200ms)까지 기다린 뒤 DB 값으로 처리한다. 다시 답하면 캐시를 쓴다.
+     * 견적은 Redis에만 저장하므로(#223) DB로 대신하지 못하고, 타임아웃 뒤 503으로 빠르게 실패한다.
+     */
     @Test
     @Order(2)
     void fallsBackToDbAfterCommandTimeoutWhenRedisHangs() throws Exception {
@@ -135,11 +140,12 @@ class ExchangeRateCacheOutageIntegrationTest {
             assertTrue(took.compareTo(Duration.ofSeconds(2)) < 0, "타임아웃 뒤 바로 DB로: " + took);
             assertEquals(errorsBefore + ALL.size(), lookups("error"));
 
-            // 견적 발급도 응답 없는 Redis를 200ms만 기다리고 DB의 환율로 발급한다
-            issueQuote();
-            UUID quotedRateId = jdbcTemplate.queryForObject("SELECT rate_id FROM " + SCHEMA
-                    + ".exchange_quotes ORDER BY created_at DESC LIMIT 1", UUID.class);
-            assertEquals(repository.findLatest(RateSource.MOCK, ForeignCurrency.JPY).orElseThrow().getId(), quotedRateId);
+            // 견적 발급은 환율을 DB에서 읽어도 견적을 저장할 곳이 없어 503이다. 오래 매달리지 않는다
+            long quoteStarted = System.nanoTime();
+            issueQuote().andExpect(status().isServiceUnavailable())
+                    .andExpect(jsonPath("$.error.code").value("EXCHANGE_QUOTE_STORE_UNAVAILABLE"));
+            Duration quoteTook = Duration.ofNanos(System.nanoTime() - quoteStarted);
+            assertTrue(quoteTook.compareTo(Duration.ofSeconds(2)) < 0, "타임아웃 뒤 바로 실패: " + quoteTook);
         } finally {
             REDIS.getDockerClient().unpauseContainerCmd(REDIS.getContainerId()).exec();
         }
@@ -150,7 +156,8 @@ class ExchangeRateCacheOutageIntegrationTest {
     }
 
     /**
-     * 꺼짐: 조회·견적·수집 모두 DB로 동작한다. 연결이 끊긴 뒤에는 명령을 바로 거절해(REJECT_COMMANDS) 기다리지 않는다.
+     * 꺼짐: 환율 조회·수집은 DB로 동작한다. 연결이 끊긴 뒤에는 명령을 바로 거절해(REJECT_COMMANDS) 기다리지 않는다.
+     * 견적 발급은 503이고, 앱 상태 확인(health)은 그대로 정상이다(Redis를 health에서 빼 둠).
      * 컨테이너를 멈추므로 마지막에 실행한다.
      */
     @Test
@@ -175,19 +182,19 @@ class ExchangeRateCacheOutageIntegrationTest {
 
         MockMvc mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
         mockMvc.perform(get("/api/v1/exchange-rates")).andExpect(status().isOk());
-        issueQuote();
+        issueQuote().andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error.code").value("EXCHANGE_QUOTE_STORE_UNAVAILABLE"));
         mockMvc.perform(get("/actuator/health")).andExpect(status().isOk());
     }
 
-    private void issueQuote() throws Exception {
-        MockMvcBuilders.webAppContextSetup(context).build()
+    private ResultActions issueQuote() throws Exception {
+        return MockMvcBuilders.webAppContextSetup(context).build()
                 .perform(post("/api/v1/exchange-quotes")
                         .header("User-Id", OWNER).header("User-Role", "USER")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"fromCurrency":"KRW","toCurrency":"JPY","amount":"100000"}
-                                """))
-                .andExpect(status().isCreated());
+                                """));
     }
 
     private void assertSameAsDb(List<ExchangeRate> latest) {

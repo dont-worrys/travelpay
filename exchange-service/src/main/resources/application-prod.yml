@@ -13,7 +13,7 @@ spring:
       ddl-auto: validate
   data:
     redis:
-      # 환율 캐시용 Redis(redis-cache 컨테이너, 내부 포트 6379)입니다. 세션 Redis와 다른 인스턴스입니다.
+      # 환율 캐시·견적 저장소용 Redis(redis-cache 컨테이너, 내부 포트 6379)입니다. 세션 Redis와 다른 인스턴스입니다.
       host: ${REDIS_CACHE_HOST:redis-cache}
       port: ${REDIS_CACHE_PORT:6379}
       password: ${REDIS_CACHE_PASSWORD}

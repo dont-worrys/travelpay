@@ -33,7 +33,6 @@ import com.travelpay.exchange.domain.order.ManualReviewResolutionReason;
 import com.travelpay.exchange.domain.order.OrderFixtures;
 import com.travelpay.exchange.domain.order.Settlement;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
-import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
 import com.travelpay.exchange.domain.rate.CollectedRate;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
@@ -102,9 +101,6 @@ class ExchangeOrderPersistenceIntegrationTest {
 
     @Autowired
     private ExchangeOrderQueryRepository queryRepository;
-
-    @Autowired
-    private ExchangeQuoteRepository quoteRepository;
 
     @Autowired
     private ExchangeRateRepository rateRepository;
@@ -391,9 +387,9 @@ class ExchangeOrderPersistenceIntegrationTest {
         assertEquals(before, orderRow(saved.getId()));
     }
 
-    /** DB에 저장된 견적입니다. 저장하면 ID와 발급 시각(created_at)이 생깁니다. */
+    /** 주문에 쓸 견적입니다. 주문은 견적을 복사하므로 견적을 저장해 둘 필요는 없습니다. */
     private ExchangeQuote savedQuote(UUID userId) {
-        return quoteRepository.save(OrderFixtures.wonToYenQuote(userId, jpyRate, Instant.now()));
+        return OrderFixtures.wonToYenQuote(userId, jpyRate, Instant.now());
     }
 
     private int orderCount() {

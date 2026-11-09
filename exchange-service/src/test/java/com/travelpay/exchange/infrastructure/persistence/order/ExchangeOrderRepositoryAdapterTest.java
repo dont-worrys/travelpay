@@ -18,7 +18,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -106,8 +105,6 @@ class ExchangeOrderRepositoryAdapterTest {
         Instant issuedAt = Instant.parse("2026-10-29T03:00:00Z");
         ExchangeQuote quote = OrderFixtures.wonToYenQuote(UUID.randomUUID(),
                 QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), issuedAt);
-        ReflectionTestUtils.setField(quote, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(quote, "createdAt", issuedAt);
         return OrderFixtures.placed(quote, UUID.randomUUID(), "key-1");
     }
 
