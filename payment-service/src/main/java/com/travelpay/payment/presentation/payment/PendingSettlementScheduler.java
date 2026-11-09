@@ -1,11 +1,13 @@
 package com.travelpay.payment.presentation.payment;
 
 import com.travelpay.payment.application.payment.PaymentService;
+import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
 import com.travelpay.payment.application.merchant.SettlementService;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -13,11 +15,18 @@ import org.springframework.scheduling.annotation.Scheduled;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * 결과를 모른 채 남은 결제·환불·정산을 주기적으로 같은 referenceId로 원장에 다시 요청해 확정
- * 원장 장애로 밀린 건이 회복 시점에 한꺼번에 몰리지 않도록 건마다 대기 시간을 늘리고, 한 주기에 다루는 건수를 제한
+ * 원장 장애로 밀린 건이 회복 시점에 한꺼번에 몰리지 않도록 건마다 대기 시간을 늘린다.
+ * 재시도할 건이 많이 쌓이면 한 주기 안에서 결제·환불·정산을 배치 단위로 돌아가며 이어서 처리하고(ROUND_BUDGET까지),
+ * 결과 모름이 연달아 나온 종류는 원장 장애로 보고 그 주기에서 더 처리하지 않는다.
  */
 @Slf4j
 @Configuration(proxyBeanMethods = false)
@@ -26,12 +35,15 @@ import java.util.concurrent.atomic.AtomicLong;
 public class PendingSettlementScheduler {
 
     private static final int BATCH_SIZE = 10;
+    // 한 주기에서 이어서 처리하는 시간 한도. 주기 간격(10초)보다 짧게 두어 지표 갱신이 매 주기 이어지게 함
+    static final Duration ROUND_BUDGET = Duration.ofSeconds(8);
     private static final Duration STUCK_AFTER = Duration.ofMinutes(30);
     // 로그에 남길 ID 개수. 로그 한 줄이 너무 길어지지 않게 오래된 순 10개만.
     private static final int STUCK_SAMPLE_SIZE = 10;
 
     private final PaymentService paymentService;
     private final SettlementService settlementService;
+    private final LongSupplier nanoClock;
 
     private final AtomicLong stuckPayments = new AtomicLong();
     private final AtomicLong stuckRefunds = new AtomicLong();
@@ -41,10 +53,19 @@ public class PendingSettlementScheduler {
     private final AtomicLong manualReviewSettlements = new AtomicLong();
     private final AtomicLong overdueRefundRequests = new AtomicLong();
 
+    // 생성자가 둘이라 스프링이 쓸 생성자를 지정
+    @Autowired
     public PendingSettlementScheduler(PaymentService paymentService, SettlementService settlementService,
                                       MeterRegistry meterRegistry) {
+        this(paymentService, settlementService, meterRegistry, System::nanoTime);
+    }
+
+    // 테스트에서 시간 한도를 확인하려고 시각 공급자를 받음
+    PendingSettlementScheduler(PaymentService paymentService, SettlementService settlementService,
+                               MeterRegistry meterRegistry, LongSupplier nanoClock) {
         this.paymentService = paymentService;
         this.settlementService = settlementService;
+        this.nanoClock = nanoClock;
         Gauge.builder("payment.settlement.stuck", stuckPayments, AtomicLong::get)
                 .description("요청 후 30분이 지나도 확정되지 않은 건수")
                 .tag("type", "payment")
@@ -78,21 +99,7 @@ public class PendingSettlementScheduler {
     @Scheduled(initialDelay = 10_000, fixedDelay = 10_000)
     public void recover() {
         Instant now = Instant.now();
-        try {
-            paymentService.recoverPayments(now, BATCH_SIZE);
-        } catch (RuntimeException e) {
-            log.error("결제 복구 주기가 실패했습니다.", e);
-        }
-        try {
-            paymentService.recoverRefunds(now, BATCH_SIZE);
-        } catch (RuntimeException e) {
-            log.error("환불 복구 주기가 실패했습니다.", e);
-        }
-        try {
-            settlementService.recoverSettlements(now, BATCH_SIZE);
-        } catch (RuntimeException e) {
-            log.error("정산 복구 주기가 실패했습니다.", e);
-        }
+        drain();
         try {
             reportStuck(now.minus(STUCK_AFTER));
             manualReviewPayments.set(paymentService.countManualReviewPayments());
@@ -101,6 +108,59 @@ public class PendingSettlementScheduler {
             overdueRefundRequests.set(paymentService.countOverdueRefundRequests());
         } catch (RuntimeException e) {
             log.error("확정되지 않은 결제·환불·정산 수를 조회하지 못했습니다.", e);
+        }
+    }
+
+    // 결제·환불·정산을 배치 하나씩 돌아가며 처리. 덜 찬 배치·원장 장애·오류가 나온 종류는 빠지고,
+    // 모두 빠지거나 시간 한도가 지나면 끝. 첫 바퀴는 시간과 관계없이 세 종류 모두 한 번씩 돈다
+    private void drain() {
+        long deadline = nanoClock.getAsLong() + ROUND_BUDGET.toNanos();
+        List<Recovery> active = new ArrayList<>(List.of(
+                new Recovery("결제", () -> paymentService.recoverPayments(Instant.now(), BATCH_SIZE)),
+                new Recovery("환불", () -> paymentService.recoverRefunds(Instant.now(), BATCH_SIZE)),
+                new Recovery("정산", () -> settlementService.recoverSettlements(Instant.now(), BATCH_SIZE))));
+        List<Recovery> all = List.copyOf(active);
+        while (!active.isEmpty()) {
+            Iterator<Recovery> it = active.iterator();
+            while (it.hasNext()) {
+                if (!it.next().runBatch()) {
+                    it.remove();
+                }
+            }
+            if (nanoClock.getAsLong() >= deadline) {
+                break;
+            }
+        }
+        int total = all.stream().mapToInt(r -> r.fetched).sum();
+        if (total > BATCH_SIZE * all.size()) {
+            log.info("복구 주기 처리 결제 {}건, 환불 {}건, 정산 {}건", all.get(0).fetched, all.get(1).fetched, all.get(2).fetched);
+        }
+    }
+
+    private static final class Recovery {
+        private final String name;
+        private final Supplier<RecoveryBatchResult> batch;
+        private int fetched;
+
+        private Recovery(String name, Supplier<RecoveryBatchResult> batch) {
+            this.name = name;
+            this.batch = batch;
+        }
+
+        // 배치 하나를 처리하고, 이어서 더 처리할지 돌려줌
+        private boolean runBatch() {
+            RecoveryBatchResult result;
+            try {
+                result = batch.get();
+            } catch (RuntimeException e) {
+                log.error("{} 복구 주기가 실패했습니다.", name, e);
+                return false;
+            }
+            if (result == null) {
+                return false;
+            }
+            fetched += result.fetched();
+            return result.fetched() >= BATCH_SIZE && !result.ledgerUnavailable();
         }
     }
 

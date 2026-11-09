@@ -14,6 +14,7 @@ import com.travelpay.payment.application.payment.client.wallet.PaymentWalletClie
 import com.travelpay.payment.application.payment.dto.MerchantPaymentListResult;
 import com.travelpay.payment.application.payment.dto.OverdueRefundRequestResult;
 import com.travelpay.payment.application.payment.dto.PaymentCommand;
+import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
 import com.travelpay.payment.application.payment.dto.PaymentListResult;
 import com.travelpay.payment.application.payment.dto.PaymentResult;
 import com.travelpay.payment.application.payment.dto.RefundCommand;
@@ -300,9 +301,10 @@ public class PaymentService {
     }
 
     // 재시도 대기 시간이 지난 PENDING 결제를 선점해 원장에 다시 요청 (배치)
-    public void recoverPayments(Instant now, int limit) {
+    public RecoveryBatchResult recoverPayments(Instant now, int limit) {
         int consecutiveUnknown = 0;
-        for (Payment target : paymentRepository.findRecoveryTargets(now, limit)) {
+        List<Payment> targets = paymentRepository.findRecoveryTargets(now, limit);
+        for (Payment target : targets) {
             boolean unknown;
             try {
                 if (paymentRepository.claimForRecovery(target.getId(), target.getUpdatedAt(), Instant.now()) == 0) {
@@ -317,15 +319,17 @@ public class PaymentService {
             consecutiveUnknown = unknown ? consecutiveUnknown + 1 : 0;
             if (consecutiveUnknown >= MAX_CONSECUTIVE_UNKNOWN) {
                 log.warn("원장 응답 불가로 결제 복구를 다음 주기로 미룹니다.");
-                return;
+                return new RecoveryBatchResult(targets.size(), true);
             }
         }
+        return new RecoveryBatchResult(targets.size(), false);
     }
 
     // 재시도 대기 시간이 지난 REQUESTED 환불을 선점해 원장에 다시 요청 (배치)
-    public void recoverRefunds(Instant now, int limit) {
+    public RecoveryBatchResult recoverRefunds(Instant now, int limit) {
         int consecutiveUnknown = 0;
-        for (Refund target : refundRepository.findRecoveryTargets(now, limit)) {
+        List<Refund> targets = refundRepository.findRecoveryTargets(now, limit);
+        for (Refund target : targets) {
             boolean unknown;
             try {
                 if (refundRepository.claimForRecovery(target.getId(), target.getUpdatedAt(), Instant.now()) == 0) {
@@ -343,9 +347,10 @@ public class PaymentService {
             consecutiveUnknown = unknown ? consecutiveUnknown + 1 : 0;
             if (consecutiveUnknown >= MAX_CONSECUTIVE_UNKNOWN) {
                 log.warn("원장 응답 불가로 환불 복구를 다음 주기로 미룹니다.");
-                return;
+                return new RecoveryBatchResult(targets.size(), true);
             }
         }
+        return new RecoveryBatchResult(targets.size(), false);
     }
 
     public long countManualReviewPayments() {
