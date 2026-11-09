@@ -225,6 +225,34 @@ class ExchangeOrderIntegrationTest {
         assertEquals(1, orderCount());
     }
 
+    /**
+     * API 문서(#233): 사용자 그룹(exchange)과 관리자 그룹(exchange-admin)이 경로를 나눠 갖고,
+     * 회원 헤더는 요청자를 쓰는 API에만, 환율 조회(공개)에는 붙지 않는다. 환전 신청의 Idempotency-Key는 필수로 보인다.
+     */
+    @Test
+    void apiDocsSplitUserAndAdminGroupsAndDocumentHeadersWhereNeeded() throws Exception {
+        String user = mockMvc.perform(get("/v3/api-docs/exchange")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        String admin = mockMvc.perform(get("/v3/api-docs/exchange-admin")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        Map<String, Object> userPaths = JsonPath.read(user, "$.paths");
+        Map<String, Object> adminPaths = JsonPath.read(admin, "$.paths");
+        assertTrue(userPaths.keySet().containsAll(List.of("/api/v1/exchange-rates", "/api/v1/exchange-limits",
+                "/api/v1/exchange-quotes", "/api/v1/exchanges", "/api/v1/exchanges/{orderId}")), userPaths.keySet().toString());
+        assertTrue(userPaths.keySet().stream().noneMatch(path -> path.startsWith("/api/v1/admin")), userPaths.keySet().toString());
+        assertTrue(adminPaths.keySet().containsAll(List.of("/api/v1/admin/exchanges/manual-reviews",
+                "/api/v1/admin/exchanges/resolutions", "/api/v1/admin/exchanges/{orderId}/resolve")), adminPaths.keySet().toString());
+        assertTrue(adminPaths.keySet().stream().allMatch(path -> path.startsWith("/api/v1/admin/exchanges")), adminPaths.keySet().toString());
+
+        // 공개 API에는 회원 헤더가 없고, 요청자를 쓰는 API에는 필수로 있다
+        assertEquals(List.of(), JsonPath.read(user, "$.paths['/api/v1/exchange-rates'].get.parameters[?(@.name == 'User-Id')]"));
+        assertEquals(List.of(true), JsonPath.read(user, "$.paths['/api/v1/exchanges'].post.parameters[?(@.name == 'User-Id')].required"));
+        assertEquals(List.of(true), JsonPath.read(user, "$.paths['/api/v1/exchanges'].post.parameters[?(@.name == 'Idempotency-Key')].required"));
+        assertEquals(List.of("MASTER"), JsonPath.read(admin,
+                "$.paths['/api/v1/admin/exchanges/resolutions'].get.parameters[?(@.name == 'User-Role')].example"));
+    }
+
     @Test
     void sameQuoteWithAnotherKeyIsAlreadyUsed() throws Exception {
         String quoteId = issuedQuoteId(OWNER);

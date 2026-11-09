@@ -102,3 +102,10 @@ logging:
     json:
       add:
         service: ${spring.application.name}
+
+# API 문서는 운영에서 끕니다 (내부 구조를 외부에 드러내지 않게).
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

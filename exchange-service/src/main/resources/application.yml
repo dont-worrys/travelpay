@@ -115,3 +115,10 @@ logging:
     json:
       add:
         service: ${spring.application.name}
+
+# API 문서: 로컬에서만 켭니다 (http://localhost:8084/swagger-ui.html). 운영(application-prod.yml)은 끕니다.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
