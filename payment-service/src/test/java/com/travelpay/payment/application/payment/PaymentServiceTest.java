@@ -43,6 +43,7 @@ import com.travelpay.payment.domain.payment.Refund;
 import com.travelpay.payment.domain.payment.RefundRepository;
 import com.travelpay.payment.domain.payment.RefundStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
+import com.travelpay.payment.domain.merchant.SettlementItemRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -94,6 +95,7 @@ class PaymentServiceTest {
     private PaymentWalletClient paymentWalletClient;
     private PaymentLedgerClient ledgerClient;
     private RefundRepository refundRepository;
+    private SettlementItemRepository settlementItemRepository;
     private PaymentService paymentService;
     private List<Refund> savedRefunds;
 
@@ -105,11 +107,16 @@ class PaymentServiceTest {
         paymentWalletClient = mock(PaymentWalletClient.class);
         ledgerClient = mock(PaymentLedgerClient.class);
         refundRepository = mock(RefundRepository.class);
+        settlementItemRepository = mock(SettlementItemRepository.class);
         paymentService = new PaymentService(paymentRepository, paymentHistoryRepository, merchantRepository,
-                paymentWalletClient, ledgerClient, refundRepository, TransactionOperations.withoutTransaction());
+                paymentWalletClient, ledgerClient, refundRepository, TransactionOperations.withoutTransaction(),
+                settlementItemRepository);
 
         when(paymentRepository.findByUserIdAndIdempotencyKey(USER_ID, KEY)).thenReturn(Optional.empty());
         when(paymentRepository.save(any(Payment.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        // 잠금 조회는 각 테스트가 지정한 findById 결과를 그대로 돌려줌
+        when(paymentRepository.findByIdForUpdate(any()))
+                .thenAnswer(invocation -> paymentRepository.findById(invocation.getArgument(0)));
 
         // 원장 거래에 넣을 가맹점 원장 지갑. 가맹점 검증 테스트는 각자 다시 지정합니다.
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
@@ -774,6 +781,39 @@ class PaymentServiceTest {
                 refundCommand(OTHER_USER_ID, AuthRole.MASTER, PAYMENT_ID, 10_000L));
 
         assertEquals(PaymentStatus.REFUNDED, result.status());
+    }
+
+    // 정산된 결제는 돈이 주인 지갑으로 나가 있어 MASTER 직접 환불도 막음
+    @Test
+    void throwsAlreadySettledWhenRefundingSettledPayment() {
+        Payment payment = approvedPayment();
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+        when(settlementItemRepository.existsByPaymentId(PAYMENT_ID)).thenReturn(true);
+
+        BusinessException exception = assertThrows(BusinessException.class, () -> paymentService.refundRequest(
+                refundCommand(OTHER_USER_ID, AuthRole.MASTER, PAYMENT_ID, 10_000L)));
+
+        assertEquals(PaymentErrorCode.ALREADY_SETTLED, exception.getErrorCode());
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        verify(refundRepository, never()).save(any());
+        verify(ledgerClient, never()).refundTransaction(any());
+    }
+
+    // 트랜잭션 밖 확인 뒤 정산이 먼저 커밋됨: 결제를 잠근 뒤 다시 확인해 막음
+    @Test
+    void throwsAlreadySettledWhenSettledAfterFirstCheck() {
+        Payment payment = approvedPayment();
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+        when(settlementItemRepository.existsByPaymentId(PAYMENT_ID)).thenReturn(false, true);
+
+        BusinessException exception = assertThrows(BusinessException.class, () -> paymentService.refundRequest(
+                refundCommand(OTHER_USER_ID, AuthRole.MASTER, PAYMENT_ID, 10_000L)));
+
+        assertEquals(PaymentErrorCode.ALREADY_SETTLED, exception.getErrorCode());
+        verify(paymentRepository).findByIdForUpdate(PAYMENT_ID);
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        verify(refundRepository, never()).save(any());
+        verify(ledgerClient, never()).refundTransaction(any());
     }
 
     @Test

@@ -5,7 +5,6 @@ import com.travelpay.payment.domain.payment.PaymentStatus;
 import com.travelpay.payment.domain.payment.RefundStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -40,7 +39,7 @@ final class ManualReviewRules {
                                          List<PaymentLedgerLookup.Entry> expectedEntries) {
         boolean exhausted = reviewReason == SettlementReviewReason.RETRY_EXHAUSTED;
         return switch (ledger.status()) {
-            case POSTED -> !sameEntries(ledger.entries(), expectedEntries)
+            case POSTED -> !ledger.hasSameEntries(expectedEntries)
                     ? new PaymentDecision(false, null, null, describeMismatch(reviewReason))                          // P5 내용 다름
                     : payment(PaymentStatus.APPROVED, null, reviewReason, ledger, "결제 승인");                         // P1·P5 내용 같음
             case REJECTED -> exhausted
@@ -56,7 +55,7 @@ final class ManualReviewRules {
                                        List<PaymentLedgerLookup.Entry> expectedEntries) {
         boolean exhausted = reviewReason == SettlementReviewReason.RETRY_EXHAUSTED;
         return switch (ledger.status()) {
-            case POSTED -> !sameEntries(ledger.entries(), expectedEntries)
+            case POSTED -> !ledger.hasSameEntries(expectedEntries)
                     ? new RefundDecision(false, null, null, describeMismatch(reviewReason))                           // R5 내용 다름
                     : refund(RefundStatus.COMPLETED, null, reviewReason, ledger, "환불 완료");                          // R1·R5 내용 같음
             case REJECTED -> exhausted
@@ -92,21 +91,6 @@ final class ManualReviewRules {
                                          SettlementReviewReason reviewReason, PaymentLedgerLookup ledger,
                                          String outcome) {
         return new RefundDecision(true, toStatus, declineReason, describe(reviewReason, ledger, outcome));
-    }
-
-    // 원장 항목과 기대 항목이 같은 묶음인지(순서 무관, 개수까지 같아야 함)
-    private static boolean sameEntries(List<PaymentLedgerLookup.Entry> actual,
-                                       List<PaymentLedgerLookup.Entry> expected) {
-        if (actual.size() != expected.size()) {
-            return false;
-        }
-        List<PaymentLedgerLookup.Entry> remaining = new ArrayList<>(actual);
-        for (PaymentLedgerLookup.Entry entry : expected) {
-            if (!remaining.remove(entry)) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static String describeMismatch(SettlementReviewReason reviewReason) {

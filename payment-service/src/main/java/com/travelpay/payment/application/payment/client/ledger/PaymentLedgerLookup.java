@@ -2,6 +2,7 @@ package com.travelpay.payment.application.payment.client.ledger;
 
 import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -19,6 +20,20 @@ public record PaymentLedgerLookup(ReviewLedgerStatus status, UUID transactionId,
 
     /** 원장 거래 항목 한 건. 비교할 때 이 값들이 모두 같아야 같은 항목입니다. */
     public record Entry(UUID walletId, String currency, String direction, long amount, String entryType) {
+    }
+
+    /** 원장 항목이 기대 항목과 같은 묶음인지(순서 무관, 개수까지 같아야 함) */
+    public boolean hasSameEntries(List<Entry> expected) {
+        if (entries.size() != expected.size()) {
+            return false;
+        }
+        List<Entry> remaining = new ArrayList<>(entries);
+        for (Entry entry : expected) {
+            if (!remaining.remove(entry)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public static PaymentLedgerLookup posted(UUID transactionId, List<Entry> entries) {
