@@ -303,11 +303,14 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 - 유실시킨 요청은 WARN 로그(`requestId`)를 남기고, 카운터 `mock.bank.fault.withdrawal.lost.rate`(Prometheus `mock_bank_fault_withdrawal_lost_rate_total`)를 올립니다. 헤더 `LOST`는 세지 않습니다.
 - 응답 본문은 헤더 `LOST`와 같습니다.
 - 재요청에도 적용되므로, 비율이 높으면 같은 충전이 연속으로 유실될 수 있습니다. 지갑은 결과 모름을 5회 재시도한 뒤 `MANUAL_REVIEW`로 넘깁니다(10%면 5회 연속 유실 확률 10만분의 1).
+- 유실시킨 500 응답도 `http_server_requests`의 출금 경로 집계에 포함됩니다. 그래서 출금 호출 수는 재시도만큼 늘고, 실제 출금 건수는 늘지 않습니다(같은 `requestId`는 저장된 결과를 돌려주므로).
 
 ```bash
 # 측정할 때 Mock 은행 실행 인자에 추가
 --mock-bank.fault.withdrawal-lost-rate=0.1
 ```
+
+측정 절차와 비율이 실제로 적용됐는지 확인하는 방법은 [충전 부하 측정 README](../../wallet-service/load-test/README.md#장애-측정-출금-응답-유실)에 있습니다.
 
 ## 오류 응답
 
