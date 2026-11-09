@@ -43,7 +43,7 @@ spring:
             - id: exchange-service
               uri: lb://exchange-service
               predicates:
-                - Path=/api/v1/exchange-rates/**,/api/v1/exchange-limits/**,/api/v1/exchange-quotes/**,/api/v1/exchanges/**
+                - Path=/api/v1/exchange-rates/**,/api/v1/exchange-limits/**,/api/v1/exchange-quotes/**,/api/v1/exchanges/**,/api/v1/admin/exchanges/**
               filters:
                 - RemoveRequestHeader=Cookie
 
