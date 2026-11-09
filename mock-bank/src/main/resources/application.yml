@@ -15,10 +15,14 @@ spring:
 server:
   port: 8090
 
-# Mock-Fault: DELAY 헤더로 처리·커밋 후 응답을 늦추는 시간
+# delay: Mock-Fault: DELAY 헤더로 처리·커밋 후 응답을 늦추는 시간
+# withdrawal-lost-rate: 출금 정상 응답(2xx)을 처리·커밋 후 500으로 유실시키는 비율 (0.0~1.0, 0이면 끔)
+#   출금만 적용(환불·조회 제외, 같은 requestId 재요청 포함), 400·409 제외, Mock-Fault 헤더가 있으면 판정 안 함. prod에서는 꺼짐
+#   환경 변수 MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE로 덮어쓴다
 mock-bank:
   fault:
     delay: 10s
+    withdrawal-lost-rate: 0.0
 
 management:
   endpoints:
