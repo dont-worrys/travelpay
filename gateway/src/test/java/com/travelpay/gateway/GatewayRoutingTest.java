@@ -204,6 +204,52 @@ class GatewayRoutingTest {
         assertTrue(EXCHANGE.received("/api/v1/exchange-rates").getFirst().header("Cookie").isEmpty());
     }
 
+    /** 환전 관리자 API는 세션 확인을 거쳐, 확인된 회원 헤더를 달고 환전 서비스에 도착합니다. 쿠키는 넘기지 않습니다. */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/api/v1/admin/exchanges/manual-reviews",
+            "/api/v1/admin/exchanges/resolutions",
+            "/api/v1/admin/exchanges/550e8400-e29b-41d4-a716-446655440001"
+    })
+    void adminExchangeRequestsReachExchangeServiceWithTheVerifiedMaster(String path) {
+        USER.reply(SESSION_VERIFICATION, Reply.json(200, """
+                {"success":true,"data":{"userId":"%s","role":"MASTER"},"error":null}
+                """.formatted(MEMBER_ID)));
+
+        client().get().uri(path).header("Cookie", "SESSION=abc").exchange().expectStatus().isOk();
+
+        assertEquals(List.of("SESSION=abc"), USER.received(SESSION_VERIFICATION).getFirst().header("Cookie"));
+        var arrived = EXCHANGE.received(path).getFirst();
+        assertEquals(List.of(MEMBER_ID.toString()), arrived.header("User-Id"));
+        assertEquals(List.of("MASTER"), arrived.header("User-Role"));
+        assertTrue(arrived.header("Cookie").isEmpty());
+    }
+
+    /** 처리(POST)도 같은 라우트로 가며, 세션 확인에 메서드를 알립니다. */
+    @Test
+    void adminExchangeResolveReachesExchangeService() {
+        String path = "/api/v1/admin/exchanges/550e8400-e29b-41d4-a716-446655440001/resolve";
+
+        client().post().uri(path).header("Cookie", "SESSION=abc").header("Csrf-Token", "csrf")
+                .exchange().expectStatus().isOk();
+
+        assertEquals(List.of("POST"), USER.received(SESSION_VERIFICATION).getFirst().header("Original-Method"));
+        assertEquals(1, EXCHANGE.received(path).size());
+    }
+
+    /** 일반 회원이 User-Role: MASTER를 직접 보내도 Gateway가 세션의 역할(USER)로 덮어씁니다. 관리자 권한은 이 헤더에 기댑니다. */
+    @Test
+    void aMemberCannotClaimMasterOnAdminExchangeRoutes() {
+        client().get().uri("/api/v1/admin/exchanges/manual-reviews")
+                .header("Cookie", "SESSION=abc")
+                .header("User-Id", UUID.randomUUID().toString()).header("User-Role", "MASTER")
+                .exchange().expectStatus().isOk();
+
+        var arrived = EXCHANGE.received("/api/v1/admin/exchanges/manual-reviews").getFirst();
+        assertEquals(List.of(MEMBER_ID.toString()), arrived.header("User-Id"));
+        assertEquals(List.of("USER"), arrived.header("User-Role"));
+    }
+
     @Test
     void theConfiguredLocalFrontendCanPreflightWithoutSessionVerification() {
         client().options().uri("/api/v1/transfers").header("Origin", "http://localhost:4173")
