@@ -403,6 +403,35 @@ class TransferLedgerFlowTest {
         assertEquals(10_000L, ledger.balance(SOURCE_WALLET_ID));
     }
 
+    /**
+     * 복구 중 원장이 400·409로 요청을 받아들이지 않으면 시도 횟수와 무관하게 바로 MANUAL_REVIEW로 두고,
+     * 이후 복구 주기에서는 다시 보내지 않습니다(팀 복구 정책: 자동 복구가 어려운 경우).
+     */
+    @ParameterizedTest
+    @CsvSource({
+            "400, LEDGER_INVALID_REQUEST",
+            "409, LEDGER_REFERENCE_CONFLICT"
+    })
+    void recoveryMovesRequestNotAcceptedToManualReviewAndStopsResending(int status, String code) {
+        Instant lastTriedAt = Instant.parse("2026-11-02T00:00:00Z");
+        Transfer transfer = staleProcessingTransfer(KEY, lastTriedAt);
+        ReflectionTestUtils.setField(transfer, "attemptCount", 2);
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.requestNotAccepted(
+                    "원장 거래 등록 실패 status=" + status + " code=" + code, null);
+        };
+
+        transferService.recoverDue(farFuture(), 10);
+        transferService.recoverDue(farFuture().plusSeconds(86_400), 10);
+
+        assertEquals(TransferStatus.MANUAL_REVIEW, transfer.getStatus());
+        assertEquals(TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, transfer.getReviewReason());
+        assertEquals(2, transfer.getAttemptCount());
+        assertNull(transfer.getFailureReason());
+        assertEquals(1, ledger.requests.size());
+        assertEquals(10_000L, ledger.balance(SOURCE_WALLET_ID));
+    }
+
     /** 재시도 대기 시간은 30초 × 2^(시도 횟수 - 1)입니다(30초 → 1분 → 2분 → 4분). 대기 시간이 지나기 전에는 다시 요청하지 않습니다. */
     @ParameterizedTest
     @CsvSource({"0, 30", "1, 30", "2, 60", "3, 120", "4, 240"})
