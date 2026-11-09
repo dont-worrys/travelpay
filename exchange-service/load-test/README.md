@@ -6,9 +6,10 @@ DB만 쓸 때와 Redis를 쓸 때를 같은 방법으로 재서 비교합니다(
 | 측정 대상 | k6 스크립트 | 보는 것 |
 | --- | --- | --- |
 | 환율 조회 | `rate-query.js` (기본) | 읽기만 하는 API. 최신 환율 읽기 (v0: SELECT 2번 / v0.5: LATERAL 1번 / v1: Redis MGET 1번) |
-| 견적 발급 | `quote-issue.js` | 외화 한 통화의 최신 환율 읽기 + 견적 INSERT + 커밋. 연결을 쥐는 시간이 더 김 |
+| 견적 발급 | `quote-issue.js` | 외화 한 통화의 최신 환율 읽기 + 견적 저장 (quote-db: DB INSERT + 커밋 / quote-redis: Redis SET, DB 연결 안 씀) |
 
-견적 발급은 세 시점을 같은 방법으로 재서 단계별 효과를 나눠 봅니다: ① 환율·견적 모두 DB → ② 환율만 Redis → ③ 환율·견적 모두 Redis.
+견적 발급은 견적 저장소 전환(#223) 하나의 효과만 봅니다: #223 머지 직전(quote-db, 환율은 Redis·견적은 DB) → #223 머지 커밋(quote-redis, 둘 다 Redis).
+환율을 Redis에서 읽는 효과는 환율 조회 측정(v0 → v0.5 → v1)으로 이미 검증했으므로, 견적은 바뀐 변수 하나만 비교합니다.
 설계와 측정 결과는 [환율 Redis 캐싱 설계·측정 기록](https://claude.ai/artifact/APBg2irhYAYYukDLjHWSA1)에 남깁니다.
 
 ## 구성
@@ -98,7 +99,7 @@ git worktree remove ../../../travelpay-v0
 | 비교 | jar | 언제 |
 | --- | --- | --- |
 | 환율 조회: v0 / v0.5 / v1 | v0 `0865bb5`(쿼리 최적화 전) / v0.5 `c40186c`(LATERAL 쿼리) / v1(환율 Redis 캐싱 후) | 환율 Redis 캐싱 이슈가 끝난 뒤 (셋을 같은 날) |
-| 견적 발급: ① / ② / ③ | v0 / v1 / v2(견적 저장소 Redis 전환 후) | 견적 저장소 Redis 전환 이슈가 끝난 뒤 (셋을 같은 날) |
+| 견적 발급: quote-db / quote-redis | #223 머지 커밋의 바로 앞 커밋(`<머지>^1`) / #223 머지 커밋 | #223 머지 후 (둘을 같은 날, 아래 "견적 발급 측정") |
 
 측정 기록에는 jar를 빌드한 **커밋 해시**를 함께 남깁니다.
 
@@ -211,7 +212,8 @@ SCRIPT=quote-issue.js ./measure.sh quote-db 50   # 견적 발급
 | `acquireCount` | `hikaricp_connections_acquire_seconds_count` | 측정 구간에 연결을 얻은 횟수(구간 차이). 캐시가 DB 연결을 얼마나 덜 빌리는지 직접 보여 줌. 수집기(5초마다)가 쓴 연결도 포함 |
 | `cpuPercent` | `system_cpu_usage`, `process_cpu_usage` | Docker가 쓰는 CPU 전체(k6·앱·DB 합)와 앱 JVM의 사용률. 평균(전체는 최대도) |
 | `dbActiveSessions` | `pg_stat_activity` (state=active) | DB에서 실제로 실행 중인 쿼리 수, 평균·최대 |
-| `quoteRows` | `exchange_quotes` 행 수 | `all`: 이번 실행(예열 포함)에서 저장된 견적. 측정 직전 적재 SQL이 견적 테이블을 비우므로 그대로 셈. `measure`: `created_at`이 측정 구간 안인 견적(앱·DB 시각이 1초 안에서 어긋나 어림값). 환율 조회 측정이면 0 |
+| `quoteRows` | `exchange_quotes` 행 수 + Redis `exchange:quote:*` 키 수 | `db`: DB 행, `redis`: Redis 키(견적 저장소가 Redis인 jar), `all`: 둘의 합 = 이번 실행(예열 포함)에서 저장된 견적. 측정 직전 적재 SQL이 견적 테이블을, `FLUSHALL`이 견적 키를 비우므로 그대로 셈(키 수명 10분이라 측정 중에 사라지지 않음). `measure`: DB 행 중 `created_at`이 측정 구간 안(어림값). 환율 조회 측정이면 모두 0 |
+| `redis` | 측정 Redis `INFO`·`CONFIG` | 측정이 끝난 시점 사용 메모리(`usedMb`), 최대(`maxMb`), 정책(`policy`). 견적이 Redis에 있으면 발급 수 × 키 크기만큼 늘어남. 이번 측정 동안 Redis가 키를 지웠거나(evicted) 메모리 부족으로 쓰기를 거절했으면(OOM) 무효로 끝남 |
 | `rateSelectCalls` | `pg_stat_statements` | 환율 SELECT 호출 수. `measure`: DB 세션과 같은 1초 표본에서 누적 값을 읽어 구한 **측정 구간만의** 차이(수집기 포함). `all`: 적재 후 전체(예열 포함, 검산용). 적재 때 통계를 초기화하므로 예열 호출이 섞이지 않게 구간 차이를 씀 |
 
 - 측정 구간은 k6가 **실제로 테스트를 시작한 시각**(끝난 시각 − k6 결과의 `testRunDurationMs`)에서 예열(`WARMUP_SECONDS`, 기본 30초)을 뺀 측정 시간(`MEASURE_SECONDS`, 기본 2분)입니다. 컨테이너를 띄우는 데 걸린 시간과 상관없이 k6 집계 구간과 같습니다.
@@ -279,3 +281,27 @@ SUMMARY_ONLY=1 ./measure-compare.sh rate v0=../../../travelpay-v0/$J v05=../../.
 
 요약은 단계마다 **있는 회차를 모두** 쓰므로 추가한 회차는 그 조합에만 들어갑니다. 회차 이름(`r4`, `r5`)은 앞 회차와 겹치지 않게 이어서 붙입니다.
 - 측정 DB는 버전끼리 같이 씁니다. 비교할 버전들의 Flyway 마이그레이션이 같은지 먼저 확인합니다(다르면 새 버전이 적용한 마이그레이션을 옛 버전이 몰라 시작하지 못함).
+
+### 견적 발급 측정 (#223 전후)
+
+견적 저장소를 Redis로 옮기면(#223) 견적이 Redis 키로 쌓입니다(초당 발급 수 × 키 수명 10분 × 약 500바이트). 초당 3,000건이면 약 900MB라, 기본 128MB 측정 Redis는 몇 분 안에 찹니다. 그래서 **견적 발급은 측정 Redis를 키우고, 비교하는 두 jar 모두 같은 Redis로** 잽니다.
+
+```bash
+# 1. 저장소 루트에서: #223 머지 커밋과 그 바로 앞 커밋으로 jar 빌드 (차이가 #223 하나만 되게)
+M=<#223 머지 커밋>
+git worktree add ../travelpay-quote-db "$M^1" && (cd ../travelpay-quote-db && ./gradlew :exchange-service:bootJar)
+git worktree add ../travelpay-quote-redis "$M" && (cd ../travelpay-quote-redis && ./gradlew :exchange-service:bootJar)
+
+# 2. 측정 폴더에서: 측정 Redis를 2GB·noeviction(운영 redis-cache와 같은 정책)으로. 같은 셸에서 끝까지 잽니다
+cd exchange-service/load-test
+export MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction
+docker compose up -d --force-recreate --wait measure-redis
+J=exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar
+SCRIPT=quote-issue.js ./measure-compare.sh quote quote-db=../../../travelpay-quote-db/$J quote-redis=../../../travelpay-quote-redis/$J
+```
+
+- `measure.sh`는 견적 발급을 잴 때 측정 Redis가 1GB보다 작으면 시작하지 않습니다. 값이 다른 셸에서 이어 재면(환경 변수 없음) compose가 Redis를 기본값으로 다시 만들어 막힙니다.
+- 회차마다 Redis가 키를 지웠거나(evicted) 쓰기를 거절했으면(OOM) 무효로 멈춥니다. 환율 캐시 쓰기가 거절되면 환율을 DB에서 읽게 되어 측정이 공정하지 않기 때문입니다. HTTP 오류로는 드러나지 않아 Redis 통계로 확인합니다.
+- quote-redis는 발급에 DB 연결을 쓰지 않습니다. 그래도 `연결 얻은 횟수`는 0이 아니라 수집기(5초마다)·복구 스케줄러·지표 갱신(30초마다)이 쓴 만큼 남습니다(환율 조회 v1과 비슷한 수준).
+- 견적 발급 요약 표에는 저장된 견적 수 / 성공 응답 수와 측정 Redis 사용 메모리(회차 중 최대)가 붙습니다.
+- 환율 조회를 다시 잴 때는 `unset MEASURE_REDIS_MAXMEMORY MEASURE_REDIS_POLICY` 후 `docker compose up -d --force-recreate --wait measure-redis`로 기본값(128MB·allkeys-lru)으로 돌립니다.

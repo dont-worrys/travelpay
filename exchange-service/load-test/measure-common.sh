@@ -49,7 +49,8 @@ check_run() {
 summary_table() {
     local label=$1 stages=$2 extra_column
     # 스크립트별 열: 환율 조회는 오래된 환율 응답 비율, 견적 발급은 저장된 견적 수 / 성공 응답 수 (예열 포함, 회차 합. 같아야 함)
-    if [ "${SCRIPT:-rate-query.js}" = quote-issue.js ]; then extra_column="견적 저장 / 성공 응답 (합)"; else extra_column="오래된 응답 %%"; fi
+    # 견적 발급은 측정이 끝난 시점 Redis 사용 메모리(회차 중 최대)도 붙인다. 견적이 Redis에 있으면 발급 수만큼 늘어난다
+    if [ "${SCRIPT:-rate-query.js}" = quote-issue.js ]; then extra_column="견적 저장 / 성공 응답 (합), Redis MB (최대)"; else extra_column="오래된 응답 %%"; fi
     printf "| 동시 요청 | TPS | TPS(회차별) | TPS 편차 %% | P50 | P95 | P99 | 연결 대기 | 연결 얻는 ms | 연결 얻은 횟수 | 환율 SELECT (측정 구간) | DB 활성 세션 | 캐시 hit %% | ${extra_column} | 실패율 %% (최대) | 4xx / 5xx / 응답 없음 (합) | CPU 전체 %% | 앱 CPU %% |\n"
     printf "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
     local vus f
@@ -67,7 +68,7 @@ summary_table() {
         if [ "${SCRIPT:-rate-query.js}" = quote-issue.js ]; then
             local saved_sum
             saved_sum=$(for f in "${db[@]}"; do nested "$f" quoteRows all; done | awk '{ s += $1 } END { print s + 0 }')
-            extra="${saved_sum} / $(sum okAll "${k6[@]}")"
+            extra="${saved_sum} / $(sum okAll "${k6[@]}"), $(for f in "${db[@]}"; do nested "$f" redis usedMb; done | sort -n | tail -1)"
         else
             extra=$(for f in "${k6[@]}"; do
                 awk -v s="$(value "$f" staleResponses)" -v r="$(value "$f" requests)" 'BEGIN { printf "%.2f\n", r ? s / r * 100 : 0 }'
