@@ -24,6 +24,7 @@ import com.travelpay.payment.domain.merchant.Merchant;
 import com.travelpay.payment.domain.merchant.MerchantRepository;
 import com.travelpay.payment.domain.merchant.MerchantStatus;
 import com.travelpay.payment.domain.payment.*;
+import com.travelpay.payment.domain.merchant.SettlementItemRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -49,7 +50,9 @@ public class PaymentService {
 
     private static final int MAX_CONSECUTIVE_UNKNOWN = 3;
     private static final int MAX_UNKNOWN_ATTEMPTS = 5;
-    private static final Duration REFUND_PERIOD = Duration.ofDays(3);
+    // 결제 승인 후 고객이 환불을 신청할 수 있는 기간. 정산도 이 기간이 지난 결제만 대상으로 합니다.
+    public static final Duration REFUND_PERIOD = Duration.ofDays(3);
+
 
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
@@ -67,6 +70,7 @@ public class PaymentService {
     private final PaymentLedgerClient ledgerClient;
     private final RefundRepository refundRepository;
     private final TransactionOperations transactionOperations;
+    private final SettlementItemRepository settlementItemRepository;
 
     public PaymentResult paymentRequest(PaymentCommand command) {
         // 같은 멱등키를 가진 해당 유저의 결제 요청 중복 확인
@@ -191,6 +195,11 @@ public class PaymentService {
 
         // 환불 기간은 고객이 신청할 때 확인합니다. 기간 안에 들어온 신청은 가맹점 처리가 늦어도 실행할 수 있고, MASTER 직접 환불은 기간 제한이 없습니다.
         payment.validateRefundable();
+
+        // 정산된 결제는 돈이 이미 가맹점 주인 지갑으로 나가 환불할 수 없습니다 (MASTER 직접 환불 포함)
+        if (settlementItemRepository.existsByPaymentId(payment.getId())) {
+            throw new BusinessException(PaymentErrorCode.ALREADY_SETTLED);
+        }
 
         // 환불 요청 REFUND_PENDING 상태 저장
         RefundProgress started;
@@ -559,7 +568,12 @@ public class PaymentService {
     }
 
     private RefundProgress startRefund(RefundCommand command) {
-        Payment payment = reloadPayment(command.paymentId());
+        // 결제 행을 잠그고 읽은 뒤 정산 여부를 다시 확인. 정산이 먼저 잠갔으면 그 커밋을 기다렸다가 여기서 걸림
+        Payment payment = paymentRepository.findByIdForUpdate(command.paymentId())
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+        if (settlementItemRepository.existsByPaymentId(payment.getId())) {
+            throw new BusinessException(PaymentErrorCode.ALREADY_SETTLED);
+        }
         PaymentActor actor = command.role() == AuthRole.MASTER ? PaymentActor.MASTER : PaymentActor.MERCHANT;
         PaymentHistory history = payment.refundStartedHistory(command.reason(), actor);
 

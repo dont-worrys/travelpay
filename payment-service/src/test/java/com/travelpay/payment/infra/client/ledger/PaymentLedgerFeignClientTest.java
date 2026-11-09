@@ -11,6 +11,7 @@ import com.travelpay.common.response.ApiResponse;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerLookup;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerSettlementCommand;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
@@ -54,6 +55,11 @@ class PaymentLedgerFeignClientTest {
             PAYMENT_ID, USER_ID, USER_WALLET_ID, MERCHANT_WALLET_ID, CurrencyCode.KRW, 10_000L);
     private static final PaymentLedgerRefundCommand REFUND = new PaymentLedgerRefundCommand(
             REFUND_ID, TRANSACTION_ID, USER_ID, USER_WALLET_ID, MERCHANT_WALLET_ID, CurrencyCode.KRW, 10_000L);
+    private static final UUID SETTLEMENT_ID = UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd");
+    private static final UUID OWNER_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
+    private static final UUID OWNER_WALLET_ID = UUID.fromString("55555555-5555-5555-5555-555555555555");
+    private static final PaymentLedgerSettlementCommand SETTLEMENT = new PaymentLedgerSettlementCommand(
+            SETTLEMENT_ID, OWNER_ID, MERCHANT_WALLET_ID, OWNER_WALLET_ID, CurrencyCode.KRW, 15_000L);
 
     private LedgerFeignApi feignApi;
     private PaymentLedgerFeignClient ledgerClient;
@@ -95,6 +101,44 @@ class PaymentLedgerFeignClientTest {
                 sent.entries().get(0));
         assertEquals(new Entry("USER", USER_WALLET_ID, "KRW", "CREDIT", 10_000L, "PAYMENT_REFUND_IN"),
                 sent.entries().get(1));
+    }
+
+    @Test
+    void sendsSettlementAsMerchantDebitAndOwnerCredit() {
+        when(feignApi.register(any())).thenReturn(posted(TRANSACTION_ID));
+
+        PaymentLedgerResult result = ledgerClient.settlementTransaction(SETTLEMENT);
+
+        assertEquals(PaymentLedgerResult.approved(TRANSACTION_ID), result);
+        RegisterRequest sent = captureRequest();
+        assertEquals("SETTLEMENT", sent.referenceType());
+        assertEquals(SETTLEMENT_ID, sent.referenceId());
+        assertEquals(OWNER_ID, sent.userId());
+        assertNull(sent.originalTransactionId());
+        assertEquals(new Entry("USER", MERCHANT_WALLET_ID, "KRW", "DEBIT", 15_000L, "SETTLEMENT_OUT"),
+                sent.entries().get(0));
+        assertEquals(new Entry("USER", OWNER_WALLET_ID, "KRW", "CREDIT", 15_000L, "SETTLEMENT_IN"),
+                sent.entries().get(1));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "LEDGER_REJECTED_INSUFFICIENT_BALANCE, 가맹점 잔액이 부족합니다.",
+            "LEDGER_REJECTED_WALLET_SUSPENDED, 정산 받을 지갑을 사용할 수 없습니다.",
+            "LEDGER_REJECTED_ACCOUNT_NOT_FOUND, 정산할 수 있는 계정이 없습니다.",
+            "LEDGER_REJECTED_NEW_REASON, 정산이 거절되었습니다."
+    })
+    void returnsDeclinedWithSettlementReasonInsteadOfLedgerCode(String ledgerCode, String expectedReason) {
+        when(feignApi.register(any())).thenThrow(feignError(422, rejectedBody(ledgerCode)));
+
+        assertEquals(PaymentLedgerResult.declined(expectedReason), ledgerClient.settlementTransaction(SETTLEMENT));
+    }
+
+    @Test
+    void settlementResultIsUnknownWhenConnectionFails() {
+        when(feignApi.register(any())).thenThrow(FeignFailures.connectionRefused());
+
+        assertEquals(PaymentLedgerResult.unknown(), ledgerClient.settlementTransaction(SETTLEMENT));
     }
 
     @ParameterizedTest

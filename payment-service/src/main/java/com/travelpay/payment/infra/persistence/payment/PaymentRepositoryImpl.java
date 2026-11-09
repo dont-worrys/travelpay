@@ -3,6 +3,7 @@ package com.travelpay.payment.infra.persistence.payment;
 import com.travelpay.payment.domain.payment.Payment;
 import com.travelpay.payment.domain.payment.PaymentRepository;
 import com.travelpay.payment.domain.payment.PaymentStatus;
+import com.travelpay.payment.domain.payment.SettlementCandidate;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
@@ -29,6 +30,11 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
     @Override
     public Optional<Payment> findById(UUID paymentId) {
         return paymentJpaRepository.findById(paymentId);
+    }
+
+    @Override
+    public Optional<Payment> findByIdForUpdate(UUID paymentId) {
+        return paymentJpaRepository.findByIdForUpdate(paymentId);
     }
 
     @Override
@@ -68,6 +74,16 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
     @Override
     public long countRefundRequestsUpdatedBefore(Instant before) {
         return paymentJpaRepository.countByStatusAndUpdatedAtBefore(PaymentStatus.REFUND_REQUESTED, before);
+    }
+
+    @Override
+    public List<Payment> findSettlementTargets(UUID merchantId, Instant approvedBefore) {
+        return paymentJpaRepository.findSettlementTargets(merchantId, approvedBefore);
+    }
+
+    @Override
+    public List<SettlementCandidate> findSettlementCandidates(UUID merchantId) {
+        return paymentJpaRepository.findSettlementCandidates(merchantId);
     }
 
     @Override

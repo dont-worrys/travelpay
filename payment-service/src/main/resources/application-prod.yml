@@ -5,6 +5,10 @@ spring:
     url: ${PAYMENT_DB_URL}
     username: ${PAYMENT_DB_USERNAME}
     password: ${PAYMENT_DB_PASSWORD}
+    hikari:
+      data-source-properties:
+        # JDBC 배치 INSERT를 여러 행 INSERT 한 문장으로 바꿔 보냄 (PostgreSQL 드라이버)
+        reWriteBatchedInserts: true
   # 송금 복구·결제 정산 복구 스케줄러가 서로의 원장 호출(건당 최대 약 6초)을 기다리지 않도록 스레드를 나눕니다. (결제 담당자 합의)
   task:
     scheduling:
@@ -14,6 +18,13 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        # 정산 항목처럼 여러 건을 한 번에 저장할 때 DB 왕복을 줄이도록 묶어서 보냄
+        jdbc:
+          batch_size: 100
+        order_inserts: true
+        order_updates: true
   flyway:
     default-schema: payment_service
   cloud:

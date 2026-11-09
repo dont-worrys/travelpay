@@ -2,6 +2,7 @@ package com.travelpay.payment.presentation.payment;
 
 import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
+import com.travelpay.payment.application.merchant.SettlementService;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,14 +23,16 @@ import static org.mockito.Mockito.when;
 class PendingSettlementSchedulerTest {
 
     private PaymentService paymentService;
+    private SettlementService settlementService;
     private SimpleMeterRegistry meterRegistry;
     private PendingSettlementScheduler scheduler;
 
     @BeforeEach
     void setUp() {
         paymentService = mock(PaymentService.class);
+        settlementService = mock(SettlementService.class);
         meterRegistry = new SimpleMeterRegistry();
-        scheduler = new PendingSettlementScheduler(paymentService, meterRegistry);
+        scheduler = new PendingSettlementScheduler(paymentService, settlementService, meterRegistry);
         when(paymentService.findStuckSettlements(any(), anyInt()))
                 .thenReturn(new StuckSettlementResult(0, List.of(), 0, List.of()));
     }
@@ -117,6 +120,35 @@ class PendingSettlementSchedulerTest {
         scheduler.recover();
 
         assertEquals(3.0, meterRegistry.get("payment.refund_request.overdue").gauge().value());
+    }
+
+    @Test
+    void recoversSettlementsAfterRefunds() {
+        scheduler.recover();
+
+        verify(settlementService).recoverSettlements(any(), eq(10));
+    }
+
+    @Test
+    void continuesWhenSettlementRecoveryThrows() {
+        doThrow(new IllegalStateException("DB 연결 실패")).when(settlementService).recoverSettlements(any(), anyInt());
+        when(settlementService.countStuckSettlements(any())).thenReturn(2L);
+
+        scheduler.recover();
+
+        // 정산 복구가 실패해도 집계는 돈다
+        assertEquals(2.0, gauge("payment.settlement.stuck", "settlement"));
+    }
+
+    @Test
+    void publishesStuckSettlementCountAndLogsSample() {
+        when(settlementService.countStuckSettlements(any())).thenReturn(1L);
+        when(settlementService.findStuckSettlementIds(any(), anyInt())).thenReturn(List.of(UUID.randomUUID()));
+
+        scheduler.recover();
+
+        assertEquals(1.0, gauge("payment.settlement.stuck", "settlement"));
+        verify(settlementService).findStuckSettlementIds(any(), eq(10));
     }
 
     private double gauge(String name, String type) {

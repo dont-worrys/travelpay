@@ -7,6 +7,7 @@ import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerClie
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerLookup;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerRefundCommand;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
+import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerSettlementCommand;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.Entry;
@@ -44,6 +45,17 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
             "LEDGER_REJECTED_ACCOUNT_NOT_FOUND", "환불할 수 있는 계정이 없습니다."),
             "환불이 거절되었습니다.");
 
+    private static final String SETTLEMENT_REFERENCE_TYPE = "SETTLEMENT";
+    private static final String SETTLEMENT_OUT = "SETTLEMENT_OUT";
+    private static final String SETTLEMENT_IN = "SETTLEMENT_IN";
+
+    /** 원장 거절 코드별 정산 거절 사유 */
+    private static final DeclineReasons SETTLEMENT_DECLINE_REASONS = new DeclineReasons(Map.of(
+            "LEDGER_REJECTED_INSUFFICIENT_BALANCE", "가맹점 잔액이 부족합니다.",
+            "LEDGER_REJECTED_WALLET_SUSPENDED", "정산 받을 지갑을 사용할 수 없습니다.",
+            "LEDGER_REJECTED_ACCOUNT_NOT_FOUND", "정산할 수 있는 계정이 없습니다."),
+            "정산이 거절되었습니다.");
+
     private final LedgerFeignApi ledgerFeignApi;
 
     @Override
@@ -63,6 +75,17 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
                 Entry.user(command.merchantWalletId(), currency, "DEBIT", command.amount(), "PAYMENT_REFUND_OUT"),
                 Entry.user(command.userWalletId(), currency, "CREDIT", command.amount(), "PAYMENT_REFUND_IN"))),
                 REFUND_DECLINE_REASONS);
+    }
+
+    // 정산: 가맹점 원장 지갑 차감, 가맹점 주인 지갑 적립
+    @Override
+    public PaymentLedgerResult settlementTransaction(PaymentLedgerSettlementCommand command) {
+        String currency = command.currency().name();
+        return register(new RegisterRequest(SETTLEMENT_REFERENCE_TYPE, command.referenceId(), command.ownerUserId(),
+                null, List.of(
+                Entry.user(command.merchantWalletId(), currency, "DEBIT", command.amount(), SETTLEMENT_OUT),
+                Entry.user(command.ownerWalletId(), currency, "CREDIT", command.amount(), SETTLEMENT_IN))),
+                SETTLEMENT_DECLINE_REASONS);
     }
 
     @Override
