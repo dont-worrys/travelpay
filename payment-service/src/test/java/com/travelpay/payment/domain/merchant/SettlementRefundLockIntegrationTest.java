@@ -111,7 +111,7 @@ class SettlementRefundLockIntegrationTest extends PostgresContainerSupport {
     @Test
     void refundWaitsForSettlementAndSeesItem() throws Exception {
         Future<Boolean> refundSeesSettled = tx.execute(status -> {
-            List<Payment> targets = paymentRepository.findSettlementTargets(merchantId, CUTOFF);
+            List<Payment> targets = paymentRepository.findSettlementTargets(merchantId, CUTOFF, 1_000);
             assertEquals(List.of(paymentId), targets.stream().map(Payment::getId).toList());
             Settlement settlement = settlementRepository.save(Settlement.request(merchantId, UUID.randomUUID(),
                     "lock-" + UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), CurrencyCode.KRW,
@@ -138,7 +138,7 @@ class SettlementRefundLockIntegrationTest extends PostgresContainerSupport {
             jdbcTemplate.update("update payments set status = 'REFUND_PENDING' where id = ?", paymentId);
 
             Future<List<UUID>> targets = executor.submit(() -> tx.execute(inner ->
-                    paymentRepository.findSettlementTargets(merchantId, CUTOFF).stream()
+                    paymentRepository.findSettlementTargets(merchantId, CUTOFF, 1_000).stream()
                             .map(Payment::getId).toList()));
             sleepQuietly();
             assertFalse(targets.isDone(), "환불이 잠근 동안 정산 대상 조회는 기다려야 함");

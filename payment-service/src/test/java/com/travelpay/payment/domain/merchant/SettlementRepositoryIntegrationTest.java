@@ -165,13 +165,33 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         changeStatus(requested, PaymentStatus.REFUND_REQUESTED);
         approvedPayment(UUID.randomUUID(), CUTOFF.minus(Duration.ofDays(1)));
 
+        // 정산 대상과 같은 결제 생성 순 (승인 시각 순이 아님)
+        setPaymentCreatedAt(recent, "2026-11-01T00:00:00Z");
+        setPaymentCreatedAt(reviewed, "2026-11-01T00:00:01Z");
+        setPaymentCreatedAt(old, "2026-11-01T00:00:02Z");
+
         List<SettlementCandidate> candidates = paymentRepository.findSettlementCandidates(merchantId);
 
         assertEquals(List.of(
+                new SettlementCandidate(recent.getId(), 10_000L, CUTOFF.plus(Duration.ofHours(1))),
                 new SettlementCandidate(reviewed.getId(), 10_000L, CUTOFF.minus(Duration.ofDays(2))),
-                new SettlementCandidate(old.getId(), 10_000L, CUTOFF.minus(Duration.ofDays(1))),
-                new SettlementCandidate(recent.getId(), 10_000L, CUTOFF.plus(Duration.ofHours(1)))),
+                new SettlementCandidate(old.getId(), 10_000L, CUTOFF.minus(Duration.ofDays(1)))),
                 candidates);
+    }
+
+    @Test
+    void settlementTargetsAreLimitedInPaymentCreationOrder() {
+        Payment first = approvedPayment(merchantId, CUTOFF.minus(Duration.ofDays(1)));
+        Payment second = approvedPayment(merchantId, CUTOFF.minus(Duration.ofDays(1)));
+        Payment third = approvedPayment(merchantId, CUTOFF.minus(Duration.ofDays(1)));
+        setPaymentCreatedAt(third, "2026-11-01T00:00:00Z");
+        setPaymentCreatedAt(first, "2026-11-01T00:00:01Z");
+        setPaymentCreatedAt(second, "2026-11-01T00:00:02Z");
+
+        List<UUID> limited = paymentRepository.findSettlementTargets(merchantId, CUTOFF, 2).stream()
+                .map(Payment::getId).toList();
+
+        assertEquals(List.of(third.getId(), first.getId()), limited);
     }
 
     // 정산 항목
@@ -433,7 +453,7 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
     }
 
     private List<UUID> targetIds(Instant approvedBefore) {
-        return paymentRepository.findSettlementTargets(merchantId, approvedBefore).stream()
+        return paymentRepository.findSettlementTargets(merchantId, approvedBefore, 1_000).stream()
                 .map(Payment::getId).toList();
     }
 
@@ -451,6 +471,10 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         entityManager.flush();
         jdbcTemplate.update("update payments set status = ? where id = ?", status.name(), payment.getId());
         return payment;
+    }
+
+    private void setPaymentCreatedAt(Payment payment, String at) {
+        jdbcTemplate.update("update payments set created_at = cast(? as timestamptz) where id = ?", at, payment.getId());
     }
 
     private void changeStatus(Payment payment, PaymentStatus status) {

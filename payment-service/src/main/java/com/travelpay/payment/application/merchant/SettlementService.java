@@ -42,12 +42,12 @@ import org.springframework.transaction.support.TransactionOperations;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -58,6 +58,8 @@ public class SettlementService {
     static final Duration CUTOFF_MARGIN = Duration.ofHours(1);
     private static final int MAX_CONSECUTIVE_UNKNOWN = 3;
     private static final int MAX_UNKNOWN_ATTEMPTS = 5;
+    // 정산 한 번에 넣는 결제 수 상한. 잠금 범위·트랜잭션 크기·IN 목록 크기를 일정하게 유지
+    static final int MAX_PAYMENTS_PER_SETTLEMENT = 1_000;
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
 
@@ -127,9 +129,12 @@ public class SettlementService {
 
         int availableCount = 0;
         long availableAmount = 0;
+        int nextCount = 0;
+        long nextAmount = 0;
         int waitingCount = 0;
         long waitingAmount = 0;
         Instant nextAvailableAt = null;
+        // 후보는 정산 대상과 같은 결제 생성 순이라, 정산 가능한 것 중 앞의 MAX_PAYMENTS_PER_SETTLEMENT건이 다음 요청에 들어감
         for (SettlementCandidate candidate : candidates) {
             long amount = candidate.amount() - refunded.getOrDefault(candidate.paymentId(), 0L);
             if (amount <= 0) {
@@ -138,6 +143,10 @@ public class SettlementService {
             if (candidate.approvedAt().isBefore(approvedBefore)) {
                 availableCount++;
                 availableAmount += amount;
+                if (nextCount < MAX_PAYMENTS_PER_SETTLEMENT) {
+                    nextCount++;
+                    nextAmount += amount;
+                }
             } else {
                 waitingCount++;
                 waitingAmount += amount;
@@ -149,6 +158,7 @@ public class SettlementService {
         }
         return new SettlementPreviewResult(merchant.getCurrency(),
                 new SettlementPreviewResult.Summary(availableCount, availableAmount),
+                new SettlementPreviewResult.Summary(nextCount, nextAmount),
                 new SettlementPreviewResult.Summary(waitingCount, waitingAmount),
                 nextAvailableAt);
     }
@@ -189,7 +199,12 @@ public class SettlementService {
                 }
                 // 선점으로 수정 시각·버전이 바뀌었을 수 있어 다시 읽어 보냄
                 Settlement claimed = settlementRepository.findById(target.getId()).orElseThrow();
-                Settlement after = settle(claimed, claimed.getMerchantId());
+                // 첫 요청과 같은 값으로 보내도록 가맹점 원장 지갑을 다시 읽음(원장 지갑 ID가 가맹점 ID와 같다고 가정하지 않음)
+                UUID merchantWalletId = merchantRepository.findById(claimed.getMerchantId())
+                        .map(Merchant::getLedgerWalletId)
+                        .orElseThrow(() -> new IllegalStateException(
+                                "가맹점 원장 지갑을 찾을 수 없습니다. merchantId=" + claimed.getMerchantId()));
+                Settlement after = settle(claimed, merchantWalletId);
                 // 결과 모름(REQUESTED 유지 또는 5회째로 MANUAL_REVIEW)만 원장 장애 신호로 셈
                 unknown = after.getStatus() == SettlementStatus.REQUESTED
                         || after.getReviewReason() == SettlementReviewReason.RETRY_EXHAUSTED;
@@ -223,7 +238,9 @@ public class SettlementService {
         // (승인 시각 + 환불 기간 + 여유 시간)이 지금보다 이른 결제만
         Instant cutoffAt = Instant.now();
         Instant approvedBefore = cutoffAt.minus(PaymentService.REFUND_PERIOD).minus(CUTOFF_MARGIN);
-        List<Payment> targets = paymentRepository.findSettlementTargets(merchant.getId(), approvedBefore);
+        // 한 번에 최대 MAX_PAYMENTS_PER_SETTLEMENT건(결제 생성 순). 나머지는 다음 요청에서 정산
+        List<Payment> targets = paymentRepository.findSettlementTargets(merchant.getId(), approvedBefore,
+                MAX_PAYMENTS_PER_SETTLEMENT);
         if (targets.isEmpty()) {
             throw new BusinessException(PaymentErrorCode.NO_SETTLEMENT_TARGET);
         }
@@ -255,13 +272,18 @@ public class SettlementService {
     }
 
     // 결제별 완료된 환불 합계
+    // 미리보기는 결제 수에 상한이 없어 IN 목록을 나눠 조회(JDBC 바인드 파라미터 한도 방지)
     private Map<UUID, Long> completedRefundAmounts(List<UUID> paymentIds) {
-        if (paymentIds.isEmpty()) {
-            return Map.of();
+        Map<UUID, Long> refunded = new HashMap<>();
+        for (int from = 0; from < paymentIds.size(); from += MAX_PAYMENTS_PER_SETTLEMENT) {
+            List<UUID> chunk = paymentIds.subList(from, Math.min(from + MAX_PAYMENTS_PER_SETTLEMENT, paymentIds.size()));
+            for (Refund refund : refundRepository.findAllByPaymentIdIn(chunk)) {
+                if (refund.getStatus() == RefundStatus.COMPLETED) {
+                    refunded.merge(refund.getPaymentId(), refund.getAmount(), Long::sum);
+                }
+            }
         }
-        return refundRepository.findAllByPaymentIdIn(paymentIds).stream()
-                .filter(refund -> refund.getStatus() == RefundStatus.COMPLETED)
-                .collect(Collectors.groupingBy(Refund::getPaymentId, Collectors.summingLong(Refund::getAmount)));
+        return refunded;
     }
 
     // 원장에 정산 거래를 보내고 결과를 반영한 정산을 돌려줌. 결과를 모르면 REQUESTED(5회째면 MANUAL_REVIEW), 받아들이지 않으면 MANUAL_REVIEW

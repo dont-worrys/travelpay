@@ -21,8 +21,9 @@ public interface PaymentRepository {
     Page<Payment> findRefundRequestsUpdatedBefore(Instant before, Pageable pageable);
     long countRefundRequestsUpdatedBefore(Instant before);
     // 정산 대상: 가맹점의 APPROVED 결제 중 처음 승인된 시각이 기준 전이고 아직 정산되지 않은 결제
-    List<Payment> findSettlementTargets(UUID merchantId, Instant approvedBefore);
-    // 정산 미리보기: 가맹점의 미정산 APPROVED 결제 전부와 승인 시각. 잠그지 않음
+    // 결제 생성 순으로 최대 limit건. 대상 결제 행을 잠그므로 트랜잭션 안에서만 호출
+    List<Payment> findSettlementTargets(UUID merchantId, Instant approvedBefore, int limit);
+    // 정산 미리보기: 가맹점의 미정산 APPROVED 결제 전부와 승인 시각(정산 대상과 같은 결제 생성 순). 잠그지 않음
     List<SettlementCandidate> findSettlementCandidates(UUID merchantId);
     List<Payment> findRecoveryTargets(Instant now, int limit);
     int claimForRecovery(UUID paymentId, Instant seenUpdatedAt, Instant now);

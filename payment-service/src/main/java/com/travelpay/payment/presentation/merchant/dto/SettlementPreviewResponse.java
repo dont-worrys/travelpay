@@ -7,18 +7,23 @@ import java.time.Instant;
 public record SettlementPreviewResponse(
         String currency,
         Summary available,
+        Summary nextSettlement,
         Summary waiting,
         Instant nextAvailableAt
 ) {
 
     public record Summary(int count, long amount) {
+        static Summary from(SettlementPreviewResult.Summary summary) {
+            return new Summary(summary.count(), summary.amount());
+        }
     }
 
     public static SettlementPreviewResponse from(SettlementPreviewResult result) {
         return new SettlementPreviewResponse(
                 result.currency().name(),
-                new Summary(result.available().count(), result.available().amount()),
-                new Summary(result.waiting().count(), result.waiting().amount()),
+                Summary.from(result.available()),
+                Summary.from(result.nextSettlement()),
+                Summary.from(result.waiting()),
                 result.nextAvailableAt());
     }
 }

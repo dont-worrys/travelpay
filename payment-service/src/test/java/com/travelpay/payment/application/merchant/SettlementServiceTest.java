@@ -112,7 +112,7 @@ class SettlementServiceTest {
             }
             return settlement;
         });
-        when(paymentRepository.findSettlementTargets(eq(MERCHANT_ID), any()))
+        when(paymentRepository.findSettlementTargets(eq(MERCHANT_ID), any(), eq(SettlementService.MAX_PAYMENTS_PER_SETTLEMENT)))
                 .thenReturn(List.of(payment(PAYMENT_A, 10_000L), payment(PAYMENT_B, 5_000L)));
         when(refundRepository.findAllByPaymentIdIn(any())).thenReturn(List.of());
         when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
@@ -164,7 +164,7 @@ class SettlementServiceTest {
         SettlementResult result = settlementService.requestSettlement(OWNER, MERCHANT_ID, KEY);
 
         ArgumentCaptor<Instant> approvedBefore = ArgumentCaptor.forClass(Instant.class);
-        verify(paymentRepository).findSettlementTargets(eq(MERCHANT_ID), approvedBefore.capture());
+        verify(paymentRepository).findSettlementTargets(eq(MERCHANT_ID), approvedBefore.capture(), eq(SettlementService.MAX_PAYMENTS_PER_SETTLEMENT));
         assertEquals(result.cutoffAt().minus(PaymentService.REFUND_PERIOD).minus(Duration.ofHours(1)),
                 approvedBefore.getValue());
         assertTrue(!result.cutoffAt().isBefore(before));
@@ -217,7 +217,7 @@ class SettlementServiceTest {
 
     @Test
     void noTargetPaymentsIsRejected() {
-        when(paymentRepository.findSettlementTargets(eq(MERCHANT_ID), any())).thenReturn(List.of());
+        when(paymentRepository.findSettlementTargets(eq(MERCHANT_ID), any(), eq(SettlementService.MAX_PAYMENTS_PER_SETTLEMENT))).thenReturn(List.of());
 
         assertError(PaymentErrorCode.NO_SETTLEMENT_TARGET,
                 () -> settlementService.requestSettlement(OWNER, MERCHANT_ID, KEY));
@@ -342,7 +342,7 @@ class SettlementServiceTest {
         assertEquals(SettlementStatus.PAID, result.status());
         assertEquals(2, result.paymentCount());
         verify(ledgerClient, never()).settlementTransaction(any());
-        verify(paymentRepository, never()).findSettlementTargets(any(), any());
+        verify(paymentRepository, never()).findSettlementTargets(any(), any(), anyInt());
     }
 
     @Test
@@ -409,6 +409,19 @@ class SettlementServiceTest {
         assertEquals(SettlementStatus.PAID, requested.getStatus());
         // 복구는 주인 지갑을 다시 조회하지 않고 저장된 값으로 보냄
         verify(walletClient, never()).findWallet(any());
+    }
+
+    @Test
+    void recoveryUsesMerchantLedgerWalletLikeFirstRequest() {
+        UUID ledgerWalletId = UUID.fromString("77777777-7777-7777-7777-777777777777");
+        givenMerchant(ledgerWalletId);
+        givenRecoveryTargets(settlement(MERCHANT_ID));
+
+        settlementService.recoverSettlements(Instant.now(), 10);
+
+        ArgumentCaptor<PaymentLedgerSettlementCommand> command = ArgumentCaptor.forClass(PaymentLedgerSettlementCommand.class);
+        verify(ledgerClient).settlementTransaction(command.capture());
+        assertEquals(ledgerWalletId, command.getValue().merchantWalletId());
     }
 
     @Test
@@ -520,9 +533,10 @@ class SettlementServiceTest {
 
         assertEquals(CurrencyCode.KRW, preview.currency());
         assertEquals(new SettlementPreviewResult.Summary(1, 10_000L), preview.available());
+        assertEquals(new SettlementPreviewResult.Summary(1, 10_000L), preview.nextSettlement());
         assertEquals(new SettlementPreviewResult.Summary(2, 8_000L), preview.waiting());
         assertEquals(soonApproved.plus(wait), preview.nextAvailableAt());
-        verify(paymentRepository, never()).findSettlementTargets(any(), any());
+        verify(paymentRepository, never()).findSettlementTargets(any(), any(), anyInt());
     }
 
     @Test
@@ -543,6 +557,7 @@ class SettlementServiceTest {
         SettlementPreviewResult preview = settlementService.previewSettlement(MASTER, MERCHANT_ID);
 
         assertEquals(new SettlementPreviewResult.Summary(1, 7_000L), preview.available());
+        assertEquals(new SettlementPreviewResult.Summary(1, 7_000L), preview.nextSettlement());
         assertEquals(new SettlementPreviewResult.Summary(0, 0L), preview.waiting());
         assertNull(preview.nextAvailableAt());
     }
@@ -554,9 +569,30 @@ class SettlementServiceTest {
         SettlementPreviewResult preview = settlementService.previewSettlement(OWNER, MERCHANT_ID);
 
         assertEquals(new SettlementPreviewResult.Summary(0, 0L), preview.available());
+        assertEquals(new SettlementPreviewResult.Summary(0, 0L), preview.nextSettlement());
         assertEquals(new SettlementPreviewResult.Summary(0, 0L), preview.waiting());
         assertNull(preview.nextAvailableAt());
         verify(refundRepository, never()).findAllByPaymentIdIn(any());
+    }
+
+    @Test
+    void previewSplitsNextSettlementAtLimitAndLooksUpRefundsInChunks() {
+        // 정산 가능 1,500건(각 100원) + 기다리는 결제 1건. 다음 요청에는 앞의 1,000건만 들어감
+        Instant old = Instant.now().minus(PaymentService.REFUND_PERIOD).minus(Duration.ofDays(1));
+        List<SettlementCandidate> candidates = new java.util.ArrayList<>();
+        for (int i = 0; i < 1_500; i++) {
+            candidates.add(new SettlementCandidate(UUID.randomUUID(), 100L, old));
+        }
+        candidates.add(new SettlementCandidate(UUID.randomUUID(), 100L, Instant.now()));
+        when(paymentRepository.findSettlementCandidates(MERCHANT_ID)).thenReturn(candidates);
+
+        SettlementPreviewResult preview = settlementService.previewSettlement(OWNER, MERCHANT_ID);
+
+        assertEquals(new SettlementPreviewResult.Summary(1_500, 150_000L), preview.available());
+        assertEquals(new SettlementPreviewResult.Summary(1_000, 100_000L), preview.nextSettlement());
+        assertEquals(new SettlementPreviewResult.Summary(1, 100L), preview.waiting());
+        // 1,501건을 1,000건씩 나눠 환불 조회 → 2번
+        verify(refundRepository, times(2)).findAllByPaymentIdIn(any());
     }
 
     @Test

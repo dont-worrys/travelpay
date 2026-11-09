@@ -61,12 +61,14 @@ public interface PaymentJpaRepository extends JpaRepository<Payment, UUID> {
                             and h.previous_status in ('PENDING', 'MANUAL_REVIEW')
                             and h.created_at < cast(:approvedBefore as timestamptz))
             order by p.created_at, p.id
+            limit :limit
             for update of p
             """)
     List<Payment> findSettlementTargets(@Param("merchantId") UUID merchantId,
-                                        @Param("approvedBefore") Instant approvedBefore);
+                                        @Param("approvedBefore") Instant approvedBefore,
+                                        @Param("limit") int limit);
 
-    // 정산 미리보기. findSettlementTargets와 같은 조건이지만 승인 시각 제한 없이 모두 읽고 잠그지 않습니다.
+    // 정산 미리보기. findSettlementTargets와 같은 조건·순서(결제 생성 순)지만 승인 시각·건수 제한 없이 모두 읽고 잠그지 않습니다.
     @Query("""
             select new com.travelpay.payment.domain.payment.SettlementCandidate(p.id, p.amount, h.createdAt)
             from Payment p, PaymentHistory h
@@ -77,7 +79,7 @@ public interface PaymentJpaRepository extends JpaRepository<Payment, UUID> {
               and h.previousStatus in (com.travelpay.payment.domain.payment.PaymentStatus.PENDING,
                                        com.travelpay.payment.domain.payment.PaymentStatus.MANUAL_REVIEW)
               and not exists (select 1 from SettlementItem i where i.paymentId = p.id)
-            order by h.createdAt, p.id
+            order by p.createdAt, p.id
             """)
     List<SettlementCandidate> findSettlementCandidates(@Param("merchantId") UUID merchantId);
 

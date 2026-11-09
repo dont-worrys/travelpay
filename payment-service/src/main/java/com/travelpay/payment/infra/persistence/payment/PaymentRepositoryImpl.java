@@ -77,8 +77,8 @@ public class PaymentRepositoryImpl implements PaymentRepository  {
     }
 
     @Override
-    public List<Payment> findSettlementTargets(UUID merchantId, Instant approvedBefore) {
-        return paymentJpaRepository.findSettlementTargets(merchantId, approvedBefore);
+    public List<Payment> findSettlementTargets(UUID merchantId, Instant approvedBefore, int limit) {
+        return paymentJpaRepository.findSettlementTargets(merchantId, approvedBefore, limit);
     }
 
     @Override

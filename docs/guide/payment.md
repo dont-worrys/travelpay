@@ -522,6 +522,7 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 | 기간 | 승인 시각 + 환불 기간(3일) + 여유 시간(1시간)이 요청 시각보다 이른 결제 |
 | 미정산 | 아직 어느 정산에도 들어가지 않은 결제(`settlement_items`에 없음) |
 | 금액 | 결제 금액 − **완료된** 환불 합계. 부분 환불 뒤 남은 금액을 정산하고, 남은 금액이 0인 결제는 뺍니다 |
+| 건수 | 정산 한 번에 결제 **최대 1,000건**(결제 생성 순). 나머지는 다음 정산 요청에서 정산합니다 |
 
 - 승인 시각은 [환불 기간](#고객-환불-신청)과 같은 기준(`PENDING`·`MANUAL_REVIEW` → `APPROVED` 이력)입니다.
 - 여유 시간은 환불 기간이 끝나는 순간에 들어온 환불 신청과 정산이 겹치지 않게 둡니다.
@@ -539,6 +540,7 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
   "data": {
     "currency": "KRW",
     "available": { "count": 1, "amount": 10000 },
+    "nextSettlement": { "count": 1, "amount": 10000 },
     "waiting": { "count": 2, "amount": 8000 },
     "nextAvailableAt": "2026-11-12T11:10:00Z"
   },
@@ -548,12 +550,13 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 
 | 필드 | 내용 |
 |---|---|
-| `available` | 지금 정산을 요청하면 들어갈 결제 건수·금액(위 [정산 대상](#정산-대상)과 같은 기준) |
+| `available` | 지금 정산할 수 있는 결제 전체 건수·금액(위 [정산 대상](#정산-대상)과 같은 기준) |
+| `nextSettlement` | `available` 중 다음 정산 요청 한 번에 들어갈 몫(결제 생성 순 앞의 최대 1,000건). `available`보다 작으면 나머지는 그다음 요청에서 정산 |
 | `waiting` | `APPROVED`·미정산이지만 환불 기간 + 여유 시간이 아직 지나지 않은 결제 건수·금액 |
 | `nextAvailableAt` | `waiting` 중 가장 먼저 정산 가능해지는 시각. 없으면 `null` |
 
 - 조회 시점 기준이라 실제 요청 때는 그 사이의 환불·기간 경과로 금액이 달라질 수 있습니다.
-- 정산 요청과 달리 결제 행을 잠그지 않으므로 미리보기 조회가 환불을 막지 않습니다.
+- 정산 요청과 달리 결제 행을 잠그지 않으므로 미리보기 조회가 환불을 막지 않습니다. 건수 상한이 없어 환불 조회는 1,000건씩 나눠 합니다.
 
 ### 정산 요청 처리 순서
 
@@ -561,7 +564,7 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 2. 같은 요청자·같은 키의 정산이 있으면 아래 [멱등성](#정산-멱등성) 규칙으로 응답합니다.
 3. 가맹점에 원장 계정이 있는지 확인합니다.
 4. 가맹점 주인의 지갑을 wallet-service에서 조회합니다. 없거나 `ACTIVE`가 아니면 422 `PAYMENT_SETTLEMENT_WALLET_NOT_AVAILABLE`.
-5. 한 트랜잭션에서 대상 결제를 **행 잠금**(`FOR UPDATE`)으로 읽고, 항목 금액과 합계를 계산해 정산(`REQUESTED`)과 정산 항목을 저장합니다(커밋). 대상이 없으면 422 `PAYMENT_NO_SETTLEMENT_TARGET`.
+5. 한 트랜잭션에서 대상 결제를 결제 생성 순으로 최대 1,000건 **행 잠금**(`FOR UPDATE`)으로 읽고, 항목 금액과 합계를 계산해 정산(`REQUESTED`)과 정산 항목을 저장합니다(커밋). 대상이 없으면 422 `PAYMENT_NO_SETTLEMENT_TARGET`.
 6. 원장에 정산 거래를 등록하고 결과로 상태를 정합니다([원장 거래 등록](#원장-거래-등록)).
 
 | 원장 결과 | 정산 | 응답 |
@@ -934,7 +937,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `ix_payments_pending_updated_at_id`, `ix_payments_manual_review_created_at_id`, `ix_payments_refund_requested_updated_at_id`, `ix_payments_refund_requested_merchant_id_created_at_id`, `ix_refunds_requested_updated_at_id`, `ix_refunds_manual_review_created_at_id` | 상태별 부분 인덱스(해당 상태의 행만 담음). 복구 대상·`MANUAL_REVIEW` 건수·30분 지난 건수, 3일 초과 환불 신청, 가맹점 환불 신청 목록. 로컬 48만 건에서 결제 복구 대상 조회 37.7ms → 0.13ms |
 | `uk_settlements_requested_by_idempotency_key` | `UNIQUE(requested_by, idempotency_key)` 중복 정산 방지 |
 | `settlement_items` PK(`payment_id`) | 결제 한 건은 한 번만 정산 |
-| `ck_settlements_status` | `REQUESTED`·`PAID`·`FAILED` |
+| `ck_settlements_status` | `REQUESTED`·`PAID`·`FAILED`·`MANUAL_REVIEW`(`V20261109_1`에서 추가) |
 | `ck_settlements_amount`, `ck_settlement_items_amount`, `ck_settlements_attempt_count` | 금액 `> 0`, `attempt_count >= 0` |
 | `ck_settlements_paid_has_ledger_transaction` | `PAID`면 원장 거래 ID가 있음 |
 | `fk_settlements_merchant_id`, `fk_settlement_items_payment_id`, `fk_settlement_items_settlement_id` | 가맹점·결제·정산 FK |
