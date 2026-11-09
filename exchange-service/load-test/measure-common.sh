@@ -42,21 +42,23 @@ check_run() {
     fi
 }
 
-# 단계별 중앙값 표(마크다운)를 표준 출력으로: summary_table <LABEL> <REPS> <STAGES>
+# 단계별 중앙값 표(마크다운)를 표준 출력으로: summary_table <LABEL> <STAGES>
 # 결과 파일은 results/<LABEL>-r<회차>-vus<VUS>.json(k6)과 -db.json(DB 지표)이다.
+# 단계마다 있는 회차를 모두 쓴다. 편차가 큰 조합에 추가로 잰 회차(r4·r5)는 그 조합에만 들어간다.
 # TPS 편차 = (회차 중 최대 - 최소) / 중앙값. 10%를 넘으면 ⚠를 붙인다 (그 조합만 2회 추가 측정하는 기준, README 참고).
 summary_table() {
-    local label=$1 reps=$2 stages=$3 extra_column
+    local label=$1 stages=$2 extra_column
     # 스크립트별 열: 환율 조회는 오래된 환율 응답 비율, 견적 발급은 저장된 견적 수 / 성공 응답 수 (예열 포함, 회차 합. 같아야 함)
     if [ "${SCRIPT:-rate-query.js}" = quote-issue.js ]; then extra_column="견적 저장 / 성공 응답 (합)"; else extra_column="오래된 응답 %%"; fi
     printf "| 동시 요청 | TPS | TPS(회차별) | TPS 편차 %% | P50 | P95 | P99 | 연결 대기 | 연결 얻는 ms | 연결 얻은 횟수 | 환율 SELECT (측정 구간) | DB 활성 세션 | 캐시 hit %% | ${extra_column} | 실패율 %% (최대) | 4xx / 5xx / 응답 없음 (합) | CPU 전체 %% | 앱 CPU %% |\n"
     printf "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
-    local vus rep
+    local vus f
     for vus in $stages; do
         local k6=() db=()
-        for rep in $(seq 1 "$reps"); do
-            k6+=("results/${label}-r${rep}-vus${vus}.json")
-            db+=("results/${label}-r${rep}-vus${vus}-db.json")
+        for f in results/"${label}"-r*-vus"${vus}".json; do
+            [ -e "$f" ] || continue
+            k6+=("$f")
+            db+=("${f%.json}-db.json")
         done
         local tps tps_median spread extra cache_hit
         tps=$(for f in "${k6[@]}"; do value "$f" successTps; done)
