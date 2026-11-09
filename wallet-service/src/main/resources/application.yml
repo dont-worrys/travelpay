@@ -122,6 +122,13 @@ travelpay:
 server:
   port: 8082
 
+# API 문서(Swagger UI: /swagger-ui.html). 외부 API만 그룹으로 노출하며 prod에서는 끕니다.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
 eureka:
   instance:
     hostname: localhost
