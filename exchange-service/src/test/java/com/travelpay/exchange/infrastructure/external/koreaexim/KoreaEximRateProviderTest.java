@@ -125,6 +125,49 @@ class KoreaEximRateProviderTest {
         assertThrows(ExchangeRateFetchException.class, () -> provider.fetch(DATE));
     }
 
+    /** 한 통화의 값이 이상해도 정상인 통화는 돌려줍니다. 이상한 통화만 건너뜁니다. */
+    @Test
+    void skipsOnlyTheCurrencyWithMalformedRate() {
+        respondWith("""
+                [
+                  {"result":1,"cur_unit":"JPY(100)","ttb":"896.07","tts":"914.18","deal_bas_r":"905.12"},
+                  {"result":1,"cur_unit":"CNH","ttb":"188.45","tts":"192.25","deal_bas_r":""}
+                ]
+                """);
+
+        List<CollectedRate> rates = provider.fetch(DATE);
+
+        assertEquals(List.of(ForeignCurrency.JPY), rates.stream().map(CollectedRate::currency).toList());
+    }
+
+    /** 단위가 달라진 통화도 같은 방식으로 그 통화만 건너뜁니다. */
+    @Test
+    void skipsOnlyTheCurrencyWithUnexpectedUnit() {
+        respondWith("""
+                [
+                  {"result":1,"cur_unit":"JPY(100)","ttb":"896.07","tts":"914.18","deal_bas_r":"905.12"},
+                  {"result":1,"cur_unit":"CNH(100)","ttb":"188.45","tts":"192.25","deal_bas_r":"190.35"}
+                ]
+                """);
+
+        assertEquals(List.of(ForeignCurrency.JPY),
+                provider.fetch(DATE).stream().map(CollectedRate::currency).toList());
+    }
+
+    /** 지원 통화가 모두 이상하면 예외입니다. 빈 목록이면 고시 전·휴일과 구분되지 않습니다. */
+    @Test
+    void rejectsWhenEverySupportedCurrencyIsMalformed() {
+        respondWith("""
+                [
+                  {"result":1,"cur_unit":"USD","ttb":"1,372.33","tts":"1,400.06","deal_bas_r":"1,386.2"},
+                  {"result":1,"cur_unit":"JPY(100)","ttb":"-","tts":"914.18","deal_bas_r":"905.12"},
+                  {"result":1,"cur_unit":"CNH","ttb":"188.45","tts":"192.25","deal_bas_r":null}
+                ]
+                """);
+
+        assertThrows(ExchangeRateFetchException.class, () -> provider.fetch(DATE));
+    }
+
     @Test
     void rejectsBodyThatIsNotJson() {
         respondWith("<html>점검 중</html>");
