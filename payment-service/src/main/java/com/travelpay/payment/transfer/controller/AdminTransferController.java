@@ -12,6 +12,7 @@ import com.travelpay.payment.transfer.application.TransferAdminService;
 import com.travelpay.payment.transfer.domain.TransferStatus;
 import com.travelpay.payment.transfer.dto.AdminTransferHistoryResponse;
 import com.travelpay.payment.transfer.dto.AdminTransferOrderType;
+import com.travelpay.payment.transfer.dto.AdminTransferResolutionResponse;
 import com.travelpay.payment.transfer.dto.AdminTransferResolveRequest;
 import com.travelpay.payment.transfer.dto.AdminTransferResponse;
 import com.travelpay.payment.transfer.dto.AdminTransferSearch;
@@ -33,7 +34,7 @@ import org.springframework.web.bind.annotation.RestController;
  * 관리자 송금 조회 API입니다. 경로의 admin은 관리 기능 영역, 허용 역할은 MASTER이며 권한은 서비스 계층에서 확인합니다.
  * 응답 본문은 공통 ApiResponse이며, 문서의 응답 코드 설명(Swagger의 ApiResponse)은 이름이 겹쳐 전체 이름으로 씁니다.
  */
-@Tag(name = "송금 관리", description = "관리자(MASTER)의 송금 조회·MANUAL_REVIEW 확정")
+@Tag(name = "송금 관리", description = "관리자(MASTER)의 송금 조회·MANUAL_REVIEW 확정 미리보기·확정")
 @RestController
 @RequestMapping("/api/v1/admin/transfers")
 public class AdminTransferController {
@@ -100,6 +101,39 @@ public class AdminTransferController {
             @Parameter(description = "송금 ID") @PathVariable UUID transferId
     ) {
         return ApiResponse.success(transferAdminService.get(user, transferId));
+    }
+
+    @Operation(summary = "MANUAL_REVIEW 송금 확정 미리보기", description = """
+            `MANUAL_REVIEW` 송금을 확정하면 어떻게 되는지 미리 보여줍니다. 상태·이력은 바뀌지 않습니다. \
+            서버가 원장 거래 결과(reference `TRANSFER` + 송금 ID)를 조회해 확정 규칙(확정 API 설명의 표)을 적용합니다.
+
+            `resolvable=true`이면 `expectedStatus`·`ledgerTransactionId`를 그대로 확정 요청에 넣습니다. \
+            확정 때 서버가 원장을 다시 조회해 확인하므로, 그 사이 원장 결과가 바뀌면 확정은 409입니다. \
+            원장 POSTED인데 항목이 송금과 다르면 `resolvable=false`(`ledger.entriesMatch=false`)이며 확정할 수 없습니다.""")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "미리보기 성공(확정할 수 없는 경우 `resolvable=false`)"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
+                    description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
+                    description = "`COMMON_FORBIDDEN` MASTER가 아님"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
+                    description = "`TRANSFER_NOT_FOUND` 송금 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
+                    description = "`COMMON_CONFLICT` MANUAL_REVIEW가 아님"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "502",
+                    description = "`COMMON_BAD_GATEWAY` 원장 응답 해석 불가"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "503",
+                    description = "`COMMON_SERVICE_UNAVAILABLE` 원장 연결 불가"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "504",
+                    description = "`COMMON_GATEWAY_TIMEOUT` 원장 응답 시간 초과")
+    })
+    @GetMapping("/{transferId}/resolution")
+    public ApiResponse<AdminTransferResolutionResponse> previewResolution(
+            @CurrentUser AuthenticatedUser user,
+            @Parameter(description = "송금 ID") @PathVariable UUID transferId
+    ) {
+        return ApiResponse.success(transferAdminService.previewResolution(user, transferId));
     }
 
     @Operation(summary = "MANUAL_REVIEW 송금 확정", description = """

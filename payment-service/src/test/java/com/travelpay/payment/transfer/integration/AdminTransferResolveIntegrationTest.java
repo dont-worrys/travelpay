@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import com.jayway.jsonpath.JsonPath;
 import com.travelpay.common.auth.AuthHeaders;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
@@ -373,6 +374,201 @@ class AdminTransferResolveIntegrationTest extends TransferApiIntegrationSupport 
         assertUnchanged(unavailable);
         assertUnchanged(wrongNotFound);
         assertUnchanged(unreadable);
+    }
+
+    @Test
+    void previewShowsCompletedForPostedLedgerAndResolveWithPreviewValuesSucceeds() throws Exception {
+        UUID transferId = manualReview(RETRY_EXHAUSTED);
+        givenLedger(transferId, "POSTED", null);
+
+        String preview = preview(transferId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.transferId").value(transferId.toString()))
+                .andExpect(jsonPath("$.data.reviewReason").value(RETRY_EXHAUSTED))
+                .andExpect(jsonPath("$.data.ledger.found").value(true))
+                .andExpect(jsonPath("$.data.ledger.transactionId").value(ledgerTransactionId.toString()))
+                .andExpect(jsonPath("$.data.ledger.status").value("POSTED"))
+                .andExpect(jsonPath("$.data.ledger.rejectReason").doesNotExist())
+                .andExpect(jsonPath("$.data.ledger.entriesMatch").value(true))
+                .andExpect(jsonPath("$.data.resolvable").value(true))
+                .andExpect(jsonPath("$.data.expectedStatus").value("COMPLETED"))
+                .andExpect(jsonPath("$.data.expectedFailureReason").doesNotExist())
+                .andExpect(jsonPath("$.data.ledgerTransactionId").value(ledgerTransactionId.toString()))
+                .andReturn().getResponse().getContentAsString();
+        assertUnchanged(transferId);
+
+        resolveWithPreview(transferId, preview)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"));
+        assertThat(historyCount(transferId)).isEqualTo(1);
+        // 확정 때 원장을 다시 조회합니다.
+        verify(ledgerFeignApi, times(2)).getTransaction("TRANSFER", transferId);
+    }
+
+    @Test
+    void previewShowsFailedWithFailureReasonForRejectedLedger() throws Exception {
+        UUID insufficient = manualReview(RETRY_EXHAUSTED);
+        givenLedger(insufficient, "REJECTED", "INSUFFICIENT_BALANCE");
+        UUID suspended = manualReview(RETRY_EXHAUSTED);
+        givenLedger(suspended, "REJECTED", "WALLET_SUSPENDED");
+        UUID notAccepted = manualReview(NOT_ACCEPTED);
+        givenLedger(notAccepted, "REJECTED", "INSUFFICIENT_BALANCE");
+
+        preview(suspended)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.ledger.status").value("REJECTED"))
+                .andExpect(jsonPath("$.data.ledger.rejectReason").value("WALLET_SUSPENDED"))
+                .andExpect(jsonPath("$.data.ledger.entriesMatch").doesNotExist())
+                .andExpect(jsonPath("$.data.resolvable").value(true))
+                .andExpect(jsonPath("$.data.expectedStatus").value("FAILED"))
+                .andExpect(jsonPath("$.data.expectedFailureReason").value("ACCOUNT_UNAVAILABLE"))
+                .andExpect(jsonPath("$.data.ledgerTransactionId").value(ledgerTransactionId.toString()));
+        // 원장이 요청을 받지 않은 송금은 원장 거절 사유 대신 NOT_PROCESSED입니다.
+        String notAcceptedPreview = preview(notAccepted)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.reviewReason").value(NOT_ACCEPTED))
+                .andExpect(jsonPath("$.data.ledger.rejectReason").value("INSUFFICIENT_BALANCE"))
+                .andExpect(jsonPath("$.data.expectedStatus").value("FAILED"))
+                .andExpect(jsonPath("$.data.expectedFailureReason").value("NOT_PROCESSED"))
+                .andReturn().getResponse().getContentAsString();
+        String insufficientPreview = preview(insufficient)
+                .andExpect(jsonPath("$.data.expectedFailureReason").value("INSUFFICIENT_BALANCE"))
+                .andReturn().getResponse().getContentAsString();
+        assertUnchanged(insufficient);
+        assertUnchanged(suspended);
+        assertUnchanged(notAccepted);
+
+        resolveWithPreview(notAccepted, notAcceptedPreview)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("FAILED"))
+                .andExpect(jsonPath("$.data.failureReason").value("NOT_PROCESSED"));
+        resolveWithPreview(insufficient, insufficientPreview)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.failureReason").value("INSUFFICIENT_BALANCE"));
+    }
+
+    @Test
+    void previewShowsProcessingWhenLedgerHasNoRecordAndResolveWithPreviewValuesSucceeds() throws Exception {
+        UUID transferId = manualReview(RETRY_EXHAUSTED);
+        givenLedgerNotFound(transferId);
+
+        String preview = preview(transferId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.ledger.found").value(false))
+                .andExpect(jsonPath("$.data.ledger.transactionId").doesNotExist())
+                .andExpect(jsonPath("$.data.ledger.status").doesNotExist())
+                .andExpect(jsonPath("$.data.ledger.entriesMatch").doesNotExist())
+                .andExpect(jsonPath("$.data.resolvable").value(true))
+                .andExpect(jsonPath("$.data.expectedStatus").value("PROCESSING"))
+                .andExpect(jsonPath("$.data.ledgerTransactionId").doesNotExist())
+                .andReturn().getResponse().getContentAsString();
+        assertUnchanged(transferId);
+
+        resolveWithPreview(transferId, preview)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("PROCESSING"))
+                .andExpect(jsonPath("$.data.attemptCount").value(0));
+    }
+
+    @Test
+    void previewShowsUnresolvableWhenLedgerEntriesDiffer() throws Exception {
+        UUID transferId = manualReview(NOT_ACCEPTED);
+        givenPostedLedger(transferId, entries(sourceWalletId, targetWalletId, "KRW", 999L, "TRANSFER_OUT", "TRANSFER_IN"));
+
+        preview(transferId)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.ledger.found").value(true))
+                .andExpect(jsonPath("$.data.ledger.status").value("POSTED"))
+                .andExpect(jsonPath("$.data.ledger.entriesMatch").value(false))
+                .andExpect(jsonPath("$.data.resolvable").value(false))
+                .andExpect(jsonPath("$.data.expectedStatus").doesNotExist())
+                .andExpect(jsonPath("$.data.expectedFailureReason").doesNotExist())
+                .andExpect(jsonPath("$.data.ledgerTransactionId").doesNotExist());
+        assertUnchanged(transferId);
+        expectMismatch(resolve(transferId, "COMPLETED", ledgerTransactionId));
+        assertUnchanged(transferId);
+    }
+
+    @Test
+    void resolveLooksUpLedgerAgainAfterPreview() throws Exception {
+        UUID transferId = manualReview(RETRY_EXHAUSTED);
+        // 미리보기 때는 원장 기록이 없었으나, 확정 전에 원장 거래가 기록된 경우입니다.
+        when(ledgerFeignApi.getTransaction("TRANSFER", transferId))
+                .thenThrow(lookupError(transferId, 404, "LEDGER_TRANSACTION_NOT_FOUND"))
+                .thenReturn(ApiResponse.success(new LedgerFeignApi.TransactionResultResponse(
+                        ledgerTransactionId, "POSTED", null, transferEntries())));
+
+        String preview = preview(transferId)
+                .andExpect(jsonPath("$.data.expectedStatus").value("PROCESSING"))
+                .andReturn().getResponse().getContentAsString();
+
+        expectMismatch(resolveWithPreview(transferId, preview));
+        assertUnchanged(transferId);
+    }
+
+    @Test
+    void previewKeepsManualReviewWhenLedgerLookupFails() throws Exception {
+        UUID unavailable = manualReview(RETRY_EXHAUSTED);
+        when(ledgerFeignApi.getTransaction("TRANSFER", unavailable))
+                .thenThrow(lookupError(unavailable, 503, "COMMON_SERVICE_UNAVAILABLE"));
+        UUID wrongNotFound = manualReview(RETRY_EXHAUSTED);
+        when(ledgerFeignApi.getTransaction("TRANSFER", wrongNotFound))
+                .thenThrow(lookupError(wrongNotFound, 404, "COMMON_NOT_FOUND"));
+        UUID noEntries = manualReview(RETRY_EXHAUSTED);
+        givenPostedLedger(noEntries, List.of());
+
+        preview(unavailable)
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error.code").value("COMMON_SERVICE_UNAVAILABLE"));
+        preview(wrongNotFound)
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.error.code").value("COMMON_BAD_GATEWAY"));
+        preview(noEntries)
+                .andExpect(status().isBadGateway());
+        assertUnchanged(unavailable);
+        assertUnchanged(wrongNotFound);
+        assertUnchanged(noEntries);
+    }
+
+    @Test
+    void previewRejectsNonMasterMissingAndNonManualReviewTransfer() throws Exception {
+        UUID manualReview = manualReview(RETRY_EXHAUSTED);
+        UUID processing = insertTransferRow(senderId, receiverId, "KRW", "PROCESSING", null, 1, null, CREATED);
+        UUID completed = insertTransferRow(senderId, receiverId, "KRW", "COMPLETED", null, 1, null, CREATED);
+
+        mvc.perform(asUser(get(previewPath(manualReview)), senderId))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("COMMON_FORBIDDEN"));
+        mvc.perform(get(previewPath(manualReview)))
+                .andExpect(status().isUnauthorized());
+        preview(UUID.randomUUID())
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
+        for (UUID transferId : List.of(processing, completed)) {
+            preview(transferId)
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
+        }
+        verify(ledgerFeignApi, never()).getTransaction(any(), any());
+        assertUnchanged(manualReview);
+        assertThat(row(processing).get("status")).isEqualTo("PROCESSING");
+    }
+
+    private ResultActions preview(UUID transferId) throws Exception {
+        return mvc.perform(asMaster(get(previewPath(transferId))));
+    }
+
+    /** 미리보기 응답의 expectedStatus·ledgerTransactionId를 그대로 넣어 확정 요청을 보냅니다. */
+    private ResultActions resolveWithPreview(UUID transferId, String previewBody) throws Exception {
+        String targetStatus = JsonPath.read(previewBody, "$.data.expectedStatus");
+        String ledgerId = JsonPath.read(previewBody, "$.data.ledgerTransactionId");
+        return mvc.perform(asMaster(post(resolvePath(transferId)))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body(targetStatus, ledgerId == null ? null : UUID.fromString(ledgerId), "미리보기 확인")));
+    }
+
+    private static String previewPath(UUID transferId) {
+        return "/api/v1/admin/transfers/" + transferId + "/resolution";
     }
 
     private UUID manualReview(String reviewReason) {

@@ -21,12 +21,12 @@ import com.travelpay.payment.transfer.domain.TransferCurrency;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
 import com.travelpay.payment.transfer.domain.TransferFailureReason;
 import com.travelpay.payment.transfer.domain.TransferRepository;
-import com.travelpay.payment.transfer.domain.TransferReviewReason;
 import com.travelpay.payment.transfer.domain.TransferStatus;
 import com.travelpay.payment.transfer.domain.TransferStatusHistory;
 import com.travelpay.payment.transfer.domain.TransferStatusHistoryRepository;
 import com.travelpay.payment.transfer.dto.AdminTransferHistoryResponse;
 import com.travelpay.payment.transfer.dto.AdminTransferOrderType;
+import com.travelpay.payment.transfer.dto.AdminTransferResolutionResponse;
 import com.travelpay.payment.transfer.dto.AdminTransferResolveRequest;
 import com.travelpay.payment.transfer.dto.AdminTransferResponse;
 import com.travelpay.payment.transfer.dto.AdminTransferSearch;
@@ -100,9 +100,11 @@ public class TransferAdminService {
             return replay(admin, transfer, request, reason);
         }
 
-        Optional<LedgerTransferRecord> ledger = ledgerReader.findTransfer(transferId);
-        TransferFailureReason failureReason = verify(transfer, ledger, request);
-        UUID ledgerTransactionId = ledger.map(record -> record.result().transactionId()).orElse(null);
+        // 미리보기를 거쳤더라도 그 사이 원장 결과가 바뀌었을 수 있어 확정 때 다시 조회하고 확인합니다.
+        TransferResolution resolution = TransferResolution.decide(transfer, ledgerReader.findTransfer(transferId));
+        verify(transfer, resolution, request);
+        TransferFailureReason failureReason = resolution.failureReason();
+        UUID ledgerTransactionId = resolution.ledgerTransactionId();
         int attemptCount = target == TransferStatus.PROCESSING ? 0 : transfer.getAttemptCount();
 
         Boolean applied = transactionTemplate.execute(status -> {
@@ -122,6 +124,39 @@ public class TransferAdminService {
         log.info("관리자 송금 확정 adminId={} transferId={} reviewReason={} targetStatus={} ledgerTransactionId={}",
                 admin.userId(), transferId, transfer.getReviewReason(), target, ledgerTransactionId);
         return AdminTransferResponse.from(findTransfer(transferId));
+    }
+
+    /**
+     * MANUAL_REVIEW 송금을 원장 결과로 확정하면 어떻게 되는지 미리 보여줍니다. 상태·이력을 바꾸지 않습니다.
+     * 판단은 확정({@link #resolve})과 같은 {@link TransferResolution}을 쓰며, 응답의 expectedStatus·ledgerTransactionId를
+     * 그대로 확정 요청에 넣으면 됩니다(확정 때 원장을 다시 조회해 확인함).
+     * MANUAL_REVIEW가 아니면 원장을 조회하지 않고 409 COMMON_CONFLICT, 원장 조회 실패는 common 규칙의 5xx입니다.
+     * 원장 POSTED인데 항목이 송금과 다르면 200 + resolvable=false입니다.
+     */
+    public AdminTransferResolutionResponse previewResolution(AuthenticatedUser admin, UUID transferId) {
+        requireMaster(admin);
+        Transfer transfer = findTransfer(transferId);
+        if (transfer.getStatus() != TransferStatus.MANUAL_REVIEW) {
+            throw new BusinessException(CommonErrorCode.CONFLICT);
+        }
+        TransferResolution resolution = TransferResolution.decide(transfer, ledgerReader.findTransfer(transferId));
+        log.info("관리자 송금 확정 미리보기 adminId={} transferId={} reviewReason={} expectedStatus={} ledgerTransactionId={}",
+                admin.userId(), transferId, transfer.getReviewReason(), resolution.expectedStatus(),
+                resolution.ledgerTransactionId());
+        Optional<LedgerTransactionResponse> ledger = resolution.ledger().map(LedgerTransferRecord::result);
+        return new AdminTransferResolutionResponse(
+                transferId,
+                transfer.getReviewReason(),
+                new AdminTransferResolutionResponse.Ledger(
+                        ledger.isPresent(),
+                        ledger.map(LedgerTransactionResponse::transactionId).orElse(null),
+                        ledger.map(LedgerTransactionResponse::status).orElse(null),
+                        ledger.map(LedgerTransactionResponse::rejectReason).orElse(null),
+                        resolution.entriesMatch()),
+                resolution.resolvable(),
+                resolution.expectedStatus(),
+                resolution.failureReason(),
+                resolution.expectedLedgerTransactionId());
     }
 
     /**
@@ -167,43 +202,28 @@ public class TransferAdminService {
                 .toList();
     }
 
-    /** 원장 결과와 확정 요청이 맞는지 확인하고, FAILED로 확정할 때의 실패 사유를 반환합니다(그 밖에는 null). */
-    private static TransferFailureReason verify(Transfer transfer, Optional<LedgerTransferRecord> ledger,
-            AdminTransferResolveRequest request) {
-        if (ledger.isEmpty()) {
-            if (request.targetStatus() != TransferStatus.PROCESSING) {
-                throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
-            }
-            return null;
+    /**
+     * 원장 결과로 정한 확정 판단({@link TransferResolution})과 확정 요청이 맞는지 확인합니다.
+     * 확정할 수 없거나 targetStatus·ledgerTransactionId가 판단과 다르면 409 TRANSFER_RESOLUTION_MISMATCH입니다.
+     */
+    private static void verify(Transfer transfer, TransferResolution resolution, AdminTransferResolveRequest request) {
+        if (Boolean.FALSE.equals(resolution.entriesMatch())) {
+            // 같은 reference로 송금과 다른 내용이 원장에 기록되어 있습니다. 운영자 확정으로 해결할 수 없습니다.
+            log.error("원장 거래 항목이 송금과 다름 transferId={} ledgerTransactionId={} reviewReason={}",
+                    transfer.getId(), resolution.ledgerTransactionId(), transfer.getReviewReason());
         }
-        LedgerTransactionResponse result = ledger.get().result();
-        if (!result.transactionId().equals(request.ledgerTransactionId())) {
+        if (!resolution.resolvable()
+                || resolution.expectedStatus() != request.targetStatus()
+                || !Objects.equals(resolution.expectedLedgerTransactionId(), request.ledgerTransactionId())) {
             throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
         }
-        if (result.status() == LedgerTransactionResponse.Status.POSTED
-                && request.targetStatus() == TransferStatus.COMPLETED) {
-            if (!ledger.get().matches(transfer)) {
-                // 같은 reference로 송금과 다른 내용이 원장에 기록되어 있습니다. 운영자 확정으로 해결할 수 없습니다.
-                log.error("원장 거래 항목이 송금과 다름 transferId={} ledgerTransactionId={} reviewReason={}",
-                        transfer.getId(), result.transactionId(), transfer.getReviewReason());
-                throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
-            }
-            return null;
+        if (resolution.failureReason() == TransferFailureReason.NOT_PROCESSED) {
+            // 원장 거절 기록은 이전에 들어온 다른 요청의 것일 수 있어(원장은 기록을 고치지 않음) 그 사유를 쓰지 않습니다.
+            // REJECTED는 잔액을 바꾸지 않으므로 FAILED로 확정해도 자금은 맞습니다.
+            log.info("원장 미수락 송금 FAILED 확정 transferId={} ledgerTransactionId={} ledgerRejectReason={}",
+                    transfer.getId(), resolution.ledgerTransactionId(),
+                    resolution.ledger().map(record -> record.result().rejectReason()).orElse(null));
         }
-        if (result.status() == LedgerTransactionResponse.Status.REJECTED
-                && request.targetStatus() == TransferStatus.FAILED) {
-            if (transfer.getReviewReason() == TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED) {
-                // 원장 거절 기록은 이전에 들어온 다른 요청의 것일 수 있어(원장은 기록을 고치지 않음) 그 사유를 쓰지 않습니다.
-                // REJECTED는 잔액을 바꾸지 않으므로 FAILED로 확정해도 자금은 맞습니다.
-                log.info("원장 미수락 송금 FAILED 확정 transferId={} ledgerTransactionId={} ledgerRejectReason={}",
-                        transfer.getId(), result.transactionId(), result.rejectReason());
-                return TransferFailureReason.NOT_PROCESSED;
-            }
-            return result.rejectReason() == LedgerTransactionResponse.RejectReason.INSUFFICIENT_BALANCE
-                    ? TransferFailureReason.INSUFFICIENT_BALANCE
-                    : TransferFailureReason.ACCOUNT_UNAVAILABLE;
-        }
-        throw new BusinessException(TransferErrorCode.RESOLUTION_MISMATCH);
     }
 
     /**
