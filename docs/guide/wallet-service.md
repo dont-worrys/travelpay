@@ -52,7 +52,21 @@ wallet-service는 회원 지갑의 개설·잔액 조회와 원화 충전을 맡
 - compose에는 wallet-service 컨테이너가 없습니다. 로컬에서는 `bootRun`으로 실행합니다.
 - 테이블은 앱이 시작할 때 Flyway가 만들고([DB 스키마](#db-스키마-flyway)), Kafka 토픽은 앱이 선언합니다(브로커 자동 생성 꺼짐).
 
-Swagger UI는 없습니다(wallet-service에 springdoc 의존성이 없음). API 계약은 이 문서를 기준으로 합니다.
+## Swagger
+
+로컬에서만 열립니다. prod 프로필(`application-prod.yml`)에서는 API 문서와 Swagger UI가 모두 꺼집니다.
+
+| 항목 | 값 |
+|---|---|
+| Swagger UI | `http://localhost:8082/swagger-ui.html` |
+| 그룹 `wallet` (지갑·충전) | 회원용 `/api/v1/**` (관리자 경로 제외). 명세 `/v3/api-docs/wallet` |
+| 그룹 `charge-admin` (충전 관리) | `/api/v1/admin/charges/**` (대사·보정). 명세 `/v3/api-docs/charge-admin` |
+
+- 내부 API(`/internal/**`)는 문서에 없습니다.
+- 지갑을 직접 호출하므로 Gateway가 넣어 주는 헤더를 직접 넣습니다. 회원 API는 `User-Id`(회원 UUID)·`User-Role: USER`, 관리자 API는 `User-Role: MASTER`입니다. MASTER가 아니면 관리자 API는 403입니다.
+- 충전 요청(`POST /api/v1/charges`)과 보정(`POST /api/v1/admin/charges/{chargeId}/resolve`)은 `Idempotency-Key`(UUID)가 필수입니다. 같은 키로 다시 보내면 같은 결과를 돌려줍니다.
+- 처음에는 입력칸이 잠겨 있습니다. **Try it out**을 누른 뒤 값을 넣고 **Execute**로 요청합니다.
+- API의 세부 계약(오류 코드, 멱등 규칙, 상태 전이)은 이 문서를 기준으로 합니다. Swagger는 요청·응답 형식을 확인하고 직접 호출해 보는 용도입니다.
 
 ## API 목록
 
