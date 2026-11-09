@@ -156,6 +156,20 @@ public class ExchangeReservation extends BaseTimeEntity {
         return buysForeign() ? compared <= 0 : compared >= 0;
     }
 
+    /**
+     * 같은 멱등 키로 다시 온 예약 요청이 처음과 같은 내용인지 확인합니다. 다르면 키를 다른 예약에 재사용한 것입니다.
+     * 목표 환율은 값으로 비교합니다(830과 830.00은 같음).
+     */
+    public boolean isSameRequest(UUID walletId, QuoteCurrencies currencies, Money amount, BigDecimal targetRate,
+                                 Instant expiresAt) {
+        return this.walletId.equals(walletId)
+                && fromCurrency == currencies.from()
+                && toCurrency == currencies.to()
+                && fromMoney().equals(amount)
+                && targetRate != null && this.targetRate.compareTo(targetRate) == 0
+                && this.expiresAt.equals(expiresAt);
+    }
+
     /** 만료 시각과 같은 순간부터 만료입니다. */
     public boolean isExpired(Instant now) {
         return !now.isBefore(expiresAt);

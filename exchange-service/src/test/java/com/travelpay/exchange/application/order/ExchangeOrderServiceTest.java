@@ -12,6 +12,7 @@ import java.util.UUID;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorCode;
+import com.travelpay.exchange.application.wallet.ExchangeWalletChecker;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.order.ChangedByType;
@@ -73,7 +74,7 @@ class ExchangeOrderServiceTest {
     private final WalletBalanceReader walletBalanceReader = mock(WalletBalanceReader.class);
     private final ExchangeOrderLedgerProcessor ledgerProcessor = mock(ExchangeOrderLedgerProcessor.class);
     private final ExchangeOrderService service = new ExchangeOrderService(orderRepository, queryRepository,
-            historyRepository, quoteRepository, walletBalanceReader, ledgerProcessor,
+            historyRepository, quoteRepository, new ExchangeWalletChecker(walletBalanceReader), ledgerProcessor,
             TransactionOperations.withoutTransaction(), Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
 
     private ExchangeQuote quote;

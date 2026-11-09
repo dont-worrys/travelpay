@@ -118,6 +118,24 @@ class ExchangeReservationTest {
         assertEquals(NOW.plusSeconds(1), reserveExpiring(NOW.plusSeconds(1)).getExpiresAt());
     }
 
+    /** 같은 멱등 키의 재요청인지 판단: 지갑·통화쌍·금액·목표 환율(값 비교)·만료가 모두 같아야 한다 */
+    @Test
+    void sameRequestNeedsSameWalletPairAmountRateAndExpiry() {
+        ExchangeReservation reservation = reserve(Currency.KRW, Currency.JPY, "100000", "830");
+        QuoteCurrencies pair = new QuoteCurrencies(Currency.KRW, Currency.JPY);
+        Money amount = new Money(Currency.KRW, 100_000);
+        Instant expiresAt = NOW.plus(Duration.ofDays(7));
+
+        assertTrue(reservation.isSameRequest(WALLET_ID, pair, amount, new BigDecimal("830.00"), expiresAt));
+        assertFalse(reservation.isSameRequest(UUID.randomUUID(), pair, amount, new BigDecimal("830"), expiresAt));
+        assertFalse(reservation.isSameRequest(WALLET_ID, new QuoteCurrencies(Currency.KRW, Currency.CNY),
+                amount, new BigDecimal("830"), expiresAt));
+        assertFalse(reservation.isSameRequest(WALLET_ID, pair, new Money(Currency.KRW, 200_000),
+                new BigDecimal("830"), expiresAt));
+        assertFalse(reservation.isSameRequest(WALLET_ID, pair, amount, new BigDecimal("831"), expiresAt));
+        assertFalse(reservation.isSameRequest(WALLET_ID, pair, amount, new BigDecimal("830"), expiresAt.plusSeconds(1)));
+    }
+
     @Test
     void expiresAtExpiryInstant() {
         ExchangeReservation reservation = reserveExpiring(NOW.plus(Duration.ofDays(1)));

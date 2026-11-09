@@ -9,6 +9,7 @@ import java.util.UUID;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.util.PageableUtils;
+import com.travelpay.exchange.application.wallet.ExchangeWalletChecker;
 import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
 import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.ExchangeOrderErrorCode;
@@ -20,10 +21,6 @@ import com.travelpay.exchange.domain.order.IdempotencyKey;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
-import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
-import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
-import com.travelpay.exchange.domain.wallet.WalletBalances;
-import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -57,7 +54,7 @@ public class ExchangeOrderService {
     private final ExchangeOrderQueryRepository queryRepository;
     private final ExchangeOrderStatusHistoryRepository historyRepository;
     private final ExchangeQuoteRepository quoteRepository;
-    private final WalletBalanceReader walletBalanceReader;
+    private final ExchangeWalletChecker walletChecker;
     private final ExchangeOrderLedgerProcessor ledgerProcessor;
     private final TransactionOperations transactionOperations;
     private final Clock clock;
@@ -83,7 +80,7 @@ public class ExchangeOrderService {
         // 만료는 지갑 조회 전에 판단한다. 원격 호출이 느려도 신청 시각은 요청을 받은 시각이다.
         Instant requestedAt = clock.instant();
         ExchangeOrder order = ExchangeOrder.place(quote, command.walletId(), key, requestedAt);
-        checkWallet(command.userId(), order);
+        walletChecker.check(command.userId(), order.getWalletId(), order.getFromCurrency(), order.getToCurrency());
 
         try {
             ExchangeOrder saved = transactionOperations.execute(status -> {
@@ -122,33 +119,6 @@ public class ExchangeOrderService {
         Pageable pageable = PageableUtils.toStablePageable(
                 PageRequest.of(page, size, LIST_SORT), LIST_SORT_FIELDS, "id", MAX_PAGE_SIZE);
         return queryRepository.findPage(new ExchangeOrderListCondition(userId, status, type), pageable);
-    }
-
-    /**
-     * 신청 지갑이 본인 지갑이고, 보내는 통화로 돈을 빼고 받는 통화로 돈을 받을 수 있는지 확인합니다.
-     * 잔액은 보지 않습니다. 잔액 판단은 원장이 거래를 기록할 때 합니다.
-     * 다른 사람의 지갑 ID는 지갑 존재를 알리지 않도록 지갑 없음과 같게 다룹니다.
-     */
-    private void checkWallet(UUID userId, ExchangeOrder order) {
-        WalletBalances wallet;
-        try {
-            wallet = walletBalanceReader.read(userId)
-                    .orElseThrow(() -> new BusinessException(ExchangeOrderErrorCode.WALLET_NOT_FOUND));
-        } catch (WalletLedgerUnavailableException e) {
-            // 원장이 꺼져 있으면 지갑이 잔액을 읽지 못해 여기서 막힌다. 주문을 만들지 않고 거절한다.
-            // 받아 두면 원장이 돌아온 뒤 오래된 견적 환율로 체결되므로, 원장 결과를 모를 때만 PROCESSING으로 둔다 (TIL #65 후속 확인)
-            log.warn("원장 장애로 지갑을 확인하지 못해 환전 신청을 받지 않습니다: userId={}, reason={}", userId, e.getMessage());
-            throw new BusinessException(ExchangeOrderErrorCode.LEDGER_UNAVAILABLE, e);
-        } catch (WalletBalanceFetchException e) {
-            log.warn("지갑을 확인하지 못해 환전 신청을 받지 않습니다: userId={}, reason={}", userId, e.getMessage());
-            throw new BusinessException(ExchangeOrderErrorCode.WALLET_SERVICE_UNAVAILABLE, e);
-        }
-        if (!wallet.walletId().equals(order.getWalletId())) {
-            throw new BusinessException(ExchangeOrderErrorCode.WALLET_NOT_FOUND);
-        }
-        if (!wallet.canSpend(order.getFromCurrency()) || !wallet.canReceive(order.getToCurrency())) {
-            throw new BusinessException(ExchangeOrderErrorCode.WALLET_NOT_AVAILABLE);
-        }
     }
 
     /**

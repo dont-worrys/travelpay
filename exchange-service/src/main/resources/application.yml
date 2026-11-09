@@ -85,6 +85,10 @@ exchange:
       enabled: true
       fixed-delay: 30s
       batch-size: 50
+  reservation:
+    # 예약 환전: 최대 예약 기간과 회원당 동시 대기 예약 수 (값이 없으면 같은 기본값을 씀)
+    max-period: 30d
+    max-waiting-per-user: 10
 
 server:
   port: 8084
