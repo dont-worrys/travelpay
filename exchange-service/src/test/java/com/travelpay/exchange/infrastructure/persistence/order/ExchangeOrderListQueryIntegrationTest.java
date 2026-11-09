@@ -26,7 +26,6 @@ import com.travelpay.exchange.domain.order.ManualReviewReason;
 import com.travelpay.exchange.domain.order.OrderFixtures;
 import com.travelpay.exchange.domain.order.Settlement;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
-import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
 import com.travelpay.exchange.domain.quote.QuoteType;
@@ -102,9 +101,6 @@ class ExchangeOrderListQueryIntegrationTest {
 
     @Autowired
     private ExchangeOrderStatusHistoryRepository historyRepository;
-
-    @Autowired
-    private ExchangeQuoteRepository quoteRepository;
 
     @Autowired
     private ExchangeRateRepository rateRepository;
@@ -333,8 +329,8 @@ class ExchangeOrderListQueryIntegrationTest {
     /** 회원의 PROCESSING 주문을 저장하고, 정렬을 확인하려고 생성 시각을 정해 둡니다. 원화 10만 원 또는 엔화 1,000엔 견적입니다. */
     private UUID order(UUID userId, Currency from, Currency to, Instant createdAt) {
         Money amount = from == Currency.KRW ? new Money(Currency.KRW, 100_000) : new Money(Currency.JPY, 1_000);
-        ExchangeQuote quote = quoteRepository.save(ExchangeQuote.issue(userId, QuoteType.USER,
-                new QuoteCurrencies(from, to), amount, jpyRate, QuoteFixtures.policy(), Instant.now()));
+        ExchangeQuote quote = ExchangeQuote.issue(userId, QuoteType.USER,
+                new QuoteCurrencies(from, to), amount, jpyRate, QuoteFixtures.policy(), Instant.now());
         UUID orderId = orderRepository.save(OrderFixtures.placed(quote, WALLET_ID, "key-" + UUID.randomUUID()))
                 .getId();
         jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_orders SET created_at = ? WHERE order_id = ?",

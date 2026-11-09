@@ -53,4 +53,15 @@ public final class QuoteFixtures {
         ReflectionTestUtils.setField(rate, "id", UUID.randomUUID());
         return rate;
     }
+
+    /**
+     * ID만 바꾼 같은 견적입니다. 견적 필드는 final이라 리플렉션으로 바꾸지 않고 restore로 다시 만듭니다
+     * (final 필드를 리플렉션으로 바꾸는 것은 새 JDK에서 경고·차단 대상).
+     */
+    public static ExchangeQuote withId(ExchangeQuote quote, UUID id) {
+        return ExchangeQuote.restore(id, quote.getQuoteType(), quote.getRateId(), quote.getUserId(),
+                quote.getFromCurrency(), quote.getToCurrency(), quote.getFromAmount(), quote.getToAmount(),
+                quote.getAppliedRate(), quote.getRateUnit(), quote.getRateDate(), quote.getFeeRate(),
+                quote.getFeeAmount(), quote.getTotalDebitAmount(), quote.getIssuedAt(), quote.getExpiresAt());
+    }
 }

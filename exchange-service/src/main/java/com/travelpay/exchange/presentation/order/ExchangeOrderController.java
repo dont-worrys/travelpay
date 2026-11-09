@@ -42,6 +42,7 @@ public class ExchangeOrderController {
      * 지갑을 확인하지 못하면 주문을 만들지 않고 503입니다.
      * - 원장 장애(지갑이 잔액을 원장에서 읽지 못함): EXCHANGE_LEDGER_UNAVAILABLE
      * - 그 밖의 지갑 서비스 실패: EXCHANGE_WALLET_SERVICE_UNAVAILABLE
+     * 견적 저장소(Redis)에 닿지 못해도 주문을 만들지 않고 503 EXCHANGE_QUOTE_STORE_UNAVAILABLE입니다. 같은 멱등 키 재요청은 견적을 읽지 않으므로 그대로 응답합니다.
      * 헤더가 없으면 형식 오류와 같은 EXCHANGE_INVALID_IDEMPOTENCY_KEY(400)입니다.
      */
     @PostMapping

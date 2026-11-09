@@ -47,6 +47,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -91,6 +92,7 @@ class ExchangeOrderIntegrationTest {
     @DynamicPropertySource
     static void datasource(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        TestRedis.register(registry);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
     }
@@ -118,6 +120,9 @@ class ExchangeOrderIntegrationTest {
 
     @Autowired
     private ExchangeOrderRepository orderRepository;
+
+    @Autowired
+    private StringRedisTemplate redis;
 
     private MockMvc mockMvc;
 
@@ -155,6 +160,29 @@ class ExchangeOrderIntegrationTest {
                 + ".exchange_order_status_histories WHERE order_id = ?", Integer.class, UUID.fromString(orderId)));
     }
 
+    /**
+     * 견적 조회 상태는 주문 테이블로 계산한다(#223): 주문에 쓴 견적은 USED이고, 만료 시각이 지나도 USED다.
+     * 주문에 쓰지 않은 견적은 만료 전 ISSUED, 만료 후 EXPIRED다.
+     */
+    @Test
+    void quoteUsedByOrderIsReportedAsUsedEvenAfterExpiry() throws Exception {
+        String usedQuote = issuedQuoteId(OWNER);
+        String unusedQuote = issuedQuoteId(OWNER);
+        place(OWNER, "key-1", usedQuote).andExpect(status().isAccepted());
+
+        quote(usedQuote).andExpect(jsonPath("$.data.status").value("USED"));
+        quote(unusedQuote).andExpect(jsonPath("$.data.status").value("ISSUED"));
+
+        clock.set(NOW.plus(Duration.ofMinutes(6)));
+        quote(usedQuote).andExpect(jsonPath("$.data.status").value("USED"));
+        quote(unusedQuote).andExpect(jsonPath("$.data.status").value("EXPIRED"));
+    }
+
+    private ResultActions quote(String quoteId) throws Exception {
+        return mockMvc.perform(get("/api/v1/exchange-quotes/{id}", quoteId).header("User-Id", OWNER).header("User-Role", "USER"))
+                .andExpect(status().isOk());
+    }
+
     @Test
     void retryWithSameKeyReturnsSameOrderEvenAfterQuoteExpired() throws Exception {
         String quoteId = issuedQuoteId(OWNER);
@@ -166,6 +194,63 @@ class ExchangeOrderIntegrationTest {
 
         assertEquals(first, retried);
         assertEquals(1, orderCount());
+    }
+
+    /**
+     * Redis 키 수명(유효 5분 + 5분)이 지나 견적이 사라진 뒤(#223):
+     * 견적 조회와 그 견적으로 하는 새 신청은 404 EXCHANGE_QUOTE_NOT_FOUND이고,
+     * 같은 멱등 키 재요청은 견적을 읽지 않고 주문을 먼저 찾으므로 저장된 주문으로 그대로 응답한다.
+     * 키 수명이 끝나면 Redis가 키를 지우므로, 10분을 기다리는 대신 키를 지워 같은 상태를 만든다(수명 값 자체는 ExchangeQuoteIntegrationTest가 검증).
+     */
+    @Test
+    void afterQuoteKeyIsGoneLookupAndNewOrderAre404ButRetryReturnsStoredOrder() throws Exception {
+        String usedQuote = issuedQuoteId(OWNER);
+        String first = orderId(place(OWNER, "key-1", usedQuote).andExpect(status().isAccepted()));
+        String unusedQuote = issuedQuoteId(OWNER);
+
+        clock.set(NOW.plus(Duration.ofMinutes(11)));
+        redis.delete(List.of("exchange:quote:" + usedQuote, "exchange:quote:" + unusedQuote));
+
+        for (String quoteId : List.of(usedQuote, unusedQuote)) {
+            mockMvc.perform(get("/api/v1/exchange-quotes/{id}", quoteId).header("User-Id", OWNER).header("User-Role", "USER"))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error.code").value("EXCHANGE_QUOTE_NOT_FOUND"));
+        }
+        place(OWNER, "key-2", unusedQuote)
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("EXCHANGE_QUOTE_NOT_FOUND"));
+
+        String retried = orderId(place(OWNER, "key-1", usedQuote).andExpect(status().isAccepted()));
+        assertEquals(first, retried);
+        assertEquals(1, orderCount());
+    }
+
+    /**
+     * API 문서(#233): 사용자 그룹(exchange)과 관리자 그룹(exchange-admin)이 경로를 나눠 갖고,
+     * 회원 헤더는 요청자를 쓰는 API에만, 환율 조회(공개)에는 붙지 않는다. 환전 신청의 Idempotency-Key는 필수로 보인다.
+     */
+    @Test
+    void apiDocsSplitUserAndAdminGroupsAndDocumentHeadersWhereNeeded() throws Exception {
+        String user = mockMvc.perform(get("/v3/api-docs/exchange")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        String admin = mockMvc.perform(get("/v3/api-docs/exchange-admin")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+
+        Map<String, Object> userPaths = JsonPath.read(user, "$.paths");
+        Map<String, Object> adminPaths = JsonPath.read(admin, "$.paths");
+        assertTrue(userPaths.keySet().containsAll(List.of("/api/v1/exchange-rates", "/api/v1/exchange-limits",
+                "/api/v1/exchange-quotes", "/api/v1/exchanges", "/api/v1/exchanges/{orderId}")), userPaths.keySet().toString());
+        assertTrue(userPaths.keySet().stream().noneMatch(path -> path.startsWith("/api/v1/admin")), userPaths.keySet().toString());
+        assertTrue(adminPaths.keySet().containsAll(List.of("/api/v1/admin/exchanges/manual-reviews",
+                "/api/v1/admin/exchanges/resolutions", "/api/v1/admin/exchanges/{orderId}/resolve")), adminPaths.keySet().toString());
+        assertTrue(adminPaths.keySet().stream().allMatch(path -> path.startsWith("/api/v1/admin/exchanges")), adminPaths.keySet().toString());
+
+        // 공개 API에는 회원 헤더가 없고, 요청자를 쓰는 API에는 필수로 있다
+        assertEquals(List.of(), JsonPath.read(user, "$.paths['/api/v1/exchange-rates'].get.parameters[?(@.name == 'User-Id')]"));
+        assertEquals(List.of(true), JsonPath.read(user, "$.paths['/api/v1/exchanges'].post.parameters[?(@.name == 'User-Id')].required"));
+        assertEquals(List.of(true), JsonPath.read(user, "$.paths['/api/v1/exchanges'].post.parameters[?(@.name == 'Idempotency-Key')].required"));
+        assertEquals(List.of("MASTER"), JsonPath.read(admin,
+                "$.paths['/api/v1/admin/exchanges/resolutions'].get.parameters[?(@.name == 'User-Role')].example"));
     }
 
     @Test

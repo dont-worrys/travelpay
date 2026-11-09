@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
 import com.travelpay.common.auth.AuthRole;
 import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.error.BusinessException;
@@ -1659,8 +1660,10 @@ class PaymentServiceTest {
         when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(pendings);
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
-        paymentService.recoverPayments(NOW, 100);
+        RecoveryBatchResult result = paymentService.recoverPayments(NOW, 100);
 
+        // 스케줄러가 이번 주기에 결제 복구를 더 이어가지 않도록 원장 장애를 알림
+        assertEquals(new RecoveryBatchResult(4, true), result);
         verify(ledgerClient, times(3)).createTransaction(any());
         verify(paymentRepository, never()).save(any(Payment.class));
         verify(paymentRepository, times(3)).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
@@ -1684,10 +1687,11 @@ class PaymentServiceTest {
         when(paymentRepository.markManualReview(eq(notAcceptedId), any(), any())).thenReturn(1);
         when(paymentRepository.findById(notAcceptedId)).thenReturn(Optional.of(manualReview));
 
-        paymentService.recoverPayments(NOW, 100);
+        RecoveryBatchResult result = paymentService.recoverPayments(NOW, 100);
 
         // 원장이 받아들이지 않은 응답은 원장이 응답한 것이므로 연속 결과 모름을 끊는다
         verify(ledgerClient, times(5)).createTransaction(any());
+        assertEquals(new RecoveryBatchResult(5, false), result);
     }
 
     @Test

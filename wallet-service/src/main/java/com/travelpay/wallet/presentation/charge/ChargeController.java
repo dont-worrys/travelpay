@@ -14,6 +14,7 @@ import com.travelpay.wallet.presentation.charge.dto.ChargeAcceptedResponse;
 import com.travelpay.wallet.presentation.charge.dto.ChargeCreateRequest;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.presentation.charge.dto.ChargeResponse;
+import io.swagger.v3.oas.annotations.Parameter;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -47,6 +48,9 @@ public class ChargeController {
     @PostMapping
     public ResponseEntity<ApiResponse<ChargeAcceptedResponse>> requestCharge(
             @CurrentUser AuthenticatedUser user,
+            @Parameter(required = true,
+                    description = "중복 충전 방지 키. 표준 UUID 표기이며, 충전마다 새 값을 씁니다. 없거나 형식이 다르면 400입니다.",
+                    example = "6f1c2b9e-3d4a-4e5f-8a7b-1c2d3e4f5a6b")
             @RequestHeader(name = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey,
             @Valid @RequestBody ChargeCreateRequest request) {
         UUID userId = requireChargeUser(user);

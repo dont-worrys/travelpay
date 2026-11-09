@@ -238,8 +238,6 @@ class AdminExchangeOrderControllerTest {
         Instant issuedAt = Instant.parse("2026-10-29T03:00:00Z");
         ExchangeQuote quote = OrderFixtures.wonToYenQuote(USER_ID,
                 QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), issuedAt);
-        ReflectionTestUtils.setField(quote, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(quote, "createdAt", issuedAt);
         ExchangeOrder order = OrderFixtures.placed(quote, WALLET_ID, "idemp-key-1");
         ReflectionTestUtils.setField(order, "id", ORDER_ID);
         ReflectionTestUtils.setField(order, "status", ExchangeOrderStatus.MANUAL_REVIEW);

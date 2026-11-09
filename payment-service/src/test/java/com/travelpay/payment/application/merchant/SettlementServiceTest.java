@@ -5,6 +5,7 @@ import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.payment.application.payment.PaymentService;
+import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerClient;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResult;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerSettlementCommand;
@@ -454,9 +455,10 @@ class SettlementServiceTest {
         givenRecoveryTargets(targets.toArray(Settlement[]::new));
         when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
-        settlementService.recoverSettlements(Instant.now(), 10);
+        RecoveryBatchResult result = settlementService.recoverSettlements(Instant.now(), 10);
 
         verify(ledgerClient, times(3)).settlementTransaction(any());
+        assertEquals(new RecoveryBatchResult(4, true), result);
     }
 
     // 조회

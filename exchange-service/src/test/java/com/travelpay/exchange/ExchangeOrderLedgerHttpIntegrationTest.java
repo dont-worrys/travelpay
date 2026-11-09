@@ -89,6 +89,7 @@ class ExchangeOrderLedgerHttpIntegrationTest {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        TestRedis.register(registry);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("exchange.ledger.url", () -> "http://127.0.0.1:" + LEDGER.getAddress().getPort());

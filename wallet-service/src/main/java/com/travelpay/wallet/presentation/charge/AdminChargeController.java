@@ -15,6 +15,7 @@ import com.travelpay.wallet.application.resolution.dto.ResolveChargeCommand;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.presentation.charge.dto.AdminChargeResponse;
 import com.travelpay.wallet.presentation.charge.dto.ChargeResolveRequest;
+import io.swagger.v3.oas.annotations.Parameter;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -65,6 +66,9 @@ public class AdminChargeController {
     public ApiResponse<ChargeResolutionResult> resolve(
             @CurrentUser AuthenticatedUser user,
             @PathVariable UUID chargeId,
+            @Parameter(required = true,
+                    description = "중복 보정 방지 키. 표준 UUID 표기이며, 보정마다 새 값을 씁니다. 없거나 형식이 다르면 400입니다.",
+                    example = "6f1c2b9e-3d4a-4e5f-8a7b-1c2d3e4f5a6b")
             @RequestHeader(name = ChargeController.IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey,
             @Valid @RequestBody ChargeResolveRequest request) {
         requireMaster(user);

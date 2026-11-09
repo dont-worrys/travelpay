@@ -69,7 +69,7 @@ public class ExchangeOrderService {
      * 재요청은 원장을 부르지 않고 저장된 상태로 응답합니다. 아직 PROCESSING이면 복구 스케줄러가 결과를 반영합니다.
      *
      * @throws BusinessException 멱등 키 형식 오류(400), 견적 없음(404), 견적 만료·이미 사용·멱등 키 재사용(409),
-     *                           지갑 없음(404), 지갑 사용 불가(409), 지갑 확인 실패(503)
+     *                           지갑 없음(404), 지갑 사용 불가(409), 지갑 확인 실패(503), 견적 저장소(Redis) 장애(503)
      */
     public ExchangeOrder place(PlaceOrderCommand command) {
         IdempotencyKey key = new IdempotencyKey(command.idempotencyKey());

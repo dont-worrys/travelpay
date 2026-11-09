@@ -1,6 +1,7 @@
 package com.travelpay.exchange.application.order;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
@@ -165,9 +166,12 @@ class ExchangeOrderServiceTest {
 
     @Test
     void rejectsExpiredQuoteWithoutCallingWallet() {
-        ReflectionTestUtils.setField(quote, "expiresAt", NOW);
+        // 유효 5분이라, 지금(NOW)보다 5분 전에 발급한 견적은 신청 시각에 딱 만료된다
+        ExchangeQuote expired = OrderFixtures.wonToYenQuote(USER_ID,
+                QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), NOW.minus(Duration.ofMinutes(5)));
+        when(quoteRepository.findByIdAndUserId(expired.getId(), USER_ID)).thenReturn(Optional.of(expired));
 
-        assertError(ExchangeOrderErrorCode.QUOTE_EXPIRED, () -> service.place(command(quote.getId(), WALLET_ID)));
+        assertError(ExchangeOrderErrorCode.QUOTE_EXPIRED, () -> service.place(command(expired.getId(), WALLET_ID)));
         verifyNoInteractions(walletBalanceReader);
     }
 
@@ -320,12 +324,10 @@ class ExchangeOrderServiceTest {
         return new PlaceOrderCommand(USER_ID, KEY, quoteId, walletId);
     }
 
-    /** 원화 10만 원 → 엔화 견적입니다. 저장된 것처럼 ID와 발급 시각이 있습니다. */
+    /** 원화 10만 원 → 엔화 견적입니다. */
     private static ExchangeQuote savedQuote() {
         ExchangeQuote saved = OrderFixtures.wonToYenQuote(USER_ID,
                 QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), ISSUED_AT);
-        ReflectionTestUtils.setField(saved, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(saved, "createdAt", ISSUED_AT);
         return saved;
     }
 

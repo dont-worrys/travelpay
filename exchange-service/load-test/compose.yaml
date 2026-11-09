@@ -30,8 +30,11 @@ services:
       timeout: 3s
       retries: 15
 
-  # 측정 전용 캐시 Redis. 팀 공용 redis-cache와 같은 이미지·설정(128MB, 가득 차면 덜 쓴 키부터 제거, 디스크 저장 안 함).
+  # 측정 전용 Redis(환율 캐시 + 견적 저장소). 기본값은 환율 조회 비교 측정(v0·v0.5·v1) 때와 같은 128MB·allkeys-lru·디스크 저장 안 함.
   # Redis를 쓰지 않는 jar(v0·v0.5)를 잴 때도 함께 띄워, 버전끼리 jar 말고는 환경이 같게 합니다.
+  # 견적 발급 측정은 견적이 키로 쌓여(초당 발급 수 × 10분 × 약 500바이트) 128MB가 몇 분 안에 차므로, 메모리와 정책을 바꿔 띄웁니다:
+  #   MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction (운영 redis-cache 정책과 같음, README "견적 발급 측정")
+  # 값을 바꾸면 compose가 이 컨테이너를 새로 만들므로, 같은 비교의 모든 측정을 같은 값으로 실행합니다.
   measure-redis:
     image: ${REDIS_IMAGE:-redis:8.2.11-bookworm}
     command:
@@ -39,9 +42,9 @@ services:
       - --requirepass
       - load-test-only
       - --maxmemory
-      - 128mb
+      - ${MEASURE_REDIS_MAXMEMORY:-128mb}
       - --maxmemory-policy
-      - allkeys-lru
+      - ${MEASURE_REDIS_POLICY:-allkeys-lru}
       - --save
       - ""
       - --appendonly

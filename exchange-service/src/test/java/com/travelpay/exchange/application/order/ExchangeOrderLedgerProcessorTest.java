@@ -188,8 +188,6 @@ class ExchangeOrderLedgerProcessorTest {
     private static ExchangeOrder processingOrder() {
         ExchangeQuote quote = OrderFixtures.wonToYenQuote(UUID.randomUUID(),
                 QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), ISSUED_AT);
-        ReflectionTestUtils.setField(quote, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(quote, "createdAt", ISSUED_AT);
         ExchangeOrder placed = OrderFixtures.placed(quote, UUID.randomUUID(), "key-1");
         ReflectionTestUtils.setField(placed, "id", ORDER_ID);
         return placed;
