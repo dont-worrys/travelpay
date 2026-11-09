@@ -27,6 +27,9 @@ public interface ExchangeOrderRepository {
     /** 요청자 본인의 주문만 찾습니다. 다른 사람의 주문은 없는 것과 같게 다룹니다. */
     Optional<ExchangeOrder> findByIdAndUserId(UUID orderId, UUID userId);
 
+    /** 이 견적으로 만든 주문이 있는지 봅니다. 견적 조회의 사용 여부(USED)를 판단할 때 씁니다. 견적당 주문은 최대 1개(UNIQUE)입니다. */
+    boolean existsByQuoteId(UUID quoteId);
+
     /**
      * 원장 호출을 선점합니다. PROCESSING이고, 확인 횟수가 조회했던 값과 같고, 마지막 확인 후 lease가 지났을 때만
      * 횟수를 1 올리고 확인 시각을 남깁니다.

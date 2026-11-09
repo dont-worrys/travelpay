@@ -7,6 +7,7 @@ import java.util.UUID;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
 import com.travelpay.exchange.domain.money.Money;
+import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
@@ -28,6 +29,7 @@ public class ExchangeQuoteService {
     private final RateFreshnessPolicy freshnessPolicy;
     private final QuotePolicy quotePolicy;
     private final ExchangeQuoteRepository repository;
+    private final ExchangeOrderRepository orderRepository;
     private final Clock clock;
 
     /**
@@ -52,10 +54,21 @@ public class ExchangeQuoteService {
     /**
      * 본인 견적을 조회합니다. 없거나 다른 사람의 견적이면 EXCHANGE_QUOTE_NOT_FOUND 오류입니다.
      * 견적은 만료 후 일정 시간만 남아 있다가 사라지므로, 오래된 견적도 EXCHANGE_QUOTE_NOT_FOUND입니다.
+     *
+     * 상태는 저장하지 않고 이 순서로 정합니다: 이 견적으로 만든 주문이 있으면 USED(시간과 무관) → 없고 만료면 EXPIRED → 그 외 ISSUED.
+     * 사용 여부는 주문 테이블(UNIQUE(quote_id))에서 확인하므로 견적과 주문의 상태가 어긋날 일이 없습니다.
+     * 이 조회는 DB 쿼리 하나를 쓰지만 발급 경로가 아니라 측정 대상(발급)에는 영향이 없습니다.
      */
     public ExchangeQuoteView find(UUID userId, UUID quoteId) {
         ExchangeQuote quote = repository.findByIdAndUserId(quoteId, userId)
                 .orElseThrow(() -> new BusinessException(ExchangeQuoteErrorCode.QUOTE_NOT_FOUND));
-        return new ExchangeQuoteView(quote, quote.isExpired(clock.instant()) ? QuoteStatus.EXPIRED : QuoteStatus.ISSUED);
+        return new ExchangeQuoteView(quote, statusOf(quote));
+    }
+
+    private QuoteStatus statusOf(ExchangeQuote quote) {
+        if (orderRepository.existsByQuoteId(quote.getId())) {
+            return QuoteStatus.USED;
+        }
+        return quote.isExpired(clock.instant()) ? QuoteStatus.EXPIRED : QuoteStatus.ISSUED;
     }
 }

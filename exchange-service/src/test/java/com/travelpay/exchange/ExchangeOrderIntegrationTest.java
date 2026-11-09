@@ -156,6 +156,29 @@ class ExchangeOrderIntegrationTest {
                 + ".exchange_order_status_histories WHERE order_id = ?", Integer.class, UUID.fromString(orderId)));
     }
 
+    /**
+     * 견적 조회 상태는 주문 테이블로 계산한다(#223): 주문에 쓴 견적은 USED이고, 만료 시각이 지나도 USED다.
+     * 주문에 쓰지 않은 견적은 만료 전 ISSUED, 만료 후 EXPIRED다.
+     */
+    @Test
+    void quoteUsedByOrderIsReportedAsUsedEvenAfterExpiry() throws Exception {
+        String usedQuote = issuedQuoteId(OWNER);
+        String unusedQuote = issuedQuoteId(OWNER);
+        place(OWNER, "key-1", usedQuote).andExpect(status().isAccepted());
+
+        quote(usedQuote).andExpect(jsonPath("$.data.status").value("USED"));
+        quote(unusedQuote).andExpect(jsonPath("$.data.status").value("ISSUED"));
+
+        clock.set(NOW.plus(Duration.ofMinutes(6)));
+        quote(usedQuote).andExpect(jsonPath("$.data.status").value("USED"));
+        quote(unusedQuote).andExpect(jsonPath("$.data.status").value("EXPIRED"));
+    }
+
+    private ResultActions quote(String quoteId) throws Exception {
+        return mockMvc.perform(get("/api/v1/exchange-quotes/{id}", quoteId).header("User-Id", OWNER).header("User-Role", "USER"))
+                .andExpect(status().isOk());
+    }
+
     @Test
     void retryWithSameKeyReturnsSameOrderEvenAfterQuoteExpired() throws Exception {
         String quoteId = issuedQuoteId(OWNER);

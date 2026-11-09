@@ -11,6 +11,7 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
+import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.money.MoneyErrorCode;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
@@ -42,8 +43,9 @@ class ExchangeQuoteServiceTest {
     private final ExchangeRateQueryService rateQueryService = mock(ExchangeRateQueryService.class);
     private final RateFreshnessPolicy freshnessPolicy = mock(RateFreshnessPolicy.class);
     private final ExchangeQuoteRepository repository = mock(ExchangeQuoteRepository.class);
+    private final ExchangeOrderRepository orderRepository = mock(ExchangeOrderRepository.class);
     private final ExchangeQuoteService service = new ExchangeQuoteService(rateQueryService, freshnessPolicy,
-            QuoteFixtures.policy(), repository, Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
+            QuoteFixtures.policy(), repository, orderRepository, Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
 
     @Test
     void issuesQuoteWithLatestFreshRateAndSavesIt() {
@@ -59,6 +61,8 @@ class ExchangeQuoteServiceTest {
         assertEquals(NOW.plusSeconds(300), view.quote().getExpiresAt());
         assertEquals(QuoteStatus.ISSUED, view.status());
         verify(repository).save(view.quote());
+        // 발급은 주문을 확인하지 않는다 (발급 경로에 DB 조회가 없게)
+        verifyNoInteractions(orderRepository);
     }
 
     @Test
@@ -95,17 +99,42 @@ class ExchangeQuoteServiceTest {
     }
 
     @Test
-    void findsOwnQuoteAndReportsExpiry() {
-        ExchangeQuote expired = ExchangeQuote.issue(USER_ID, QuoteType.USER,
+    void reportsUnusedQuoteAsIssuedBeforeExpiry() {
+        ExchangeQuote quote = quoteIssuedAt(NOW.minusSeconds(299));
+        when(repository.findByIdAndUserId(quote.getId(), USER_ID)).thenReturn(Optional.of(quote));
+
+        ExchangeQuoteView view = service.find(USER_ID, quote.getId());
+
+        assertSame(quote, view.quote());
+        assertEquals(QuoteStatus.ISSUED, view.status());
+    }
+
+    @Test
+    void reportsUnusedQuoteAsExpiredAfterExpiry() {
+        ExchangeQuote quote = quoteIssuedAt(NOW.minusSeconds(300));
+        when(repository.findByIdAndUserId(quote.getId(), USER_ID)).thenReturn(Optional.of(quote));
+
+        assertEquals(QuoteStatus.EXPIRED, service.find(USER_ID, quote.getId()).status());
+    }
+
+    /** 주문에 쓴 견적은 만료 시각이 지나도 USED다. 사용 여부를 시간보다 먼저 본다 */
+    @Test
+    void reportsQuoteWithOrderAsUsedEvenAfterExpiry() {
+        ExchangeQuote fresh = quoteIssuedAt(NOW.minusSeconds(60));
+        ExchangeQuote expired = quoteIssuedAt(NOW.minusSeconds(300));
+        when(repository.findByIdAndUserId(fresh.getId(), USER_ID)).thenReturn(Optional.of(fresh));
+        when(repository.findByIdAndUserId(expired.getId(), USER_ID)).thenReturn(Optional.of(expired));
+        when(orderRepository.existsByQuoteId(fresh.getId())).thenReturn(true);
+        when(orderRepository.existsByQuoteId(expired.getId())).thenReturn(true);
+
+        assertEquals(QuoteStatus.USED, service.find(USER_ID, fresh.getId()).status());
+        assertEquals(QuoteStatus.USED, service.find(USER_ID, expired.getId()).status());
+    }
+
+    private static ExchangeQuote quoteIssuedAt(Instant issuedAt) {
+        return ExchangeQuote.issue(USER_ID, QuoteType.USER,
                 new QuoteCurrencies(Currency.KRW, Currency.JPY), new Money(Currency.KRW, 100000),
-                JPY, QuoteFixtures.policy(), NOW.minusSeconds(300));
-        UUID quoteId = UUID.randomUUID();
-        when(repository.findByIdAndUserId(quoteId, USER_ID)).thenReturn(Optional.of(expired));
-
-        ExchangeQuoteView view = service.find(USER_ID, quoteId);
-
-        assertSame(expired, view.quote());
-        assertEquals(QuoteStatus.EXPIRED, view.status());
+                JPY, QuoteFixtures.policy(), issuedAt);
     }
 
     @Test

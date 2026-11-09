@@ -59,6 +59,11 @@ class ExchangeOrderRepositoryAdapter implements ExchangeOrderRepository {
     }
 
     @Override
+    public boolean existsByQuoteId(UUID quoteId) {
+        return jpaRepository.existsByQuoteId(quoteId);
+    }
+
+    @Override
     public Optional<ExchangeOrder> findById(UUID orderId) {
         return jpaRepository.findById(orderId);
     }
