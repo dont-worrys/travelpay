@@ -182,8 +182,8 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 | 값 | 출처 | 뜻 |
 | --- | --- | --- |
 | `faultRate` | `--fault-rate` | 측정에 넣은 유실 비율(메타데이터) |
-| `lostResponses` | mock-bank `mock_bank_fault_withdrawal_lost_rate_total` | k6 시작 전에 읽은 시작값 ~ 구간 끝(마지막 종결) 표본의 증가분. **응답 수**라, 같은 충전의 재시도 응답도 유실될 수 있어 유실된 충전 수보다 클 수 있음. 시작값이나 끝 표본에 카운터가 없으면 `null` |
-| `bankWithdrawalCalls` | `services.mock-bank."POST /internal/v1/bank/withdrawals".calls` | 측정 구간 은행 출금 호출 수(재시도 포함) |
+| `lostResponses` | mock-bank `mock_bank_fault_withdrawal_lost_rate_total` | k6 시작 전에 읽은 시작값 ~ 구간 끝(마지막 종결) 표본의 증가분. **응답 수**라, 같은 충전의 재시도 응답도 유실될 수 있어 유실된 충전 수보다 클 수 있음. 끝은 1초 표본 경계를 쓰므로 1건 정도 적게 셀 수 있음. 시작값이나 끝 표본에 카운터가 없으면 `null` |
+| `bankWithdrawalCalls` | `services.mock-bank."POST /internal/v1/bank/withdrawals".calls` | 측정 구간 은행 출금 호출 수(재시도 포함). 1초 표본 경계를 쓰므로 구간 시작·끝에서 1건 정도 적게 셀 수 있음(기록용, 판정에 쓰지 않음) |
 | `acceptedCharges` | `charges.accepted` | 측정 접수 건수. `bankWithdrawalCalls`와의 차이는 재시도분이며 기록만 하고 실패로 보지 않음 |
 | `recoveredCharges` | `charge_status_history.trace_id` | 측정 충전 중 상태 이력에 `trace_id`가 `recovery-`로 시작하는 행이 하나 이상 있는 충전 수 = **복구 스케줄러가 한 번 이상 처리한 충전**. 복구 성공 여부는 기존 실패 조건(`MANUAL_REVIEW` 등)이 판정 |
 | `recoveredLatencyMs` | `charge_status_history` | `recoveredCharges` 중 `COMPLETED` 이력이 있는 충전의 `COMPLETED` 기록 시각 − `created_at` P50·P95·건수 (`charges.completionLatencyMs`와 같은 계산, 완료 이력의 `trace_id`는 보지 않음) |
