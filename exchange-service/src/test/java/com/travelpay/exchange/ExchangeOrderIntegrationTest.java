@@ -47,6 +47,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -120,6 +121,9 @@ class ExchangeOrderIntegrationTest {
     @Autowired
     private ExchangeOrderRepository orderRepository;
 
+    @Autowired
+    private StringRedisTemplate redis;
+
     private MockMvc mockMvc;
 
     @BeforeEach
@@ -188,6 +192,35 @@ class ExchangeOrderIntegrationTest {
         clock.set(NOW.plus(Duration.ofMinutes(10)));
         String retried = orderId(place(OWNER, "key-1", quoteId).andExpect(status().isAccepted()));
 
+        assertEquals(first, retried);
+        assertEquals(1, orderCount());
+    }
+
+    /**
+     * Redis 키 수명(유효 5분 + 5분)이 지나 견적이 사라진 뒤(#223):
+     * 견적 조회와 그 견적으로 하는 새 신청은 404 EXCHANGE_QUOTE_NOT_FOUND이고,
+     * 같은 멱등 키 재요청은 견적을 읽지 않고 주문을 먼저 찾으므로 저장된 주문으로 그대로 응답한다.
+     * 키 수명이 끝나면 Redis가 키를 지우므로, 10분을 기다리는 대신 키를 지워 같은 상태를 만든다(수명 값 자체는 ExchangeQuoteIntegrationTest가 검증).
+     */
+    @Test
+    void afterQuoteKeyIsGoneLookupAndNewOrderAre404ButRetryReturnsStoredOrder() throws Exception {
+        String usedQuote = issuedQuoteId(OWNER);
+        String first = orderId(place(OWNER, "key-1", usedQuote).andExpect(status().isAccepted()));
+        String unusedQuote = issuedQuoteId(OWNER);
+
+        clock.set(NOW.plus(Duration.ofMinutes(11)));
+        redis.delete(List.of("exchange:quote:" + usedQuote, "exchange:quote:" + unusedQuote));
+
+        for (String quoteId : List.of(usedQuote, unusedQuote)) {
+            mockMvc.perform(get("/api/v1/exchange-quotes/{id}", quoteId).header("User-Id", OWNER).header("User-Role", "USER"))
+                    .andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.error.code").value("EXCHANGE_QUOTE_NOT_FOUND"));
+        }
+        place(OWNER, "key-2", unusedQuote)
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("EXCHANGE_QUOTE_NOT_FOUND"));
+
+        String retried = orderId(place(OWNER, "key-1", usedQuote).andExpect(status().isAccepted()));
         assertEquals(first, retried);
         assertEquals(1, orderCount());
     }
