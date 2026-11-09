@@ -48,6 +48,15 @@ class MockRateConfigurationTest {
         });
     }
 
+    /**
+     * 난수 생성기는 java.base에 있어야 합니다. JRE 이미지에는 jdk.random 모듈이 없어,
+     * 그 모듈에 있는 알고리즘(RandomGenerator.getDefault())을 쓰면 앱이 시작하지 않습니다.
+     */
+    @Test
+    void usesRandomGeneratorFromJavaBase() {
+        assertEquals("java.base", MockRateConfiguration.newRandom().getClass().getModule().getName());
+    }
+
     @Test
     void registersNothingInOtherModes() {
         contextRunner.withPropertyValues("exchange.rate.mode=koreaexim").run(context -> {

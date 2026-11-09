@@ -51,7 +51,7 @@ docker compose --profile app up -d --wait app   # 측정 DB도 함께 뜸. 준�
 ```
 
 - PC에서 확인할 때는 `http://localhost:18084/api/v1/exchange-rates`로 요청할 수 있습니다. 측정은 Docker 네트워크 안에서 `app:18084`로 합니다.
-- 이미지는 JRE가 아니라 JDK(`eclipse-temurin:21.0.13_9-jdk`)입니다. Temurin JRE 이미지에는 `jdk.random` 모듈이 없어 가짜 환율 공급자(`RandomGenerator.getDefault()`)가 시작하다 실패합니다.
+- 이미지는 JRE가 아니라 JDK(`eclipse-temurin:21.0.13_9-jdk`)입니다. #211 이전 코드(비교 측정한 v0·v0.5·v1 jar 포함)는 가짜 환율 공급자가 `RandomGenerator.getDefault()`를 써서, `jdk.random` 모듈이 없는 Temurin JRE 이미지에서는 시작하다 실패합니다. 지금 코드는 `SplittableRandom`(java.base)이라 JRE에서도 시작하지만, 이전 jar와 같은 조건으로 재기 위해 JDK를 그대로 씁니다.
 
 측정용으로 붙이는 옵션 (`compose.yaml`의 `app.command`, DB 측정과 Redis 측정 모두 같게):
 
