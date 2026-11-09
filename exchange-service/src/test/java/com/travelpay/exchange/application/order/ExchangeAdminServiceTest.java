@@ -107,6 +107,40 @@ class ExchangeAdminServiceTest {
     }
 
     @Test
+    void getResolutionsValidatesPageParameters() {
+        ExchangeResolutionCondition all = new ExchangeResolutionCondition(null, null, null, null);
+
+        assertEquals(CommonErrorCode.INVALID_REQUEST, assertThrows(BusinessException.class,
+                () -> adminService.getResolutions(ACTOR_ID, all, -1, 20)).getErrorCode());
+        assertEquals(CommonErrorCode.INVALID_REQUEST, assertThrows(BusinessException.class,
+                () -> adminService.getResolutions(ACTOR_ID, all, 0, 0)).getErrorCode());
+    }
+
+    /** 기간은 from 포함·to 제외라, from이 to와 같거나 늦으면 아무것도 나올 수 없는 잘못된 요청입니다. */
+    @Test
+    void getResolutionsRejectsFromNotBeforeTo() {
+        ExchangeResolutionCondition same = new ExchangeResolutionCondition(null, null, NOW, NOW);
+        ExchangeResolutionCondition reversed = new ExchangeResolutionCondition(null, null, NOW, NOW.minusSeconds(1));
+
+        assertEquals(CommonErrorCode.INVALID_REQUEST, assertThrows(BusinessException.class,
+                () -> adminService.getResolutions(ACTOR_ID, same, 0, 20)).getErrorCode());
+        assertEquals(CommonErrorCode.INVALID_REQUEST, assertThrows(BusinessException.class,
+                () -> adminService.getResolutions(ACTOR_ID, reversed, 0, 20)).getErrorCode());
+    }
+
+    @Test
+    void getResolutionsPassesConditionAndCapsMaxPageSize() {
+        ExchangeResolutionCondition condition =
+                new ExchangeResolutionCondition(ACTOR_ID, null, NOW.minusSeconds(3600), NOW);
+        when(orderQueryRepository.findResolutions(condition, PageRequest.of(2, 100)))
+                .thenReturn(new PageImpl<>(List.of()));
+
+        adminService.getResolutions(ACTOR_ID, condition, 2, 500);
+
+        verify(orderQueryRepository).findResolutions(condition, PageRequest.of(2, 100));
+    }
+
+    @Test
     void getManualReviewThrowsWhenOrderNotFound() {
         when(orderRepository.findById(ORDER_ID)).thenReturn(Optional.empty());
 

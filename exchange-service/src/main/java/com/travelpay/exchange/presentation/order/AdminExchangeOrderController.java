@@ -1,5 +1,6 @@
 package com.travelpay.exchange.presentation.order;
 
+import java.time.Instant;
 import java.util.UUID;
 
 import com.travelpay.common.auth.AuthRole;
@@ -10,6 +11,7 @@ import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.exchange.application.order.ExchangeAdminService;
+import com.travelpay.exchange.application.order.ExchangeResolutionCondition;
 import com.travelpay.exchange.domain.order.ManualReviewReason;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -42,6 +44,27 @@ public class AdminExchangeOrderController {
         return ApiResponse.success(PageResponse.from(
                 adminService.getManualReviews(user.userId(), reviewReason, page, size),
                 AdminExchangeManualReviewResponse::from
+        ));
+    }
+
+    /**
+     * 관리자 처리 이력을 처리 시각 최신순으로 조회합니다. 조건은 모두 선택이며, 기간은 from 포함·to 제외입니다.
+     * 경로가 /{orderId}보다 구체적이라 Spring이 이 메서드를 먼저 고릅니다(주문 ID로 해석하지 않음).
+     */
+    @GetMapping("/resolutions")
+    public ApiResponse<PageResponse<AdminExchangeResolutionResponse>> resolutions(
+            @CurrentUser AuthenticatedUser user,
+            @RequestParam(required = false) UUID actorId,
+            @RequestParam(required = false) UUID orderId,
+            @RequestParam(required = false) Instant from,
+            @RequestParam(required = false) Instant to,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        requireMaster(user);
+        return ApiResponse.success(PageResponse.from(
+                adminService.getResolutions(user.userId(),
+                        new ExchangeResolutionCondition(actorId, orderId, from, to), page, size),
+                AdminExchangeResolutionResponse::from
         ));
     }
 

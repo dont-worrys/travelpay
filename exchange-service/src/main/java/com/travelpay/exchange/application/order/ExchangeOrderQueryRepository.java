@@ -21,4 +21,7 @@ public interface ExchangeOrderQueryRepository {
      * @param reviewReason 사유 필터. null이면 전체 사유입니다.
      */
     Page<ExchangeManualReviewView> findManualReviews(ManualReviewReason reviewReason, Pageable pageable);
+
+    /** 관리자(MASTER) 처리 이력을 처리 시각 최신순으로 조회합니다. */
+    Page<ExchangeResolutionView> findResolutions(ExchangeResolutionCondition condition, Pageable pageable);
 }
