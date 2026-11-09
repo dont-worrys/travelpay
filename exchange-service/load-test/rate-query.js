@@ -37,7 +37,10 @@ export default function () {
  */
 function countIncompleteAndStale(response) {
     const rates = response.json('data');
-    const currencies = Array.isArray(rates) ? rates.map((rate) => rate.currency).sort() : [];
+    // 원소가 null이거나 객체가 아니면 rate.currency에서 예외가 나 스크립트가 멈추고, 이미 성공으로 센 응답이 그대로 남는다.
+    // 그런 응답도 불완전 응답으로 센다
+    const wellFormed = Array.isArray(rates) && rates.every((rate) => rate !== null && typeof rate === 'object');
+    const currencies = wellFormed ? rates.map((rate) => rate.currency).sort() : [];
     if (currencies.join(',') !== EXPECTED_CURRENCIES.join(',')) {
         incompleteResponses.add(1);
         return;
