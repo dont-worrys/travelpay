@@ -293,19 +293,26 @@ def charge_metrics(data, since):
 
 # ---- 장애(응답 유실) 지표 ----
 
-def lost_responses(samples, start, end):
-    """서비스 지표와 같은 구간 경계 표본(nearest)의 유실 카운터 차이. 경계 표본에 카운터가 없으면 None"""
-    window = [sample for sample in samples if start <= sample[0] <= end]
-    if not window:
+def read_lost_counter():
+    """Mock 은행 유실 카운터 현재값. 읽지 못하거나 카운터가 없으면 None"""
+    samples = scrape(SERVICES["mock-bank"])
+    if samples is None:
         return None
-    before = (nearest(samples, start)[1].get("mock-bank") or {}).get("faultLost")
+    lost = [value for metric, _, value in samples if metric == LOST_COUNTER]
+    return sum(lost) if lost else None
+
+
+def lost_responses(samples, end, before):
+    """구간 끝 표본(nearest)의 유실 카운터 − k6 시작 전에 읽은 시작값. 둘 중 하나라도 없으면 None"""
+    if not samples:
+        return None
     after = (nearest(samples, end)[1].get("mock-bank") or {}).get("faultLost")
     if before is None or after is None:
         return None
     return int(after - before)
 
 
-def fault_metrics(data, since, fault_rate, samples, start, end, charges, services):
+def fault_metrics(data, since, fault_rate, samples, end, lost_before, charges, services):
     measured = measured_sql(data, since)
     # 복구 처리 충전 수, 그중 COMPLETED 이력이 있는 충전의 완료 지연(완료 이력 trace_id는 조건에 넣지 않음)
     recovered, p50, p95, completed_count = psql(
@@ -320,7 +327,7 @@ def fault_metrics(data, since, fault_rate, samples, start, end, charges, service
     withdrawals = (services.get("mock-bank") or {}).get(WITHDRAWAL_PATH) or {}
     return {
         "faultRate": fault_rate,
-        "lostResponses": lost_responses(samples, start, end),
+        "lostResponses": lost_responses(samples, end, lost_before),
         "bankWithdrawalCalls": withdrawals.get("calls", 0),
         "acceptedCharges": charges["accepted"],
         "recoveredCharges": int(recovered),
@@ -406,7 +413,8 @@ def main():
     parser.add_argument("--amount", type=int, default=10000)
     parser.add_argument("--pre-vus", type=int, help="기본 max(20, rate)")
     parser.add_argument("--max-vus", type=int, help="기본 max(100, rate × 4)")
-    parser.add_argument("--drain-timeout", type=int, default=600, help="k6 종료 후 모든 충전 종결을 기다릴 최대 초")
+    parser.add_argument("--drain-timeout", type=int,
+                        help="k6 종료 후 모든 충전 종결을 기다릴 최대 초 (기본 600, --fault-rate > 0이면 900)")
     parser.add_argument("--fault-rate", type=float, default=0.0,
                         help="Mock 은행 출금 응답 유실 비율 0.0~1.0 (결과에 남기는 값, 실제 비율은 Mock 은행 실행 인자)")
     args = parser.parse_args()
@@ -414,6 +422,8 @@ def main():
         raise SystemExit("--count·--rate·--amount는 1 이상입니다.")
     if not 0.0 <= args.fault_rate <= 1.0:
         raise SystemExit("--fault-rate는 0.0~1.0입니다.")
+    if args.drain_timeout is None:
+        args.drain_timeout = 900 if args.fault_rate > 0 else 600
     pre_vus = args.pre_vus or max(20, args.rate)
     max_vus = args.max_vus or max(100, args.rate * 4)
 
@@ -427,6 +437,7 @@ def main():
     print("[1/6] 사전 확인 (서비스 health, 처리 중 충전, 측정 계좌)")
     precheck(data)
     balance_before = bank_balance(data)
+    lost_before = read_lost_counter()   # 유실 카운터 시작값 (k6 시작 전)
 
     print(f"[2/6] k6 실행 (초당 {args.rate}건 × {args.count}건, 동시성 {args.concurrency}), 서비스·DB 지표 1초 간격 기록")
     service_sampler = ServiceSampler()
@@ -481,7 +492,7 @@ def main():
         "services": service_metrics(service_sampler.samples, window_start, window_end),
         "db": db_metrics(db_sampler, window_start, window_end),
     }
-    metrics["fault"] = fault_metrics(data, since, args.fault_rate, service_sampler.samples, window_start, window_end,
+    metrics["fault"] = fault_metrics(data, since, args.fault_rate, service_sampler.samples, window_end, lost_before,
                                      charges, metrics["services"])
 
     reasons = []
@@ -517,7 +528,7 @@ def main():
     if completed != latency_count:
         reasons.append(f"완료 지연 집계 {latency_count}건 ≠ COMPLETED {completed}건 (상태 이력 누락)")
     lost = metrics["fault"]["lostResponses"]
-    if args.fault_rate > 0 and lost is None:
+    if lost is None:
         reasons.append(f"응답 유실 카운터 수집 안 됨 ({LOST_COUNTER})")
     elif args.fault_rate > 0 and lost == 0:
         reasons.append("응답 유실 0건. Mock 은행 실행 인자의 유실 비율 확인")

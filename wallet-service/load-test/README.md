@@ -101,7 +101,7 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 | `--concurrency` | (필수) | 지갑 SAGA 컨슈머 동시성(메타데이터) |
 | `--amount` | 10000 | 충전 금액(원, KRW). 최대값 검증 없음 |
 | `--pre-vus` / `--max-vus` | max(20, rate) / max(100, rate×4) | `dropped_iterations`가 나오면 `--max-vus`를 올립니다 |
-| `--drain-timeout` | 600 | k6 종료 후 모든 충전 종결을 기다릴 최대 초. 장애 측정은 900 이상 권장 |
+| `--drain-timeout` | 600 (`--fault-rate` > 0이면 900) | k6 종료 후 모든 충전 종결을 기다릴 최대 초. 지정하면 그 값을 씀. 장애 측정은 900 이상 권장 |
 | `--fault-rate` | 0.0 | Mock 은행 출금 응답 유실 비율(메타데이터, 0.0~1.0). 실제 비율은 Mock 은행 실행 인자로 넣음 |
 
 ### 측정 절차 (비교할 조건마다)
@@ -120,7 +120,7 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 
    ```bash
    for i in $(seq 1 10); do
-     id=$(powershell -Command "[guid]::NewGuid().ToString()" | tr -d '\r')
+     id=$(python -c "import uuid; print(uuid.uuid4())" | tr -d '\r')
      printf '{"requestId":"%s","bankCode":"004","accountNumber":"12340101234567","holderName":"유재석","amount":1}' "$id" > body.json
      curl -s -o /dev/null -w "%{http_code} " -X POST localhost:8090/internal/v1/bank/withdrawals \
        -H 'Content-Type: application/json; charset=UTF-8' --data-binary @body.json
@@ -182,7 +182,7 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 | 값 | 출처 | 뜻 |
 | --- | --- | --- |
 | `faultRate` | `--fault-rate` | 측정에 넣은 유실 비율(메타데이터) |
-| `lostResponses` | mock-bank `mock_bank_fault_withdrawal_lost_rate_total` | 서비스 지표와 같은 구간의 증가분. **응답 수**라, 같은 충전의 재시도 응답도 유실될 수 있어 유실된 충전 수보다 클 수 있음. 경계 표본에 카운터가 없으면 `null` |
+| `lostResponses` | mock-bank `mock_bank_fault_withdrawal_lost_rate_total` | k6 시작 전에 읽은 시작값 ~ 구간 끝(마지막 종결) 표본의 증가분. **응답 수**라, 같은 충전의 재시도 응답도 유실될 수 있어 유실된 충전 수보다 클 수 있음. 시작값이나 끝 표본에 카운터가 없으면 `null` |
 | `bankWithdrawalCalls` | `services.mock-bank."POST /internal/v1/bank/withdrawals".calls` | 측정 구간 은행 출금 호출 수(재시도 포함) |
 | `acceptedCharges` | `charges.accepted` | 측정 접수 건수. `bankWithdrawalCalls`와의 차이는 재시도분이며 기록만 하고 실패로 보지 않음 |
 | `recoveredCharges` | `charge_status_history.trace_id` | 측정 충전 중 상태 이력에 `trace_id`가 `recovery-`로 시작하는 행이 하나 이상 있는 충전 수 = **복구 스케줄러가 한 번 이상 처리한 충전**. 복구 성공 여부는 기존 실패 조건(`MANUAL_REVIEW` 등)이 판정 |
@@ -202,7 +202,7 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 - DB 표본: 수집 실패(`docker exec` 0이 아닌 종료 코드 포함, `db.error`), 수집이 끝나지 않음, 측정 구간 표본 0개
 - 출금 정합성 위반
 - 대사: 실행 실패(HTTP 200 아님), 응답 필드 누락, 대상 건수 < 측정 접수 건수, status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상
-- 장애 설정: `--fault-rate` > 0인데 유실 카운터가 수집되지 않음 또는 `lostResponses` = 0(Mock 은행 실행 인자 확인), `--fault-rate` = 0인데 `lostResponses` > 0(Mock 은행 유실 비율이 남아 있음)
+- 장애 설정: 유실 카운터가 수집되지 않음(`lostResponses` = `null`, `--fault-rate`와 관계없음), `--fault-rate` > 0인데 `lostResponses` = 0(Mock 은행 실행 인자 확인), `--fault-rate` = 0인데 `lostResponses` > 0(Mock 은행 유실 비율이 남아 있음)
 
 k6 결과 파일이 없거나 JSON이 아니거나 필수 필드가 빠지면 지표를 만들지 않고 바로 멈춥니다(종료 코드 1). psql 조회 실패도 같습니다.
 
