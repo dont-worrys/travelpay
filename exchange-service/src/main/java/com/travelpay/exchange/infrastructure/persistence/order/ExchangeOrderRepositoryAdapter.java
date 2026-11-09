@@ -90,4 +90,19 @@ class ExchangeOrderRepositoryAdapter implements ExchangeOrderRepository {
     public List<ExchangeOrder> findRecoveryTargets(Instant now, int limit) {
         return jpaRepository.findRecoveryTargets(now, limit);
     }
+
+    @Override
+    public long countProcessingRequestedAtOrBefore(Instant cutoff) {
+        return jpaRepository.countProcessingRequestedAtOrBefore(cutoff);
+    }
+
+    @Override
+    public List<UUID> findProcessingIdsRequestedAtOrBefore(Instant cutoff, int limit) {
+        return jpaRepository.findProcessingIdsRequestedAtOrBefore(cutoff, limit);
+    }
+
+    @Override
+    public long countManualReview() {
+        return jpaRepository.countManualReview();
+    }
 }

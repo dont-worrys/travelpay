@@ -307,6 +307,66 @@ class ExchangeOrderPersistenceIntegrationTest {
         assertEquals(1, orderRepository.findRecoveryTargets(now, 1).size());
     }
 
+    /**
+     * 정체 = 신청 시각이 기준(지금 - 30분) 이전이고 아직 PROCESSING인 주문. 기준과 같은 시각은 세고, 1초라도 늦으면 세지 않는다.
+     * 확정된 주문(COMPLETED·MANUAL_REVIEW)은 아무리 오래됐어도 세지 않는다.
+     */
+    @Test
+    void countsOnlyProcessingOrdersRequestedAtOrBeforeCutoff() {
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        Instant cutoff = now.minus(Duration.ofMinutes(30));
+        UUID oldest = processingOrder("a", 3, null, now.minus(Duration.ofHours(2)));
+        UUID exactlyAtCutoff = processingOrder("b", 1, null, cutoff);
+        processingOrder("c", 0, null, cutoff.plusSeconds(1));
+        UUID completed = processingOrder("d", 0, null, now.minus(Duration.ofHours(3)));
+        orderRepository.settleIfProcessing(completed, Settlement.completed(UUID.randomUUID(), now), now);
+        UUID manualReview = processingOrder("e", 0, null, now.minus(Duration.ofHours(30)));
+        orderRepository.settleIfProcessing(manualReview,
+                Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), now);
+
+        assertEquals(2, orderRepository.countProcessingRequestedAtOrBefore(cutoff));
+        assertEquals(List.of(oldest, exactlyAtCutoff), orderRepository.findProcessingIdsRequestedAtOrBefore(cutoff, 10));
+        assertEquals(List.of(oldest), orderRepository.findProcessingIdsRequestedAtOrBefore(cutoff, 1));
+        assertEquals(0, orderRepository.countProcessingRequestedAtOrBefore(cutoff.minus(Duration.ofHours(5))));
+    }
+
+    @Test
+    void countsOnlyManualReviewOrders() {
+        Instant now = Instant.parse("2026-11-01T03:00:00Z");
+        assertEquals(0, orderRepository.countManualReview());
+
+        UUID first = processingOrder("a", 0, null, now.minus(Duration.ofHours(25)));
+        UUID second = processingOrder("b", 0, null, now.minus(Duration.ofHours(25)));
+        processingOrder("c", 0, null, now.minus(Duration.ofHours(25)));
+        orderRepository.settleIfProcessing(first, Settlement.manualReview(ManualReviewReason.LEDGER_CONFLICT), now);
+        orderRepository.settleIfProcessing(second,
+                Settlement.manualReview(ManualReviewReason.LEDGER_UNCONFIRMED_TOO_LONG), now);
+
+        assertEquals(2, orderRepository.countManualReview());
+    }
+
+    /**
+     * 지표는 30초마다 세므로 주문이 많아져도 PROCESSING·MANUAL_REVIEW 주문만 담은 부분 인덱스를 써야 한다.
+     * 주문 수가 적으면 순차 읽기가 더 싸다고 판단할 수 있어, 순차 읽기를 끄고 인덱스를 쓸 수 있는 쿼리인지 본다.
+     */
+    @Test
+    void backlogCountsCanUsePartialIndexes() {
+        String processing = explainWithoutSeqScan("SELECT count(*) FROM " + SCHEMA + ".exchange_orders"
+                + " WHERE status = 'PROCESSING' AND requested_at <= now()");
+        String manualReview = explainWithoutSeqScan("SELECT count(*) FROM " + SCHEMA + ".exchange_orders"
+                + " WHERE status = 'MANUAL_REVIEW'");
+
+        assertTrue(processing.contains("ix_exchange_orders_processing"), processing);
+        assertTrue(manualReview.contains("ix_exchange_orders_manual_review"), manualReview);
+    }
+
+    private String explainWithoutSeqScan(String query) {
+        return transactionTemplate.execute(status -> {
+            jdbcTemplate.execute("SET LOCAL enable_seqscan = off");
+            return String.join("\n", jdbcTemplate.queryForList("EXPLAIN " + query, String.class));
+        });
+    }
+
     @Test
     void jpaDoesNotUpdateOrderEvenIfEntityChanges() {
         ExchangeOrder saved = orderRepository.save(OrderFixtures.placed(savedQuote(USER_ID), WALLET_ID, "key-1"));
