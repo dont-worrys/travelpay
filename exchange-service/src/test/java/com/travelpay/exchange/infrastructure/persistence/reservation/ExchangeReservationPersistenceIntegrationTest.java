@@ -3,9 +3,17 @@ package com.travelpay.exchange.infrastructure.persistence.reservation;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.sql.Timestamp;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
@@ -15,6 +23,8 @@ import com.travelpay.exchange.domain.quote.QuoteFixtures;
 import com.travelpay.exchange.domain.rate.CollectedRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
 import com.travelpay.exchange.domain.rate.RateSource;
+import com.travelpay.exchange.application.reservation.ExchangeReservationQueryRepository;
+import com.travelpay.exchange.domain.reservation.DuplicateExchangeReservationException;
 import com.travelpay.exchange.domain.reservation.ExchangeReservation;
 import com.travelpay.exchange.domain.reservation.ExchangeReservationRepository;
 import com.travelpay.exchange.domain.reservation.ReservationPolicy;
@@ -27,6 +37,9 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -36,6 +49,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -73,6 +87,9 @@ class ExchangeReservationPersistenceIntegrationTest {
     private ExchangeReservationRepository repository;
 
     @Autowired
+    private ExchangeReservationQueryRepository queryRepository;
+
+    @Autowired
     private JdbcTemplate jdbcTemplate;
 
     @Autowired
@@ -99,13 +116,109 @@ class ExchangeReservationPersistenceIntegrationTest {
         assertTrue(repository.findByIdAndUserId(saved.getId(), OTHER_USER_ID).isEmpty());
     }
 
-    /** 같은 회원·같은 멱등 키의 예약은 하나만 저장된다 (다른 회원은 같은 키를 써도 됨) */
+    /** 같은 회원·같은 멱등 키의 예약은 하나만 저장되고, 저장소가 도메인 예외로 알린다 (다른 회원은 같은 키를 써도 됨) */
     @Test
-    void sameKeyOfSameUserIsRejected() {
-        repository.save(reservation(USER_ID, "key-1"));
+    void sameKeyOfSameUserIsDuplicate() {
+        UUID first = repository.save(reservation(USER_ID, "key-1")).getId();
         repository.save(reservation(OTHER_USER_ID, "key-1"));
 
-        assertThrows(DataIntegrityViolationException.class, () -> repository.save(reservation(USER_ID, "key-1")));
+        assertThrows(DuplicateExchangeReservationException.class, () -> repository.save(reservation(USER_ID, "key-1")));
+        assertEquals(first, repository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey("key-1"))
+                .orElseThrow().getId());
+        assertTrue(repository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey("key-2")).isEmpty());
+    }
+
+    /** 대기 예약 수는 그 회원의 WAITING만 센다 */
+    @Test
+    void countsOnlyWaitingReservationsOfUser() {
+        repository.save(reservation(USER_ID, "key-1"));
+        UUID canceled = repository.save(reservation(USER_ID, "key-2")).getId();
+        repository.save(reservation(OTHER_USER_ID, "key-1"));
+        repository.cancelIfWaiting(canceled, USER_ID, Instant.now());
+
+        assertEquals(1, repository.countWaitingByUserId(USER_ID));
+        assertEquals(1, repository.countWaitingByUserId(OTHER_USER_ID));
+    }
+
+    /** 취소는 본인의 대기 예약에만 한 번 반영된다. 다른 회원·이미 끝난 예약은 바꾸지 않는다 */
+    @Test
+    void cancelsOnlyOwnWaitingReservationOnce() {
+        UUID id = repository.save(reservation(USER_ID, "key-1")).getId();
+        UUID expired = repository.save(reservation(USER_ID, "key-2")).getId();
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_reservations SET status = 'EXPIRED' WHERE reservation_id = ?",
+                expired);
+        Instant canceledAt = Instant.parse("2026-11-10T05:00:00Z");
+
+        assertFalse(repository.cancelIfWaiting(id, OTHER_USER_ID, canceledAt), "다른 회원은 취소 못 함");
+        assertTrue(repository.cancelIfWaiting(id, USER_ID, canceledAt));
+        assertFalse(repository.cancelIfWaiting(id, USER_ID, canceledAt), "이미 취소됨");
+        assertFalse(repository.cancelIfWaiting(expired, USER_ID, canceledAt), "만료된 예약");
+
+        Map<String, Object> row = jdbcTemplate.queryForMap("SELECT status, updated_at FROM " + SCHEMA
+                + ".exchange_reservations WHERE reservation_id = ?", id);
+        assertEquals("CANCELED", row.get("status"));
+        assertEquals(canceledAt, ((Timestamp) row.get("updated_at")).toInstant());
+    }
+
+    /** 같은 예약을 동시에 여러 번 취소해도 한 번만 성공한다 (체결과 겹칠 때도 같은 원리로 한쪽만 반영) */
+    @Test
+    void concurrentCancelSucceedsOnce() throws Exception {
+        UUID id = repository.save(reservation(USER_ID, "key-1")).getId();
+
+        int threads = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        try {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (int i = 0; i < threads; i++) {
+                results.add(executor.submit(() -> {
+                    start.await();
+                    return repository.cancelIfWaiting(id, USER_ID, Instant.now());
+                }));
+            }
+            start.countDown();
+            int succeeded = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(10, TimeUnit.SECONDS)) {
+                    succeeded++;
+                }
+            }
+            assertEquals(1, succeeded);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** 목록은 본인 예약만, 상태 필터를 적용하고, pageable 정렬(생성 최신순)을 따른다 */
+    @Test
+    void listsOwnReservationsWithStatusFilterNewestFirst() {
+        UUID oldest = savedAt(USER_ID, "key-1", "2026-11-10T01:00:00Z");
+        UUID middle = savedAt(USER_ID, "key-2", "2026-11-10T02:00:00Z");
+        UUID newest = savedAt(USER_ID, "key-3", "2026-11-10T03:00:00Z");
+        savedAt(OTHER_USER_ID, "key-1", "2026-11-10T04:00:00Z");
+        repository.cancelIfWaiting(middle, USER_ID, Instant.now());
+        PageRequest firstPage = PageRequest.of(0, 20, Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")));
+
+        assertEquals(List.of(newest, middle, oldest), ids(queryRepository.findPage(USER_ID, null, firstPage)));
+        assertEquals(List.of(newest, oldest),
+                ids(queryRepository.findPage(USER_ID, ReservationStatus.WAITING, firstPage)));
+        assertEquals(List.of(middle), ids(queryRepository.findPage(USER_ID, ReservationStatus.CANCELED, firstPage)));
+
+        Page<ExchangeReservation> secondOfTwo = queryRepository.findPage(USER_ID, null,
+                PageRequest.of(1, 2, Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"))));
+        assertEquals(List.of(oldest), ids(secondOfTwo));
+        assertEquals(3, secondOfTwo.getTotalElements());
+    }
+
+    private UUID savedAt(UUID userId, String key, String createdAt) {
+        UUID id = repository.save(reservation(userId, key)).getId();
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_reservations SET created_at = ? WHERE reservation_id = ?",
+                Timestamp.from(Instant.parse(createdAt)), id);
+        return id;
+    }
+
+    private static List<UUID> ids(Page<ExchangeReservation> page) {
+        return page.getContent().stream().map(ExchangeReservation::getId).toList();
     }
 
     /** 체결 상태와 주문 연결은 함께 기록된다: 주문 없이 EXECUTED가 되거나, WAITING에 주문이 붙을 수 없다 */
