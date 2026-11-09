@@ -136,7 +136,8 @@ function table(r, title) {
         `  요청 ${r.requests}건 | 성공 TPS ${r.successTps} | 실패율 ${r.failureRate}%`,
         `  응답(ms) 평균 ${r.latencyMs.avg} | P50 ${r.latencyMs.p50} | P95 ${r.latencyMs.p95} | P99 ${r.latencyMs.p99} | 최대 ${r.latencyMs.max}`,
         `  상태 성공 ${r.statusCounts.ok} | 4xx ${r.statusCounts['4xx']} | 5xx ${r.statusCounts['5xx']} | 응답 없음 ${r.statusCounts.noResponse}`,
-        `  1초 초과 ${r.slowOver1s}` + (r.staleResponses !== undefined ? ` | 오래된 환율 응답 ${r.staleResponses}` : ''),
+        `  1초 초과 ${r.slowOver1s}` + (r.staleResponses !== undefined ? ` | 오래된 환율 응답 ${r.staleResponses}` : '')
+            + (r.incompleteResponses !== undefined ? ` | 불완전 응답 ${r.incompleteResponses}` : ''),
         '',
     ].join('\n');
 }
