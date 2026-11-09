@@ -116,7 +116,7 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 
 ### entry_type 허용 값
 
-`CHARGE_OUT`, `CHARGE_IN`, `PAYMENT_OUT`, `PAYMENT_IN`, `PAYMENT_REFUND_OUT`, `PAYMENT_REFUND_IN`, `EXCHANGE_OUT`, `EXCHANGE_IN`, `EXCHANGE_FEE`, `TRANSFER_OUT`, `TRANSFER_IN` (11개, `EntryType` enum과 V5 CHECK가 같음).
+`CHARGE_OUT`, `CHARGE_IN`, `PAYMENT_OUT`, `PAYMENT_IN`, `PAYMENT_REFUND_OUT`, `PAYMENT_REFUND_IN`, `EXCHANGE_OUT`, `EXCHANGE_IN`, `EXCHANGE_FEE`, `TRANSFER_OUT`, `TRANSFER_IN`, `SETTLEMENT_OUT`, `SETTLEMENT_IN`  (13개, `EntryType` enum과 V7 CHECK가 같음).
 
 도메인별 분개(각 서비스의 현재 요청 코드 기준):
 
@@ -129,10 +129,12 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 | 환전(보내는 금액) | `EXCHANGE` | `USER` 지갑(보내는 통화), `EXCHANGE_OUT` | `SYSTEM FX_POSITION`(보내는 통화), `EXCHANGE_OUT` |
 | 환전(수수료) | `EXCHANGE` | `USER` 지갑(보내는 통화), `EXCHANGE_FEE` | `SYSTEM FEE_REVENUE`(보내는 통화), `EXCHANGE_FEE` |
 | 환전(받는 금액) | `EXCHANGE` | `SYSTEM FX_POSITION`(받는 통화), `EXCHANGE_IN` | `USER` 지갑(받는 통화), `EXCHANGE_IN` |
+| 정산 | `SETTLEMENT` | (결제 담당 확인 중), `SETTLEMENT_OUT` | (결제 담당 확인 중), `SETTLEMENT_IN` |
 
 - 환전은 한 거래에 6항목(수수료 0이면 4항목)입니다. 통화별로 차변·대변이 맞습니다.
 - 환불은 `originalTransactionId`에 결제의 원장 거래 ID를 넣습니다.
 - 충전은 원화만 있습니다(`CHARGE_SOURCE` 계정이 KRW뿐).
+- - 정산은 V7에서 참조 유형과 항목 유형만 추가했습니다. 차변·대변 계정은 결제 담당 확인 후 채웁니다.
 
 ### 응답
 
@@ -306,6 +308,7 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 | `V4__seed_exchange_system_accounts.sql` | `FX_POSITION`·`FEE_REVENUE` 세 통화 시스템 계정 |
 | `V5__add_entry_type_check.sql` | entry_type 11개 CHECK(`NOT VALID`) |
 | `V6__add_ledger_transactions_reference_created_index.sql` (+ `.sql.conf`) | 기간 목록 인덱스(`CONCURRENTLY`) |
+| `V7__add_settlement_types.sql` | `referenceType`에 `SETTLEMENT`, entry_type에 `SETTLEMENT_OUT`·`SETTLEMENT_IN` 추가(entry_type은 `NOT VALID` 유지) |
 
 ### 기록은 INSERT만
 
@@ -315,7 +318,8 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 
 ### V5 `NOT VALID`
 
-팀원 로컬 DB에 이름 변경 전 entry_type 값이 남아 있을 수 있어 `NOT VALID`로 추가했습니다. 새로 들어오는 행만 검사하고 기존 행은 검사하지 않습니다. 같은 이유로 앱은 `entryType`을 enum이 아니라 문자열로 저장·조회합니다(옛 값이 남은 행도 읽을 수 있게).
+- 팀원 로컬 DB에 이름 변경 전 entry_type 값이 남아 있을 수 있어 `NOT VALID`로 추가했습니다. 새로 들어오는 행만 검사하고 기존 행은 검사하지 않습니다. 같은 이유로 앱은 `entryType`을 enum이 아니라 문자열로 저장·조회합니다(옛 값이 남은 행도 읽을 수 있게).
+- V7에서 정산 값을 추가할 때도 같은 이유로 `NOT VALID`를 유지했습니다. `referenceType` CHECK는 기존 제약이 이미 검증된 상태이고 새 목록이 기존 값을 모두 포함하므로 검증된 제약으로 다시 만들었습니다.
 
 ### V6 `CONCURRENTLY`
 
