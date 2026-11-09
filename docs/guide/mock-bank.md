@@ -198,7 +198,7 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 | 200 `FAILED` | 업무 거절 확정. 자금 이동 없음 | 실패로 확정. 같은 `requestId` 재전송은 같은 결과 |
 | 409 `BANK_REQUEST_ID_CONFLICT` | `requestId`가 다른 유형 또는 다른 내용의 거래에 이미 쓰임 | 자동 재시도 중단, ERROR 로그 |
 | 400 | 요청 형식 오류 | 재시도해도 같음. 자동 재시도 중단 |
-| 500 | 예상하지 못한 오류 또는 `LOST` 장애 주입 | 결과 모름. 같은 `requestId`로 재전송하거나 [단건 조회](#단건-조회)로 확인 |
+| 500 | 예상하지 못한 오류 또는 `LOST` 장애 주입(헤더·유실 비율) | 결과 모름. 같은 `requestId`로 재전송하거나 [단건 조회](#단건-조회)로 확인 |
 | 읽기 타임아웃·연결 실패 | 은행이 처리했을 수 있음 | 실패로 단정하지 않음. 같은 `requestId` 재전송(한 번만 처리됨) 또는 단건 조회 |
 
 지갑의 실제 분류·복구는 [지갑 가이드](wallet-service.md#결과-모름과-복구)에 있습니다.
@@ -283,6 +283,32 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 
 충전 흐름에서 지갑이 첫 출금에만 이 헤더를 붙이는 방식은 [지갑 가이드](wallet-service.md#장애-주입)에 있습니다.
 
+### 출금 응답 유실 비율
+
+부하 측정에서 응답 유실을 일정 비율로 섞을 때 씁니다. 헤더 없이, 설정한 비율만큼 출금 응답을 처리·커밋 후 500으로 바꿉니다. 헤더 방식과 마찬가지로 prod 프로필에서는 비활성입니다(필터·설정 빈을 만들지 않으므로 값이 있어도 무시).
+
+| 설정 | 기본 | 범위 |
+|---|---|---|
+| `mock-bank.fault.withdrawal-lost-rate` (환경 변수 `MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE`) | `0.0` (끔) | `0.0`~`1.0`, 범위 밖이면 기동 실패 |
+
+헤더 방식과 적용 범위가 다릅니다.
+
+| | `Mock-Fault` 헤더 | 유실 비율 |
+|---|---|---|
+| 대상 경로 | POST 전체(출금·환불) | `POST /internal/v1/bank/withdrawals`만 |
+| 대상 응답 | 원래 응답 상태와 관계없이(400·409·`FAILED` 포함) | 2xx만(성공, 업무 실패 `FAILED`). 400·409는 원래 응답 |
+| 같은 `requestId` 재요청 | 헤더 없이 보내면 기존 결과(200) | **재요청에도 비율 적용.** 재시도 응답이 유실되는 상황까지 재현 |
+| 동시 사용 | | 요청에 헤더가 있으면 비율 판정을 하지 않고 헤더 동작만 |
+
+- 유실시킨 요청은 WARN 로그(`requestId`)를 남기고, 카운터 `mock.bank.fault.withdrawal.lost.rate`(Prometheus `mock_bank_fault_withdrawal_lost_rate_total`)를 올립니다. 헤더 `LOST`는 세지 않습니다.
+- 응답 본문은 헤더 `LOST`와 같습니다.
+- 재요청에도 적용되므로, 비율이 높으면 같은 충전이 연속으로 유실될 수 있습니다. 지갑은 결과 모름을 5회 재시도한 뒤 `MANUAL_REVIEW`로 넘깁니다(10%면 5회 연속 유실 확률 10만분의 1).
+
+```bash
+# 측정할 때 Mock 은행 실행 인자에 추가
+--mock-bank.fault.withdrawal-lost-rate=0.1
+```
+
 ## 오류 응답
 
 | 상태 | 코드 | 상황 |
@@ -291,7 +317,7 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 | 404 | `BANK_TRANSACTION_NOT_FOUND` | 단건 조회에서 `requestId` 기록 없음 |
 | 404 | `COMMON_NOT_FOUND` | 없는 경로 |
 | 409 | `BANK_REQUEST_ID_CONFLICT` | 같은 `requestId`로 다른 유형 또는 다른 내용의 거래가 이미 있음 |
-| 500 | `COMMON_INTERNAL_SERVER_ERROR` | 예상하지 못한 오류, `Mock-Fault: LOST` |
+| 500 | `COMMON_INTERNAL_SERVER_ERROR` | 예상하지 못한 오류, `Mock-Fault: LOST`, 출금 응답 유실 비율 |
 
 업무 거절은 이 표에 없습니다. 200 + `FAILED` + [실패 코드](#실패-코드)입니다.
 
@@ -331,13 +357,16 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 ./gradlew :mock-bank:test
 ```
 
-통합 테스트 두 개는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `.env`나 로컬 compose DB는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
+Testcontainers 통합 테스트는 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `.env`나 로컬 compose DB는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
 
 | 테스트 | 범위 |
 |---|---|
 | `BankTransactionApiIntegrationTest` | 같은 `requestId` 동시 출금 1회 처리, 업무 거절 `FAILED` 기록·재요청 같은 결과, 예금주 공백 정리, `DELAY`·`LOST`(커밋 후 적용, 재요청은 기존 결과. 지연은 `1s`로 줄여 실행), 형식 오류 400, 다른 유형 `requestId` 409, 같은 `requestId` 다른 내용(출금 금액·계좌, 환불 금액·원거래, 계좌 없음·원거래 없음 거절 포함) 409·같은 내용 200, 동시 환불 1건만 성공·나머지 `ALREADY_REFUNDED`, 환불 재요청·업무 거절, 플랫폼 잔액 부족 환불 `INSUFFICIENT_BALANCE`(잔액 그대로), 같은 계좌 출금·환불 동시 처리 교착 없음, 단건 조회 |
 | `BankFaultInjectionProdProfileTest` | `application-prod.yml` + prod 프로필에서 `Mock-Fault: LOST`를 무시하고 201, 장애 주입 필터 빈 없음 |
 | `BankTransactionQueryApiIntegrationTest` | 단건 필드·환불 원거래·실패 코드, 404, 반복 조회해도 거래 불변, `[from, to)` 경계, 빈 목록, 같은 시각 ID 정렬, 페이지 이어 받기, 오프셋 시각 UTC 해석, `sort` 무시, 입력 오류 400, `size` 기본 20·최대 100, offset 한도, 마이크로초 올림, 목록 응답에 계좌 정보 없음 |
+| `BankWithdrawalLostRateIntegrationTest` | 비율 1.0: 성공·`FAILED` 모두 500(본문은 헤더 `LOST`와 같음), 단건 조회로 저장 확인, 같은 `requestId` 재요청도 500, 400·409는 원래 응답, 헤더 `DELAY`·`LOST`는 기존 동작이며 카운터 증가 없음, 환불 미적용, 카운터는 유실 건수만큼 증가 |
+| `BankWithdrawalLostRatePropertiesTest` | Docker 불필요. -0.1·1.1 기동 실패, 0·1.0 기동 성공, 비율 0이면 필터를 건너뜀, 헤더 요청·환불·조회에는 미적용 |
+| `BankWithdrawalLostRateProdProfileTest` | prod 프로필에서 범위 밖 값(5)이어도 기동, 출금 201, 필터·설정 빈 없음 |
 
 ## 고려 중
 
@@ -346,5 +375,4 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 | 항목 | 현재 동작 | 정할 것 |
 |---|---|---|
 | `created_at` 인덱스 | `bank_transactions`에 `created_at` 인덱스가 없음. 기간 목록은 인덱스 없이 조회함 | 데이터 규모에 따라 `(created_at, id)` 인덱스 추가 |
-| 장애 비율 | 헤더를 붙인 요청에만 장애. 확률·비율로 섞는 설정 없음 | 부하 테스트용 비율 주입 필요 여부 |
 | 계좌 관리 | 잔액·상태를 바꾸는 API 없음(시드 SQL로만 준비) | 테스트 데이터 초기화·추가 방법 |
