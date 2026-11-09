@@ -39,7 +39,7 @@ import org.hibernate.type.SqlTypes;
  *
  * JPA로는 INSERT만 합니다. 모든 컬럼이 {@code updatable = false}라 엔티티 값을 바꿔도 UPDATE되지 않습니다.
  * 원장 결과 반영처럼 상태가 바뀌는 일은 저장소의 조건부 UPDATE({@code WHERE status = 'PROCESSING'})로만 합니다.
- * 같은 주문을 여러 흐름(첫 요청·재요청·복구 스케줄러)이 동시에 반영해도 한 번만 바뀌게 하려는 것입니다.
+ * 같은 주문을 여러 흐름(첫 신청·복구 스케줄러·관리자 처리)이 동시에 반영해도 한 번만 바뀌게 하려는 것입니다.
  *
  * 테이블과 제약은 Flyway 마이그레이션(V3__create_exchange_orders.sql)이 관리합니다.
  */

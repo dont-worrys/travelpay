@@ -20,11 +20,12 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionOperations;
 
 /**
- * PROCESSING 주문을 원장에 보내고 결과를 반영합니다. 신청, 같은 멱등 키 재요청, 복구 스케줄러가 모두 이 클래스를 거칩니다.
+ * PROCESSING 주문을 원장에 보내고 결과를 반영합니다. 첫 신청과 복구 스케줄러가 이 클래스를 거칩니다.
+ * 같은 멱등 키 재요청은 원장을 부르지 않고 저장된 상태로 응답합니다(#216).
  *
  * 순서: 선점(확인 횟수 비교 + 유효 기간) → 신청 후 24시간 확인 → 원장 POST(트랜잭션 밖) → 결과 반영과 이력(짧은 트랜잭션).
  * 선점에 성공한 흐름만 원장을 부르고, 선점은 CLAIM_LEASE 동안 유효합니다. 그래서 한 흐름이 원장 응답을 기다리는 동안
- * 다른 흐름(재요청, 다른 서버의 스케줄러)은 원장을 부르지 않고 현재 상태를 돌려줍니다.
+ * 다른 흐름은 원장을 부르지 않고 현재 상태를 돌려줍니다.
  * 원장은 같은 reference를 한 번만 기록하므로, 결과를 모를 때는 같은 요청을 다시 보내기만 하면 됩니다.
  */
 @Slf4j
@@ -40,6 +41,12 @@ public class ExchangeOrderLedgerProcessor {
      * 읽기 타임아웃은 데이터가 끊긴 시간 기준이라 전체 호출 시간의 상한은 아니다. 그래서 이 유효 기간은 중복 호출을 줄이는
      * 장치(best-effort)이고, 넘겨서 겹치더라도 원장 멱등성과 결과 반영의 조건부 UPDATE가 정합성을 지킨다.
      * 복구 대기 시간(최소 30초)보다는 짧아 복구 스케줄러에는 영향이 없다.
+     *
+     * 지금 부르는 두 곳은 이 유효 기간에 기대지 않는다. 첫 신청은 확인 기록이 없는 새 주문이고, 복구 스케줄러는 대기 시간이
+     * 지난 주문만 고르며 스케줄러끼리는 확인 횟수 비교가 막는다. 이 기간이 막던 경우는 "다른 흐름이 선점한 뒤 최신 상태를 읽고
+     * 곧바로 다시 원장을 부르는" 재요청(#79)이었고, #216에서 재요청이 원장을 부르지 않게 바뀌었다.
+     * 그래도 남겨 두는 이유: 앞으로 주문을 읽고 바로 이 처리기를 부르는 곳(예약 환전 실행, 관리자 재확인 등)이 생겨도
+     * 원장 호출이 겹치지 않게 하려는 안전장치다. 동작·비용 부담이 없다.
      */
     static final Duration CLAIM_LEASE = Duration.ofSeconds(10);
 
@@ -51,7 +58,8 @@ public class ExchangeOrderLedgerProcessor {
 
     /**
      * PROCESSING 주문을 원장에 보내고 최신 주문을 돌려줍니다. PROCESSING이 아니면 그대로 돌려줍니다.
-     * 다른 흐름이 먼저 선점했거나 결과를 모르면 PROCESSING인 주문을 돌려주고, 다음 재요청이나 복구 스케줄러가 이어서 처리합니다.
+     * 다른 흐름이 먼저 선점했거나 결과를 모르면 PROCESSING인 주문을 돌려주고, 복구 스케줄러가 이어서 처리합니다.
+     * 부르는 곳은 첫 신청과 복구 스케줄러입니다. 같은 멱등 키 재요청은 원장을 부르지 않습니다.
      */
     public ExchangeOrder process(ExchangeOrder order) {
         if (order.getStatus() != ExchangeOrderStatus.PROCESSING) {

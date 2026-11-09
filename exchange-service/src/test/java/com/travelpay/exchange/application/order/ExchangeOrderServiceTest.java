@@ -119,8 +119,8 @@ class ExchangeOrderServiceTest {
         assertSame(existing, service.place(command(quote.getId(), WALLET_ID)));
         verifyNoInteractions(quoteRepository, walletBalanceReader);
         verify(orderRepository, never()).save(any());
-        // PROCESSING인 기존 주문은 원장에 다시 보낸다 (확정된 주문은 처리기가 그대로 돌려준다)
-        verify(ledgerProcessor).process(existing);
+        // PROCESSING이어도 재요청은 원장을 부르지 않는다. 결과는 복구 스케줄러가 반영한다
+        verify(ledgerProcessor, never()).process(any());
     }
 
     @Test
@@ -238,6 +238,8 @@ class ExchangeOrderServiceTest {
 
         assertSame(winner, service.place(command(quote.getId(), WALLET_ID)));
         verify(historyRepository, never()).save(any());
+        // 먼저 저장한 요청이 원장을 부르므로, 진 요청은 원장을 부르지 않고 그 주문으로 응답한다
+        verify(ledgerProcessor, never()).process(any());
     }
 
     @Test

@@ -66,7 +66,7 @@ public class ExchangeOrderService {
      * 환전을 신청하고 원장 처리까지 마친 주문을 돌려줍니다. 결과를 모르면 PROCESSING인 주문입니다.
      * 같은 멱등 키 재요청은 견적·지갑 확인보다 먼저 찾아, 같은 신청이면 기존 주문을 돌려줍니다.
      * 견적이 나중에 사라지거나 만료돼도 이미 만든 주문은 재요청에 그대로 응답하기 위해서입니다.
-     * 기존 주문이 아직 PROCESSING이면 원장에 다시 보내 결과를 반영합니다.
+     * 재요청은 원장을 부르지 않고 저장된 상태로 응답합니다. 아직 PROCESSING이면 복구 스케줄러가 결과를 반영합니다.
      *
      * @throws BusinessException 멱등 키 형식 오류(400), 견적 없음(404), 견적 만료·이미 사용·멱등 키 재사용(409),
      *                           지갑 없음(404), 지갑 사용 불가(409), 지갑 확인 실패(503)
@@ -153,13 +153,15 @@ public class ExchangeOrderService {
 
     /**
      * 같은 멱등 키로 이미 만든 주문입니다. 처음과 같은 견적·지갑이면 그 주문을, 다르면 409입니다.
-     * 아직 PROCESSING이면 원장에 다시 보냅니다. 확정된 주문은 원장을 부르지 않고 그대로 돌려줍니다.
+     * 원장은 부르지 않고 저장된 상태 그대로 돌려줍니다. PROCESSING이면 202로 응답하고, 결과는 복구 스케줄러가 반영합니다.
+     * 원장을 부르는 곳을 첫 신청과 복구 스케줄러로 줄여, 재요청과 다른 흐름이 같은 주문으로 원장을 부르는 경쟁을 없앱니다.
+     * 원장이 느려 사용자가 다시 누를수록 원장 호출이 늘어나는 일도 막습니다. (송금 재요청과 같은 방식)
      */
     private ExchangeOrder replay(ExchangeOrder existing, PlaceOrderCommand command) {
         if (!existing.isSameRequest(command.quoteId(), command.walletId())) {
             throw new BusinessException(ExchangeOrderErrorCode.IDEMPOTENCY_KEY_REUSED);
         }
-        return processLedger(existing);
+        return existing;
     }
 
     /**
