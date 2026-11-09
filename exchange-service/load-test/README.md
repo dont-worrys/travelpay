@@ -302,6 +302,7 @@ SCRIPT=quote-issue.js ./measure-compare.sh quote quote-db=../../../travelpay-quo
 
 - `measure.sh`는 견적 발급을 잴 때 측정 Redis가 1GB보다 작으면 시작하지 않습니다. 값이 다른 셸에서 이어 재면(환경 변수 없음) compose가 Redis를 기본값으로 다시 만들어 막힙니다.
 - 회차마다 Redis가 키를 지웠거나(evicted) 쓰기를 거절했으면(OOM) 무효로 멈춥니다. 환율 캐시 쓰기가 거절되면 환율을 DB에서 읽게 되어 측정이 공정하지 않기 때문입니다. HTTP 오류로는 드러나지 않아 Redis 통계로 확인합니다.
-- quote-redis는 발급에 DB 연결을 쓰지 않습니다. 그래도 `연결 얻은 횟수`는 0이 아니라 수집기(5초마다)·복구 스케줄러·지표 갱신(30초마다)이 쓴 만큼 남습니다(환율 조회 v1과 비슷한 수준).
+- quote-redis는 환율이 캐시에 있으면(hit) 발급에 DB 연결을 쓰지 않습니다. 캐시에 없으면(miss·error) `ExchangeRateQueryService.findLatest`가 환율을 DB에서 읽어 그만큼 연결을 씁니다. 요약 표의 `캐시 hit %`가 100%인지 함께 봅니다.
+- 그래서 `연결 얻은 횟수`는 0이 아니라, 캐시 miss 몫과 수집기(5초마다)·복구 스케줄러·지표 갱신(30초마다)이 쓴 만큼 남습니다(환율 조회 v1과 비슷한 수준).
 - 견적 발급 요약 표에는 저장된 견적 수 / 성공 응답 수와 측정 Redis 사용 메모리(회차 중 최대)가 붙습니다.
 - 환율 조회를 다시 잴 때는 `unset MEASURE_REDIS_MAXMEMORY MEASURE_REDIS_POLICY` 후 `docker compose up -d --force-recreate --wait measure-redis`로 기본값(128MB·allkeys-lru)으로 돌립니다.

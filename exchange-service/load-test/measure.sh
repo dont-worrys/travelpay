@@ -130,7 +130,8 @@ rate_selects=$(psql_q -c "SELECT coalesce(sum(calls), 0) FROM public.pg_stat_sta
 quote_rows=$(psql_q -F ' ' -c "SELECT count(*), count(*) FILTER (WHERE created_at >= to_timestamp(${measure_from}) AND created_at < to_timestamp(${measure_to})) FROM exchange_service.exchange_quotes")
 quote_db=${quote_rows% *}
 quote_measure=${quote_rows#* }
-quote_redis=$(redis_q --scan --pattern 'exchange:quote:*' --count 1000 | wc -l | tr -d ' ')
+# SCAN은 같은 키를 두 번 돌려줄 수 있어(Redis 문서) 중복을 지운 뒤 센다. 그대로 세면 검산이 맞는 측정을 무효로 볼 수 있다
+quote_redis=$(redis_q --scan --pattern 'exchange:quote:*' --count 1000 | sort -u | wc -l | tr -d ' ')
 quote_all=$((quote_db + quote_redis))
 
 # Redis 상태: 측정이 끝난 시점의 메모리(견적 키는 10분 동안 남아 있어 이때가 가장 큼)와 이번 측정 동안 지운 키·거절한 쓰기
