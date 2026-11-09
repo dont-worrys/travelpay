@@ -101,7 +101,8 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 | `--concurrency` | (필수) | 지갑 SAGA 컨슈머 동시성(메타데이터) |
 | `--amount` | 10000 | 충전 금액(원, KRW). 최대값 검증 없음 |
 | `--pre-vus` / `--max-vus` | max(20, rate) / max(100, rate×4) | `dropped_iterations`가 나오면 `--max-vus`를 올립니다 |
-| `--drain-timeout` | 600 | k6 종료 후 모든 충전 종결을 기다릴 최대 초 |
+| `--drain-timeout` | 600 | k6 종료 후 모든 충전 종결을 기다릴 최대 초. 장애 측정은 900 이상 권장 |
+| `--fault-rate` | 0.0 | Mock 은행 출금 응답 유실 비율(메타데이터, 0.0~1.0). 실제 비율은 Mock 은행 실행 인자로 넣음 |
 
 ### 측정 절차 (비교할 조건마다)
 
@@ -109,6 +110,30 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 2. **예열 1회**: `python measure.py warmup --count 100 --rate <측정과 같은 값> --concurrency <값>` — JIT·커넥션 풀·Kafka 할당을 데우는 용도이며 **결과는 버립니다**.
 3. **같은 조건으로 측정 3회** (`c1-1`, `c1-2`, `c1-3`처럼 라벨만 바꿈). 매번 종료 코드 0인지 확인합니다.
 4. 3회의 **중앙값**을 기록합니다(완료 처리량, 완료 지연 P50·P95, 접수 P50·P95, 서비스별 avgMs).
+
+### 장애 측정 (출금 응답 유실)
+
+Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로 바꿉니다(같은 requestId 재요청에도 적용). 지갑은 결과 모름으로 두고, 복구 스케줄러가 같은 requestId로 다시 보냅니다(10초 주기, 30초부터 두 배 백오프, 5회 후 `MANUAL_REVIEW`).
+
+1. Mock 은행을 실행 인자 `--mock-bank.fault.withdrawal-lost-rate=<비율>`(예: `0.1`)로 **재기동**합니다(`prod` 프로필이 아니어야 함). 지갑은 측정할 조건의 동시성과 Outbox batch-size로 띄웁니다(예: `--travelpay.wallet.charge.saga.consumer.concurrency=3`, `--travelpay.wallet.outbox.publisher.batch-size=200`).
+2. **비율이 적용됐는지 직접 확인합니다.** 출금을 몇 번 보내 500이 섞여 나오면 적용된 것입니다. Git Bash에서는 한글 본문이 깨질 수 있어 UTF-8 파일로 보냅니다(시드 계좌에서 1원씩 출금되며 측정 계좌와는 무관).
+
+   ```bash
+   for i in $(seq 1 10); do
+     id=$(powershell -Command "[guid]::NewGuid().ToString()" | tr -d '\r')
+     printf '{"requestId":"%s","bankCode":"004","accountNumber":"12340101234567","holderName":"유재석","amount":1}' "$id" > body.json
+     curl -s -o /dev/null -w "%{http_code} " -X POST localhost:8090/internal/v1/bank/withdrawals \
+       -H 'Content-Type: application/json; charset=UTF-8' --data-binary @body.json
+   done; echo; rm body.json
+   ```
+
+3. `python measure.py f10 --count 1000 --rate 50 --concurrency 3 --fault-rate 0.1 --drain-timeout 900`
+   - `--fault-rate`는 Mock 은행 실행 인자와 같은 값으로 넣습니다(결과에 남기는 값).
+   - `--drain-timeout`은 900 이상을 권장합니다. 응답이 계속 유실되면 30·60·120·240초 백오프 뒤 `MANUAL_REVIEW`가 되므로 종결까지 약 7~8분 걸릴 수 있습니다.
+   - **처리 한도보다 느린 속도로 넣습니다.** 큐에서 30초 넘게 기다린 충전(`REQUESTED`)도 복구 스케줄러가 처리해 `recoveredCharges`에 섞이기 때문입니다. 예: 동시성 3, Outbox batch-size 200이면 `--rate 50`.
+4. 장애 측정 뒤에는 Mock 은행의 유실 비율을 **0으로 되돌리고 재기동**합니다. 남아 있으면 다음 기준선 측정이 종료 코드 1이 됩니다(아래 실패 조건).
+
+장애 측정에서 `charges.completionTps`는 복구 대기 시간이 구간에 포함되어 처리량으로 해석하지 않습니다. 볼 값은 `fault` 블록과 출금 정합성입니다. 예: 출금 호출 26번, 은행 출금 성공 20건이면 재시도 6번이 중복 출금으로 이어지지 않은 것입니다.
 
 ### measure.py가 하는 일
 
@@ -147,9 +172,27 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 | `db.outboxPending` | `outbox_events.status='PENDING'` | Outbox 미발행 건수 평균·최대 |
 | `bankConsistency` | `mock_bank.bank_transactions`, `bank_accounts` | 위 세 등식과 위반 목록 |
 | `reconciliation` | 대사 API | `summary`(status, targetCount, matchedCount, mismatchCount, unverifiableCount …), `elapsedSeconds`, 어긋남 목록 |
+| `fault` | 아래 표 | 장애(응답 유실) 지표. 기존 지표·실패 조건과 별개로 추가 |
 | `failures` | | 종료 코드 1의 이유 |
 
 서비스 지표 구간은 k6 시작 ~ 마지막 종결 시각입니다(접수 뒤에도 SAGA가 은행·원장을 부르므로).
+
+`fault` 블록:
+
+| 값 | 출처 | 뜻 |
+| --- | --- | --- |
+| `faultRate` | `--fault-rate` | 측정에 넣은 유실 비율(메타데이터) |
+| `lostResponses` | mock-bank `mock_bank_fault_withdrawal_lost_rate_total` | 서비스 지표와 같은 구간의 증가분. **응답 수**라, 같은 충전의 재시도 응답도 유실될 수 있어 유실된 충전 수보다 클 수 있음. 경계 표본에 카운터가 없으면 `null` |
+| `bankWithdrawalCalls` | `services.mock-bank."POST /internal/v1/bank/withdrawals".calls` | 측정 구간 은행 출금 호출 수(재시도 포함) |
+| `acceptedCharges` | `charges.accepted` | 측정 접수 건수. `bankWithdrawalCalls`와의 차이는 재시도분이며 기록만 하고 실패로 보지 않음 |
+| `recoveredCharges` | `charge_status_history.trace_id` | 측정 충전 중 상태 이력에 `trace_id`가 `recovery-`로 시작하는 행이 하나 이상 있는 충전 수 = **복구 스케줄러가 한 번 이상 처리한 충전**. 복구 성공 여부는 기존 실패 조건(`MANUAL_REVIEW` 등)이 판정 |
+| `recoveredLatencyMs` | `charge_status_history` | `recoveredCharges` 중 `COMPLETED` 이력이 있는 충전의 `COMPLETED` 기록 시각 − `created_at` P50·P95·건수 (`charges.completionLatencyMs`와 같은 계산, 완료 이력의 `trace_id`는 보지 않음) |
+| `definition` | | `recoveredCharges` 정의 문구 |
+
+`recoveredCharges`를 읽을 때:
+
+- 복구 스케줄러는 상태가 `REQUESTED`·`BANK_PROCESSING`·`CREDIT_PROCESSING`·`REFUND_PROCESSING`이고 `updated_at`이 30초(× 두 배 백오프) 넘게 지난 충전을 집어 갑니다. 응답 유실이 없어도 큐에서 30초 넘게 기다린 충전이 섞일 수 있으므로, `--fault-rate 0` 측정에서 0이 아니면 큐 적체로 봅니다.
+- 상태 이력은 상태가 바뀔 때만 남습니다. 복구 재전송이 다시 500을 받으면(결과 모름, `attempt_count`만 +1) 이력이 없고, 이후 성공 전이나 `MANUAL_REVIEW` 전이 때 `recovery-` 행이 남습니다.
 
 **종료 코드 1** (그 측정은 원인을 확인하기 전까지 기준값으로 쓰지 않습니다):
 
@@ -159,6 +202,7 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 - DB 표본: 수집 실패(`docker exec` 0이 아닌 종료 코드 포함, `db.error`), 수집이 끝나지 않음, 측정 구간 표본 0개
 - 출금 정합성 위반
 - 대사: 실행 실패(HTTP 200 아님), 응답 필드 누락, 대상 건수 < 측정 접수 건수, status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상
+- 장애 설정: `--fault-rate` > 0인데 유실 카운터가 수집되지 않음 또는 `lostResponses` = 0(Mock 은행 실행 인자 확인), `--fault-rate` = 0인데 `lostResponses` > 0(Mock 은행 유실 비율이 남아 있음)
 
 k6 결과 파일이 없거나 JSON이 아니거나 필수 필드가 빠지면 지표를 만들지 않고 바로 멈춥니다(종료 코드 1). psql 조회 실패도 같습니다.
 

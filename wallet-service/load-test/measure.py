@@ -4,7 +4,7 @@
 
 사용:
   python measure.py <LABEL> --count 1000 --rate 50 --concurrency 1 [--amount 10000] [--pre-vus N] [--max-vus N]
-                    [--drain-timeout 600]
+                    [--drain-timeout 600] [--fault-rate 0.0]
 결과: results/<LABEL>-c<CONCURRENCY>.json(k6) + results/<LABEL>-c<CONCURRENCY>-metrics.json(서버·DB 지표, 정합성, 대사)
 
 --concurrency는 결과에 남기는 값입니다. 실제 동시성은 지갑 실행 인자로 바꾸고 재기동합니다(스크립트가 바꾸지 않음).
@@ -47,6 +47,13 @@ RECONCILIATION_URL = f"{WALLET_URL}/api/v1/admin/charges/reconciliations"
 RECONCILIATION_FIELDS = ("runId", "status", "targetCount", "matchedCount", "mismatchCount", "unverifiableCount")
 K6_FIELDS = ("requests", "droppedIterations", "errorResponses", "latencyMs", "statusCounts")
 K6_STATUS_KEYS = ("202", "200", "4xx", "5xx", "noResponse")
+# Mock 은행 출금 응답 유실 카운터(비율 주입분)와 복구 스케줄러가 상태 이력에 남기는 trace_id 접두어
+LOST_COUNTER = "mock_bank_fault_withdrawal_lost_rate_total"
+RECOVERY_TRACE_PREFIX = "recovery-"
+WITHDRAWAL_PATH = "POST /internal/v1/bank/withdrawals"
+RECOVERED_DEFINITION = ("recoveredCharges = 측정 충전 중 상태 이력 trace_id가 recovery-로 시작하는 행이 하나 이상 있는 충전 수"
+                        " (복구 스케줄러가 한 번 이상 처리한 충전, 큐에서 30초 넘게 기다린 충전 포함)."
+                        " 복구 성공 여부는 기존 실패 조건으로 판정")
 
 
 def iso(moment):
@@ -102,6 +109,10 @@ class ServiceSampler(threading.Thread):
             for name, url in SERVICES.items():
                 samples = scrape(url)
                 snapshot[name] = summarize_scrape(samples) if samples is not None else None
+                if name == "mock-bank" and samples is not None:
+                    lost = [value for metric, _, value in samples if metric == LOST_COUNTER]
+                    if lost:
+                        snapshot[name]["faultLost"] = sum(lost)
             self.samples.append((started, snapshot))
             self.stop.wait(max(0.0, 1.0 - (time.time() - started)))
 
@@ -280,6 +291,48 @@ def charge_metrics(data, since):
     }
 
 
+# ---- 장애(응답 유실) 지표 ----
+
+def lost_responses(samples, start, end):
+    """서비스 지표와 같은 구간 경계 표본(nearest)의 유실 카운터 차이. 경계 표본에 카운터가 없으면 None"""
+    window = [sample for sample in samples if start <= sample[0] <= end]
+    if not window:
+        return None
+    before = (nearest(samples, start)[1].get("mock-bank") or {}).get("faultLost")
+    after = (nearest(samples, end)[1].get("mock-bank") or {}).get("faultLost")
+    if before is None or after is None:
+        return None
+    return int(after - before)
+
+
+def fault_metrics(data, since, fault_rate, samples, start, end, charges, services):
+    measured = measured_sql(data, since)
+    # 복구 처리 충전 수, 그중 COMPLETED 이력이 있는 충전의 완료 지연(완료 이력 trace_id는 조건에 넣지 않음)
+    recovered, p50, p95, completed_count = psql(
+        f"WITH m AS ({measured}),"
+        " r AS (SELECT m.id, m.created_at FROM m WHERE EXISTS (SELECT 1 FROM wallet_service.charge_status_history h"
+        f"        WHERE h.charge_id = m.id AND h.trace_id LIKE {sql_text(RECOVERY_TRACE_PREFIX + '%')}))"
+        " SELECT (SELECT count(*) FROM r),"
+        " percentile_cont(0.5) WITHIN GROUP (ORDER BY ms), percentile_cont(0.95) WITHIN GROUP (ORDER BY ms), count(*)"
+        " FROM (SELECT extract(epoch FROM (min(h.created_at) - r.created_at)) * 1000 AS ms"
+        "       FROM r JOIN wallet_service.charge_status_history h ON h.charge_id = r.id"
+        "       WHERE h.to_status = 'COMPLETED' GROUP BY r.id, r.created_at) c;")[0]
+    withdrawals = (services.get("mock-bank") or {}).get(WITHDRAWAL_PATH) or {}
+    return {
+        "faultRate": fault_rate,
+        "lostResponses": lost_responses(samples, start, end),
+        "bankWithdrawalCalls": withdrawals.get("calls", 0),
+        "acceptedCharges": charges["accepted"],
+        "recoveredCharges": int(recovered),
+        "recoveredLatencyMs": {
+            "count": int(completed_count),
+            "p50": round(float(p50), 1) if p50 else None,
+            "p95": round(float(p95), 1) if p95 else None,
+        },
+        "definition": RECOVERED_DEFINITION,
+    }
+
+
 # ---- 출금 정합성 (mock-bank DB) ----
 
 def bank_consistency(data, since, statuses, balance_before):
@@ -354,9 +407,13 @@ def main():
     parser.add_argument("--pre-vus", type=int, help="기본 max(20, rate)")
     parser.add_argument("--max-vus", type=int, help="기본 max(100, rate × 4)")
     parser.add_argument("--drain-timeout", type=int, default=600, help="k6 종료 후 모든 충전 종결을 기다릴 최대 초")
+    parser.add_argument("--fault-rate", type=float, default=0.0,
+                        help="Mock 은행 출금 응답 유실 비율 0.0~1.0 (결과에 남기는 값, 실제 비율은 Mock 은행 실행 인자)")
     args = parser.parse_args()
     if args.count < 1 or args.rate < 1 or args.amount < 1:
         raise SystemExit("--count·--rate·--amount는 1 이상입니다.")
+    if not 0.0 <= args.fault_rate <= 1.0:
+        raise SystemExit("--fault-rate는 0.0~1.0입니다.")
     pre_vus = args.pre_vus or max(20, args.rate)
     max_vus = args.max_vus or max(100, args.rate * 4)
 
@@ -424,6 +481,8 @@ def main():
         "services": service_metrics(service_sampler.samples, window_start, window_end),
         "db": db_metrics(db_sampler, window_start, window_end),
     }
+    metrics["fault"] = fault_metrics(data, since, args.fault_rate, service_sampler.samples, window_start, window_end,
+                                     charges, metrics["services"])
 
     reasons = []
     if summary["errorResponses"]:
@@ -457,6 +516,13 @@ def main():
     latency_count = (charges.get("completionLatencyMs") or {}).get("count", 0)
     if completed != latency_count:
         reasons.append(f"완료 지연 집계 {latency_count}건 ≠ COMPLETED {completed}건 (상태 이력 누락)")
+    lost = metrics["fault"]["lostResponses"]
+    if args.fault_rate > 0 and lost is None:
+        reasons.append(f"응답 유실 카운터 수집 안 됨 ({LOST_COUNTER})")
+    elif args.fault_rate > 0 and lost == 0:
+        reasons.append("응답 유실 0건. Mock 은행 실행 인자의 유실 비율 확인")
+    elif args.fault_rate == 0 and lost:
+        reasons.append(f"기준선 측정에 응답 유실 {lost}건. Mock 은행의 유실 비율이 남아 있음")
 
     if drain_seconds is None:
         reasons.append(f"{args.drain_timeout}초 안에 종결되지 않은 충전이 있음 (출금 정합성·대사 생략)")
@@ -507,6 +573,12 @@ def print_brief(m):
           f" | 종결 대기 {m['drainSeconds']}초")
     statuses = ", ".join(f"{status} {entry['count']}" for status, entry in c["statuses"].items())
     print(f"  상태 {statuses}")
+    f = m.get("fault") or {}
+    if f.get("faultRate") or f.get("lostResponses"):
+        recovered = f.get("recoveredLatencyMs") or {}
+        print(f"  장애 비율 {f.get('faultRate')} | 응답 유실 {f.get('lostResponses')} | 출금 호출 {f.get('bankWithdrawalCalls')}"
+              f" | 접수 {f.get('acceptedCharges')} | 복구 처리 {f.get('recoveredCharges')}건"
+              f" (완료 지연 P50 {recovered.get('p50')}ms P95 {recovered.get('p95')}ms)")
     rec = (m.get("reconciliation") or {}).get("summary")
     if rec:
         print(f"  대사 {rec.get('status')} 대상 {rec.get('targetCount')} 일치 {rec.get('matchedCount')}"
