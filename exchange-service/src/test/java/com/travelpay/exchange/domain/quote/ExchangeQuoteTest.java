@@ -12,11 +12,11 @@ import com.travelpay.exchange.domain.money.MoneyErrorCode;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import static com.travelpay.exchange.domain.quote.QuoteFixtures.range;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -67,7 +67,8 @@ class ExchangeQuoteTest {
         assertEquals(new BigDecimal("0.01"), quote.getFeeRate());
         assertEquals(USER_ID, quote.getUserId());
         assertEquals(QuoteType.USER, quote.getQuoteType());
-        assertEquals(QuoteStatus.ISSUED, quote.getStatus());
+        assertEquals(NOW, quote.getIssuedAt());
+        assertNotNull(quote.getId());
         assertEquals(NOW.plusSeconds(300), quote.getExpiresAt());
     }
 
@@ -77,14 +78,6 @@ class ExchangeQuoteTest {
 
         assertFalse(quote.isExpired(quote.getExpiresAt().minusMillis(1)));
         assertTrue(quote.isExpired(quote.getExpiresAt()));
-    }
-
-    @Test
-    void usedQuoteIsNotReportedAsExpired() {
-        ExchangeQuote quote = issue(Currency.KRW, Currency.JPY, "100000", JPY);
-        ReflectionTestUtils.setField(quote, "status", QuoteStatus.USED);
-
-        assertFalse(quote.isExpired(quote.getExpiresAt().plusSeconds(60)));
     }
 
     @Test

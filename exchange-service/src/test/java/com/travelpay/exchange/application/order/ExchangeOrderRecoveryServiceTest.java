@@ -98,8 +98,6 @@ class ExchangeOrderRecoveryServiceTest {
         Instant issuedAt = NOW.minusSeconds(120);
         ExchangeQuote quote = OrderFixtures.wonToYenQuote(UUID.randomUUID(),
                 QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), issuedAt);
-        ReflectionTestUtils.setField(quote, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(quote, "createdAt", issuedAt);
         ExchangeOrder order = OrderFixtures.placed(quote, UUID.randomUUID(), "key-" + UUID.randomUUID());
         ReflectionTestUtils.setField(order, "id", UUID.randomUUID());
         ReflectionTestUtils.setField(order, "status", status);

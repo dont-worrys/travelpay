@@ -24,9 +24,9 @@ public final class OrderFixtures {
                 Money.of(Currency.KRW, new BigDecimal("100000")), jpyRate, QuoteFixtures.policy(), issuedAt);
     }
 
-    /** 견적 발급 1분 뒤에 신청한 주문입니다. 견적은 ID와 발급 시각이 있어야 합니다. */
+    /** 견적 발급 1분 뒤에 신청한 주문입니다. */
     public static ExchangeOrder placed(ExchangeQuote savedQuote, UUID walletId, String idempotencyKey) {
         return ExchangeOrder.place(savedQuote, walletId, new IdempotencyKey(idempotencyKey),
-                savedQuote.getCreatedAt().plusSeconds(60));
+                savedQuote.getIssuedAt().plusSeconds(60));
     }
 }

@@ -19,6 +19,7 @@ import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
+import com.travelpay.exchange.domain.quote.QuoteStatus;
 import com.travelpay.exchange.domain.quote.QuoteType;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import org.junit.jupiter.api.Test;
@@ -52,7 +53,7 @@ class ExchangeQuoteControllerTest {
 
     @Test
     void issuesQuoteForCurrentUser() throws Exception {
-        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), false));
+        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), QuoteStatus.ISSUED));
 
         mockMvc.perform(post("/api/v1/exchange-quotes").contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -80,7 +81,7 @@ class ExchangeQuoteControllerTest {
 
     @Test
     void acceptsAmountAsJsonNumber() throws Exception {
-        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), false));
+        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), QuoteStatus.ISSUED));
 
         mockMvc.perform(post("/api/v1/exchange-quotes").contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -144,7 +145,7 @@ class ExchangeQuoteControllerTest {
 
     @Test
     void showsExpiredQuoteAsExpired() throws Exception {
-        when(quoteService.find(USER_ID, QUOTE_ID)).thenReturn(new ExchangeQuoteView(yuanToWon(), true));
+        when(quoteService.find(USER_ID, QUOTE_ID)).thenReturn(new ExchangeQuoteView(yuanToWon(), QuoteStatus.EXPIRED));
 
         mockMvc.perform(get("/api/v1/exchange-quotes/{quoteId}", QUOTE_ID))
                 .andExpect(status().isOk())

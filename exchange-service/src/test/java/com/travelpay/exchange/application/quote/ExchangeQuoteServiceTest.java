@@ -17,6 +17,7 @@ import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
+import com.travelpay.exchange.domain.quote.QuoteStatus;
 import com.travelpay.exchange.domain.quote.QuoteType;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
@@ -24,10 +25,8 @@ import com.travelpay.exchange.domain.rate.RateFreshnessPolicy;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -58,7 +57,7 @@ class ExchangeQuoteServiceTest {
         assertEquals(USER_ID, view.quote().getUserId());
         assertEquals(QuoteType.USER, view.quote().getQuoteType());
         assertEquals(NOW.plusSeconds(300), view.quote().getExpiresAt());
-        assertFalse(view.expired());
+        assertEquals(QuoteStatus.ISSUED, view.status());
         verify(repository).save(view.quote());
     }
 
@@ -106,7 +105,7 @@ class ExchangeQuoteServiceTest {
         ExchangeQuoteView view = service.find(USER_ID, quoteId);
 
         assertSame(expired, view.quote());
-        assertTrue(view.expired());
+        assertEquals(QuoteStatus.EXPIRED, view.status());
     }
 
     @Test

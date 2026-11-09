@@ -320,12 +320,10 @@ class ExchangeOrderServiceTest {
         return new PlaceOrderCommand(USER_ID, KEY, quoteId, walletId);
     }
 
-    /** 원화 10만 원 → 엔화 견적입니다. 저장된 것처럼 ID와 발급 시각이 있습니다. */
+    /** 원화 10만 원 → 엔화 견적입니다. */
     private static ExchangeQuote savedQuote() {
         ExchangeQuote saved = OrderFixtures.wonToYenQuote(USER_ID,
                 QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), ISSUED_AT);
-        ReflectionTestUtils.setField(saved, "id", UUID.randomUUID());
-        ReflectionTestUtils.setField(saved, "createdAt", ISSUED_AT);
         return saved;
     }
 

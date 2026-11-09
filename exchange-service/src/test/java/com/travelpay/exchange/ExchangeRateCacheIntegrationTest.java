@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.UUID;
 
+import com.jayway.jsonpath.JsonPath;
 import com.travelpay.exchange.application.rate.ExchangeRateCollector;
 import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
 import com.travelpay.exchange.application.rate.LatestRateCache;
@@ -257,18 +258,20 @@ class ExchangeRateCacheIntegrationTest {
         ExchangeRate cachedJpy = cache.find(RateSource.MOCK, ForeignCurrency.JPY).orElseThrow();
         saveDirectlyToDbOnly(ForeignCurrency.JPY);
 
-        MockMvcBuilders.webAppContextSetup(context).build()
+        String body = MockMvcBuilders.webAppContextSetup(context).build()
                 .perform(post("/api/v1/exchange-quotes")
                         .header("User-Id", OWNER).header("User-Role", "USER")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                                 {"fromCurrency":"KRW","toCurrency":"JPY","amount":"100000"}
                                 """))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
 
-        Map<String, Object> quote = jdbcTemplate.queryForMap("SELECT rate_id, applied_rate FROM " + SCHEMA + ".exchange_quotes");
-        assertEquals(cachedJpy.getId(), quote.get("rate_id"));
-        assertEquals(0, cachedJpy.getMidRate().compareTo((BigDecimal) quote.get("applied_rate")));
+        // 견적은 Redis에 저장된다(#223). 저장된 견적의 환율 근거가 캐시에서 읽은 환율인지 본다
+        String stored = redis.opsForValue().get("exchange:quote:" + JsonPath.read(body, "$.data.quoteId"));
+        assertEquals(cachedJpy.getId().toString(), JsonPath.read(stored, "$.rateId"));
+        assertEquals(0, cachedJpy.getMidRate().compareTo(new BigDecimal(JsonPath.read(stored, "$.appliedRate").toString())));
     }
 
     /**
