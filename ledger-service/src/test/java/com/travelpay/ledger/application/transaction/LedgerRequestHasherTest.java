@@ -55,6 +55,8 @@ class LedgerRequestHasherTest {
             case EXCHANGE_FEE -> "EXCHANGE_FEE";
             case TRANSFER_OUT -> "TRANSFER_OUT";
             case TRANSFER_IN -> "TRANSFER_IN";
+            case SETTLEMENT_OUT -> "SETTLEMENT_OUT";
+            case SETTLEMENT_IN -> "SETTLEMENT_IN";
         };
     }
 }
