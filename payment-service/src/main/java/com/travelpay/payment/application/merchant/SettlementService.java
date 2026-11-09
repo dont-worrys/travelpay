@@ -23,6 +23,7 @@ import com.travelpay.payment.domain.payment.Refund;
 import com.travelpay.payment.domain.payment.RefundRepository;
 import com.travelpay.payment.domain.payment.RefundStatus;
 import com.travelpay.payment.domain.payment.SettlementCandidate;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import com.travelpay.payment.domain.merchant.Settlement;
 import com.travelpay.payment.domain.merchant.SettlementItem;
 import com.travelpay.payment.domain.merchant.SettlementItemRepository;
@@ -56,6 +57,7 @@ public class SettlementService {
     // 환불 기간 경계에서 고객 환불 신청과 정산이 겹치지 않도록 두는 여유 시간
     static final Duration CUTOFF_MARGIN = Duration.ofHours(1);
     private static final int MAX_CONSECUTIVE_UNKNOWN = 3;
+    private static final int MAX_UNKNOWN_ATTEMPTS = 5;
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
 
@@ -187,7 +189,10 @@ public class SettlementService {
                 }
                 // 선점으로 수정 시각·버전이 바뀌었을 수 있어 다시 읽어 보냄
                 Settlement claimed = settlementRepository.findById(target.getId()).orElseThrow();
-                unknown = settle(claimed, claimed.getMerchantId()).getStatus() == SettlementStatus.REQUESTED;
+                Settlement after = settle(claimed, claimed.getMerchantId());
+                // 결과 모름(REQUESTED 유지 또는 5회째로 MANUAL_REVIEW)만 원장 장애 신호로 셈
+                unknown = after.getStatus() == SettlementStatus.REQUESTED
+                        || after.getReviewReason() == SettlementReviewReason.RETRY_EXHAUSTED;
             } catch (RuntimeException e) {
                 log.warn("정산 복구 실패 settlementId={}", target.getId(), e);
                 unknown = true;
@@ -203,6 +208,10 @@ public class SettlementService {
     // 생성 후 기준 시각이 지나도 REQUESTED인 정산 수와 오래된 순 ID
     public long countStuckSettlements(Instant createdBefore) {
         return settlementRepository.countRequestedCreatedBefore(createdBefore);
+    }
+
+    public long countManualReviewSettlements() {
+        return settlementRepository.countManualReviews();
     }
 
     public List<UUID> findStuckSettlementIds(Instant createdBefore, int sampleSize) {
@@ -255,7 +264,7 @@ public class SettlementService {
                 .collect(Collectors.groupingBy(Refund::getPaymentId, Collectors.summingLong(Refund::getAmount)));
     }
 
-    // 원장에 정산 거래를 보내고 결과를 반영한 정산을 돌려줌. 결과를 모르면 REQUESTED 그대로
+    // 원장에 정산 거래를 보내고 결과를 반영한 정산을 돌려줌. 결과를 모르면 REQUESTED(5회째면 MANUAL_REVIEW), 받아들이지 않으면 MANUAL_REVIEW
     private Settlement settle(Settlement settlement, UUID merchantWalletId) {
         PaymentLedgerResult result = ledgerClient.settlementTransaction(new PaymentLedgerSettlementCommand(
                 settlement.getId(),
@@ -267,13 +276,10 @@ public class SettlementService {
 
         switch (result.status()) {
             case UNKNOWN -> {
-                recordUnknown(settlement);
-                return settlement;
+                return recordUnknown(settlement);
             }
             case NOT_ACCEPTED -> {
-                // 정산에는 MANUAL_REVIEW가 없음. FAILED로 끝내면 원장에 반영됐을 때 이중 지급이 될 수 있어
-                log.error("원장이 정산 요청을 받아들이지 않아 REQUESTED로 둠 settlementId={}", settlement.getId());
-                return settlement;
+                return markManualReview(settlement);
             }
             default -> {
             }
@@ -300,11 +306,36 @@ public class SettlementService {
         return saved;
     }
 
-    private void recordUnknown(Settlement settlement) {
+    // 결과 모름 기록. 5회째(첫 요청 포함)면 MANUAL_REVIEW. 항목은 지우지 않음(원장에 반영됐을 수 있어 이중 지급 방지)
+    // 기록 중 오류가 나면 받은 정산을 그대로 반환하고, 스케줄러가 다음에 다시 시도
+    private Settlement recordUnknown(Settlement settlement) {
+        boolean exhausted = settlement.getAttemptCount() + 1 >= MAX_UNKNOWN_ATTEMPTS;
         try {
-            settlementRepository.recordUnknownAttempt(settlement.getId(), settlement.getAttemptCount(), Instant.now());
+            int updated = settlementRepository.recordUnknownAttempt(settlement.getId(), settlement.getAttemptCount(),
+                    exhausted ? SettlementStatus.MANUAL_REVIEW : SettlementStatus.REQUESTED,
+                    exhausted ? SettlementReviewReason.RETRY_EXHAUSTED : null, Instant.now());
+            if (updated == 1 && exhausted) {
+                log.error("원장 결과를 {}번 확인하지 못해 정산 자동 처리를 멈춤 settlementId={}",
+                        MAX_UNKNOWN_ATTEMPTS, settlement.getId());
+            }
+            return settlementRepository.findById(settlement.getId()).orElse(settlement);
         } catch (RuntimeException e) {
             log.warn("정산 결과 모름 기록 실패 settlementId={}", settlement.getId(), e);
+            return settlement;
+        }
+    }
+
+    // 원장이 요청을 받아들이지 않음. 다시 보내도 같은 결과라 MANUAL_REVIEW로 멈춤(항목 유지)
+    private Settlement markManualReview(Settlement settlement) {
+        try {
+            if (settlementRepository.markManualReview(settlement.getId(),
+                    SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, Instant.now()) == 1) {
+                log.error("원장이 정산 요청을 받아들이지 않아 자동 처리를 멈춤 settlementId={}", settlement.getId());
+            }
+            return settlementRepository.findById(settlement.getId()).orElse(settlement);
+        } catch (RuntimeException e) {
+            log.error("정산 MANUAL_REVIEW를 기록하지 못함 settlementId={}", settlement.getId(), e);
+            return settlement;
         }
     }
 

@@ -7,7 +7,9 @@ import com.travelpay.payment.domain.payment.PaymentHistory;
 import com.travelpay.payment.domain.payment.PaymentHistoryRepository;
 import com.travelpay.payment.domain.payment.PaymentRepository;
 import com.travelpay.payment.domain.payment.PaymentStatus;
+import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 import com.travelpay.payment.domain.payment.SettlementCandidate;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import com.travelpay.payment.support.PostgresContainerSupport;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,6 +62,9 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
 
     @Autowired
     private MerchantRepository merchantRepository;
+
+    @Autowired
+    private SettlementReviewResolutionRepository resolutionRepository;
 
     @Autowired
     private EntityManager entityManager;
@@ -292,12 +297,124 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         assertEquals(1, settlementRepository.claimForRecovery(settlement.getId(), seen, now));
         assertEquals(0, settlementRepository.claimForRecovery(settlement.getId(), seen, now));
 
-        assertEquals(1, settlementRepository.recordUnknownAttempt(settlement.getId(), 0, now));
-        assertEquals(0, settlementRepository.recordUnknownAttempt(settlement.getId(), 0, now));
+        assertEquals(1, settlementRepository.recordUnknownAttempt(settlement.getId(), 0,
+                SettlementStatus.REQUESTED, null, now));
+        assertEquals(0, settlementRepository.recordUnknownAttempt(settlement.getId(), 0,
+                SettlementStatus.REQUESTED, null, now));
 
         Map<String, Object> row = settlementRow(settlement.getId());
         assertEquals("REQUESTED", row.get("status"));
         assertEquals(1, row.get("attempt_count"));
+    }
+
+    // MANUAL_REVIEW
+
+    @Test
+    void fifthUnknownAttemptMovesToManualReviewAndLeavesRecoveryTargets() {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+        setTimestamps(settlement.getId(), "2026-11-07T00:00:00Z", 4);
+        Instant now = Instant.parse("2026-11-07T01:00:00Z");
+
+        assertEquals(1, settlementRepository.recordUnknownAttempt(settlement.getId(), 4,
+                SettlementStatus.MANUAL_REVIEW, SettlementReviewReason.RETRY_EXHAUSTED, now));
+
+        Map<String, Object> row = settlementRow(settlement.getId());
+        assertEquals("MANUAL_REVIEW", row.get("status"));
+        assertEquals("RETRY_EXHAUSTED", row.get("review_reason"));
+        assertEquals(5, row.get("attempt_count"));
+        assertFalse(settlementRepository.findRecoveryTargets(now.plus(Duration.ofDays(1)), 1000).stream()
+                .anyMatch(target -> target.getId().equals(settlement.getId())));
+    }
+
+    @Test
+    void markManualReviewOnlyChangesRequestedSettlement() {
+        Settlement requested = saveSettlement("key-" + UUID.randomUUID());
+        Settlement paid = saveSettlement("key-" + UUID.randomUUID());
+        jdbcTemplate.update("update settlements set status = 'PAID', ledger_transaction_id = ? where id = ?",
+                UUID.randomUUID(), paid.getId());
+        Instant now = Instant.parse("2026-11-07T00:00:00Z");
+
+        assertEquals(1, settlementRepository.markManualReview(requested.getId(),
+                SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, now));
+        assertEquals(0, settlementRepository.markManualReview(paid.getId(),
+                SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, now));
+
+        assertEquals("LEDGER_REQUEST_NOT_ACCEPTED", settlementRow(requested.getId()).get("review_reason"));
+        assertEquals("PAID", settlementRow(paid.getId()).get("status"));
+    }
+
+    @Test
+    void manualReviewsAreListedOldestFirstAndFilteredByReason() {
+        Settlement exhausted = saveSettlement("key-" + UUID.randomUUID());
+        Settlement notAccepted = saveSettlement("key-" + UUID.randomUUID());
+        Instant now = Instant.parse("2026-11-07T00:00:00Z");
+        settlementRepository.markManualReview(exhausted.getId(), SettlementReviewReason.RETRY_EXHAUSTED, now);
+        settlementRepository.markManualReview(notAccepted.getId(), SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED,
+                now);
+        jdbcTemplate.update("update settlements set created_at = cast(? as timestamptz) where id = ?",
+                "2020-01-01T00:00:00Z", exhausted.getId());
+        Sort oldestFirst = Sort.by(Sort.Order.asc("createdAt"), Sort.Order.asc("id"));
+
+        List<UUID> all = settlementRepository.findManualReviews(null, PageRequest.of(0, 1000, oldestFirst))
+                .map(Settlement::getId).getContent();
+        List<UUID> notAcceptedOnly = settlementRepository.findManualReviews(
+                        SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, PageRequest.of(0, 1000, oldestFirst))
+                .map(Settlement::getId).getContent();
+
+        assertEquals(exhausted.getId(), all.get(0));
+        assertTrue(all.contains(notAccepted.getId()));
+        assertTrue(notAcceptedOnly.contains(notAccepted.getId()));
+        assertFalse(notAcceptedOnly.contains(exhausted.getId()));
+        assertTrue(settlementRepository.countManualReviews() >= 2);
+    }
+
+    // 제약 위반 뒤에는 같은 트랜잭션에서 다른 SQL을 실행할 수 없어 경우별로 나눔
+    @Test
+    void manualReviewRequiresReason() {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update settlements set status = 'MANUAL_REVIEW', review_reason = null where id = ?",
+                settlement.getId()));
+    }
+
+    @Test
+    void otherStatusesMustNotHaveReviewReason() {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update settlements set review_reason = 'RETRY_EXHAUSTED' where id = ?", settlement.getId()));
+    }
+
+    @Test
+    void resolutionsAreSearchedByActorAndSettlementNewestFirst() {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+        UUID actor = UUID.randomUUID();
+        resolutionRepository.save(SettlementReviewResolution.of(settlement.getId(),
+                SettlementReviewReason.RETRY_EXHAUSTED, ReviewLedgerStatus.POSTED, UUID.randomUUID(),
+                SettlementStatus.PAID, actor, "재시도 한도 초과, 원장 반영 확인 → 정산 지급", "메모"));
+        resolutionRepository.save(SettlementReviewResolution.of(settlement.getId(),
+                SettlementReviewReason.RETRY_EXHAUSTED, ReviewLedgerStatus.NOT_FOUND, null,
+                SettlementStatus.FAILED, UUID.randomUUID(), "재시도 한도 초과, 원장 기록 없음 → 정산 시간 초과 취소", null));
+        entityManager.flush();
+
+        var byActor = resolutionRepository.search(actor, null, PageRequest.of(0, 10));
+        var bySettlement = resolutionRepository.search(null, settlement.getId(), PageRequest.of(0, 10));
+
+        assertEquals(1, byActor.getTotalElements());
+        assertEquals(SettlementStatus.PAID, byActor.getContent().get(0).getToStatus());
+        assertEquals(2, bySettlement.getTotalElements());
+    }
+
+    @Test
+    void resolutionLedgerTransactionIdMustMatchLedgerStatus() {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "insert into settlement_review_resolutions (id, settlement_id, review_reason, ledger_status, "
+                        + "ledger_transaction_id, to_status, actor_id, description, created_at) "
+                        + "values (?, ?, 'RETRY_EXHAUSTED', 'POSTED', null, 'PAID', ?, '설명', now())",
+                UUID.randomUUID(), settlement.getId(), UUID.randomUUID()));
     }
 
     @Test

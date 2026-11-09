@@ -3,6 +3,7 @@ package com.travelpay.payment.domain.merchant;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import jakarta.persistence.*;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -53,6 +54,10 @@ public class Settlement {
 
     private int attemptCount;
 
+    // MANUAL_REVIEW일 때만 있음
+    @Enumerated(EnumType.STRING)
+    private SettlementReviewReason reviewReason;
+
     @Version
     private long version;
 
@@ -86,15 +91,31 @@ public class Settlement {
     // 원장 반영 완료
     public void paid(UUID ledgerTransactionId) {
         Objects.requireNonNull(ledgerTransactionId);
-        changeStatus(SettlementStatus.PAID);
+        changeStatus(SettlementStatus.REQUESTED, SettlementStatus.PAID);
         this.ledgerTransactionId = ledgerTransactionId;
     }
 
     // 원장 거절. 거절 사유를 남깁니다.
     public void fail(String reason) {
         Objects.requireNonNull(reason);
-        changeStatus(SettlementStatus.FAILED);
+        changeStatus(SettlementStatus.REQUESTED, SettlementStatus.FAILED);
         this.failureReason = reason;
+    }
+
+    // 운영자 처리: 원장 반영 확인. 멈춘 사유는 처리 기록에 남고 여기서는 지웁니다.
+    public void resolvePaid(UUID ledgerTransactionId) {
+        Objects.requireNonNull(ledgerTransactionId);
+        changeStatus(SettlementStatus.MANUAL_REVIEW, SettlementStatus.PAID);
+        this.ledgerTransactionId = ledgerTransactionId;
+        this.reviewReason = null;
+    }
+
+    // 운영자 처리: 원장 거절·기록 없음 확인
+    public void resolveFailed(String reason) {
+        Objects.requireNonNull(reason);
+        changeStatus(SettlementStatus.MANUAL_REVIEW, SettlementStatus.FAILED);
+        this.failureReason = reason;
+        this.reviewReason = null;
     }
 
     // 같은 요청자·같은 키의 재요청인지. 본문이 없어 가맹점만 비교합니다.
@@ -102,8 +123,8 @@ public class Settlement {
         return this.merchantId.equals(merchantId);
     }
 
-    private void changeStatus(SettlementStatus next) {
-        if (this.status != SettlementStatus.REQUESTED) {
+    private void changeStatus(SettlementStatus from, SettlementStatus next) {
+        if (this.status != from) {
             throw new BusinessException(PaymentErrorCode.INVALID_STATUS_TRANSITION);
         }
         this.status = next;

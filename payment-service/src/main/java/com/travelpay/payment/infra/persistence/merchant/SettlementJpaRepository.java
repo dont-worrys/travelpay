@@ -2,6 +2,7 @@ package com.travelpay.payment.infra.persistence.merchant;
 
 import com.travelpay.payment.domain.merchant.Settlement;
 import com.travelpay.payment.domain.merchant.SettlementStatus;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -48,14 +49,38 @@ public interface SettlementJpaRepository extends JpaRepository<Settlement, UUID>
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
             update Settlement s
-            set s.attemptCount = :expectedAttempts + 1, s.updatedAt = :now, s.version = s.version + 1
+            set s.attemptCount = :expectedAttempts + 1, s.status = :status, s.reviewReason = :reviewReason,
+                s.updatedAt = :now, s.version = s.version + 1
             where s.id = :id
               and s.status = com.travelpay.payment.domain.merchant.SettlementStatus.REQUESTED
               and s.attemptCount = :expectedAttempts
             """)
     int recordUnknownAttempt(@Param("id") UUID id,
                              @Param("expectedAttempts") int expectedAttempts,
+                             @Param("status") SettlementStatus status,
+                             @Param("reviewReason") SettlementReviewReason reviewReason,
                              @Param("now") Instant now);
+
+    // 자동 처리 중단. 그 사이 결과가 반영된 정산은 바꾸지 않음
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update Settlement s
+            set s.status = com.travelpay.payment.domain.merchant.SettlementStatus.MANUAL_REVIEW,
+                s.reviewReason = :reviewReason, s.updatedAt = :now, s.version = s.version + 1
+            where s.id = :id
+              and s.status = com.travelpay.payment.domain.merchant.SettlementStatus.REQUESTED
+            """)
+    int markManualReview(@Param("id") UUID id,
+                         @Param("reviewReason") SettlementReviewReason reviewReason,
+                         @Param("now") Instant now);
+
+    Page<Settlement> findByStatus(SettlementStatus status, Pageable pageable);
+
+    Page<Settlement> findByStatusAndReviewReason(SettlementStatus status, SettlementReviewReason reviewReason,
+                                                 Pageable pageable);
+
+    long countByStatus(SettlementStatus status);
 
     long countByStatusAndCreatedAtBefore(SettlementStatus status, Instant before);
 

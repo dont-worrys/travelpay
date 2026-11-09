@@ -10,4 +10,5 @@ public interface PaymentLedgerClient {
     /** 원장을 조회하지 못하면 LEDGER_LOOKUP_UNAVAILABLE(503) */
     PaymentLedgerLookup findPaymentTransaction(UUID paymentId);
     PaymentLedgerLookup findRefundTransaction(UUID refundId);
+    PaymentLedgerLookup findSettlementTransaction(UUID settlementId);
 }

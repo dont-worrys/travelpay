@@ -98,6 +98,11 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
         return lookup("PAYMENT_REFUND", refundId, REFUND_DECLINE_REASONS);
     }
 
+    @Override
+    public PaymentLedgerLookup findSettlementTransaction(UUID settlementId) {
+        return lookup(SETTLEMENT_REFERENCE_TYPE, settlementId, SETTLEMENT_DECLINE_REASONS);
+    }
+
     private PaymentLedgerLookup lookup(String referenceType, UUID referenceId, DeclineReasons declineReasons) {
         ApiResponse<TransactionResultResponse> response;
         try {

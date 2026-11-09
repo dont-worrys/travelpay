@@ -3,6 +3,7 @@ package com.travelpay.payment.infra.persistence.merchant;
 import com.travelpay.payment.domain.merchant.Settlement;
 import com.travelpay.payment.domain.merchant.SettlementRepository;
 import com.travelpay.payment.domain.merchant.SettlementStatus;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -51,8 +52,28 @@ public class SettlementRepositoryImpl implements SettlementRepository {
     }
 
     @Override
-    public int recordUnknownAttempt(UUID settlementId, int expectedAttempts, Instant now) {
-        return settlementJpaRepository.recordUnknownAttempt(settlementId, expectedAttempts, now);
+    public int recordUnknownAttempt(UUID settlementId, int expectedAttempts, SettlementStatus status,
+                                    SettlementReviewReason reviewReason, Instant now) {
+        return settlementJpaRepository.recordUnknownAttempt(settlementId, expectedAttempts, status, reviewReason, now);
+    }
+
+    @Override
+    public int markManualReview(UUID settlementId, SettlementReviewReason reviewReason, Instant now) {
+        return settlementJpaRepository.markManualReview(settlementId, reviewReason, now);
+    }
+
+    @Override
+    public Page<Settlement> findManualReviews(SettlementReviewReason reviewReason, Pageable pageable) {
+        if (reviewReason == null) {
+            return settlementJpaRepository.findByStatus(SettlementStatus.MANUAL_REVIEW, pageable);
+        }
+        return settlementJpaRepository.findByStatusAndReviewReason(SettlementStatus.MANUAL_REVIEW, reviewReason,
+                pageable);
+    }
+
+    @Override
+    public long countManualReviews() {
+        return settlementJpaRepository.countByStatus(SettlementStatus.MANUAL_REVIEW);
     }
 
     @Override

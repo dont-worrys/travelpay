@@ -3,7 +3,9 @@ package com.travelpay.payment.domain.merchant;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -88,6 +90,29 @@ class SettlementTest {
     }
 
     @Test
+    void operatorResolutionOnlyAppliesToManualReviewAndClearsReason() {
+        Settlement paid = manualReview();
+        paid.resolvePaid(LEDGER_TRANSACTION_ID);
+        Settlement failed = manualReview();
+        failed.resolveFailed("정산 처리 시간이 초과되어 취소되었습니다.");
+
+        assertEquals(SettlementStatus.PAID, paid.getStatus());
+        assertEquals(LEDGER_TRANSACTION_ID, paid.getLedgerTransactionId());
+        assertNull(paid.getReviewReason());
+        assertEquals(SettlementStatus.FAILED, failed.getStatus());
+        assertEquals("정산 처리 시간이 초과되어 취소되었습니다.", failed.getFailureReason());
+        assertNull(failed.getReviewReason());
+
+        // REQUESTED 정산은 운영자 처리 대상이 아니고, MANUAL_REVIEW 정산은 자동 반영 대상이 아님
+        BusinessException requested = assertThrows(BusinessException.class,
+                () -> request(15_000L).resolvePaid(LEDGER_TRANSACTION_ID));
+        BusinessException manual = assertThrows(BusinessException.class,
+                () -> manualReview().paid(LEDGER_TRANSACTION_ID));
+        assertEquals(PaymentErrorCode.INVALID_STATUS_TRANSITION, requested.getErrorCode());
+        assertEquals(PaymentErrorCode.INVALID_STATUS_TRANSITION, manual.getErrorCode());
+    }
+
+    @Test
     void sameRequestComparesMerchantOnly() {
         Settlement settlement = request(15_000L);
 
@@ -111,5 +136,13 @@ class SettlementTest {
     private static Settlement request(long amount) {
         return Settlement.request(MERCHANT_ID, OWNER_ID, KEY, OWNER_ID, OWNER_WALLET_ID,
                 CurrencyCode.KRW, amount, CUTOFF);
+    }
+
+    // MANUAL_REVIEW는 저장소의 조건부 UPDATE로만 들어가므로 테스트에서는 필드를 직접 맞춤
+    private static Settlement manualReview() {
+        Settlement settlement = request(15_000L);
+        ReflectionTestUtils.setField(settlement, "status", SettlementStatus.MANUAL_REVIEW);
+        ReflectionTestUtils.setField(settlement, "reviewReason", SettlementReviewReason.RETRY_EXHAUSTED);
+        return settlement;
     }
 }

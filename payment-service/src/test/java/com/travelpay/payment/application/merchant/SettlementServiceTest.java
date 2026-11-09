@@ -22,6 +22,7 @@ import com.travelpay.payment.domain.payment.PaymentRepository;
 import com.travelpay.payment.domain.payment.Refund;
 import com.travelpay.payment.domain.payment.RefundRepository;
 import com.travelpay.payment.domain.payment.SettlementCandidate;
+import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import com.travelpay.payment.domain.merchant.Settlement;
 import com.travelpay.payment.domain.merchant.SettlementItem;
 import com.travelpay.payment.domain.merchant.SettlementItemRepository;
@@ -54,6 +55,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -244,19 +246,63 @@ class SettlementServiceTest {
 
         assertEquals(SettlementStatus.REQUESTED, result.status());
         assertNull(result.ledgerTransactionId());
-        verify(settlementRepository).recordUnknownAttempt(eq(SETTLEMENT_ID), eq(0), any());
+        verify(settlementRepository).recordUnknownAttempt(eq(SETTLEMENT_ID), eq(0), eq(SettlementStatus.REQUESTED),
+                isNull(), any());
         verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
     }
 
     @Test
-    void notAcceptedStaysRequestedWithoutReleasingPayments() {
+    void notAcceptedStopsAsManualReviewWithoutReleasingPayments() {
         when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.notAccepted());
+        when(settlementRepository.markManualReview(eq(SETTLEMENT_ID), eq(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED),
+                any())).thenReturn(1);
+        when(settlementRepository.findById(SETTLEMENT_ID))
+                .thenReturn(Optional.of(manualReview(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, 0)));
 
         SettlementResult result = settlementService.requestSettlement(OWNER, MERCHANT_ID, KEY);
 
-        assertEquals(SettlementStatus.REQUESTED, result.status());
+        // 오류가 아니라 상태로 응답(결제와 같음). 원장에 반영됐을 수 있어 항목은 지우지 않음
+        assertEquals(SettlementStatus.MANUAL_REVIEW, result.status());
         verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
-        verify(settlementRepository, never()).recordUnknownAttempt(any(), anyInt(), any());
+        verify(settlementRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+    }
+
+    @Test
+    void fifthUnknownResultStopsAsManualReview() {
+        Settlement fourTimesUnknown = settlementWithId(SETTLEMENT_ID);
+        ReflectionTestUtils.setField(fourTimesUnknown, "attemptCount", 4);
+        givenRecoveryTargets(fourTimesUnknown);
+        when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
+
+        settlementService.recoverSettlements(Instant.now(), 10);
+
+        verify(settlementRepository).recordUnknownAttempt(eq(SETTLEMENT_ID), eq(4), eq(SettlementStatus.MANUAL_REVIEW),
+                eq(SettlementReviewReason.RETRY_EXHAUSTED), any());
+        verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
+    }
+
+    @Test
+    void unknownBeforeLimitStaysRequested() {
+        Settlement threeTimesUnknown = settlementWithId(SETTLEMENT_ID);
+        ReflectionTestUtils.setField(threeTimesUnknown, "attemptCount", 3);
+        givenRecoveryTargets(threeTimesUnknown);
+        when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
+
+        settlementService.recoverSettlements(Instant.now(), 10);
+
+        verify(settlementRepository).recordUnknownAttempt(eq(SETTLEMENT_ID), eq(3), eq(SettlementStatus.REQUESTED),
+                isNull(), any());
+    }
+
+    @Test
+    void sameKeyForManualReviewSettlementReturnsCurrentState() {
+        when(settlementRepository.findByRequestedByAndIdempotencyKey(OWNER_ID, KEY))
+                .thenReturn(Optional.of(manualReview(SettlementReviewReason.RETRY_EXHAUSTED, 5)));
+
+        SettlementResult result = settlementService.requestSettlement(OWNER, MERCHANT_ID, KEY);
+
+        assertEquals(SettlementStatus.MANUAL_REVIEW, result.status());
+        verify(ledgerClient, never()).settlementTransaction(any());
     }
 
     @Test
@@ -527,6 +573,14 @@ class SettlementServiceTest {
         for (Settlement target : targets) {
             when(settlementRepository.findById(target.getId())).thenReturn(Optional.of(target));
         }
+    }
+
+    private static Settlement manualReview(SettlementReviewReason reviewReason, int attemptCount) {
+        Settlement settlement = settlement(MERCHANT_ID);
+        ReflectionTestUtils.setField(settlement, "status", SettlementStatus.MANUAL_REVIEW);
+        ReflectionTestUtils.setField(settlement, "reviewReason", reviewReason);
+        ReflectionTestUtils.setField(settlement, "attemptCount", attemptCount);
+        return settlement;
     }
 
     private static Settlement settlementWithId(UUID id) {

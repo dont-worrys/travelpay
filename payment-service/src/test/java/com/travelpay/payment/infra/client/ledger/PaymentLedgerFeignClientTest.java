@@ -276,6 +276,30 @@ class PaymentLedgerFeignClientTest {
                 ledgerClient.findRefundTransaction(REFUND_ID));
     }
 
+    // 정산 조회는 SETTLEMENT 유형으로 찾고, 거절 사유는 정산 문구표로 바꾼다
+    @ParameterizedTest
+    @CsvSource({
+            "INSUFFICIENT_BALANCE, 가맹점 잔액이 부족합니다.",
+            "WALLET_SUSPENDED, 정산 받을 지갑을 사용할 수 없습니다.",
+            "ACCOUNT_NOT_FOUND, 정산할 수 있는 계정이 없습니다.",
+            "NEW_REASON, 정산이 거절되었습니다."
+    })
+    void lookupConvertsSettlementRejectReason(String rejectReason, String expectedReason) {
+        when(feignApi.getTransaction("SETTLEMENT", SETTLEMENT_ID))
+                .thenReturn(result(TRANSACTION_ID, "REJECTED", rejectReason));
+
+        assertEquals(PaymentLedgerLookup.rejected(TRANSACTION_ID, expectedReason),
+                ledgerClient.findSettlementTransaction(SETTLEMENT_ID));
+    }
+
+    @Test
+    void lookupUsesSettlementReferenceTypeForSettlements() {
+        when(feignApi.getTransaction("SETTLEMENT", SETTLEMENT_ID)).thenReturn(result(TRANSACTION_ID, "POSTED", null));
+
+        assertEquals(PaymentLedgerLookup.posted(TRANSACTION_ID, LOOKUP_ENTRIES),
+                ledgerClient.findSettlementTransaction(SETTLEMENT_ID));
+    }
+
     @Test
     void lookupUsesDefaultReasonWhenRejectReasonIsMissing() {
         when(feignApi.getTransaction("PAYMENT", PAYMENT_ID)).thenReturn(result(TRANSACTION_ID, "REJECTED", null));
