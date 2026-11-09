@@ -83,7 +83,7 @@ class ExchangeRatePartialCollectionIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         today = LocalDate.now(clock);
         // 어제 고시분은 두 통화 모두 저장돼 있다
