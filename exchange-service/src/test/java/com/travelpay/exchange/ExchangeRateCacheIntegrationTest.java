@@ -42,6 +42,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 import org.testcontainers.containers.GenericContainer;
@@ -249,6 +250,40 @@ class ExchangeRateCacheIntegrationTest {
         assertEquals(List.of(ForeignCurrency.JPY, ForeignCurrency.CNY), latest.stream().map(ExchangeRate::getCurrency).toList());
         assertEquals(cachedJpy, latest.get(0).getId(), "JPY는 캐시 값");
         assertEquals(newestCny, latest.get(1).getId(), "CNY만 DB 값");
+    }
+
+    /**
+     * 견적 발급은 DB 연결을 빌리지 않는다(#223). 환율은 캐시에서, 견적은 Redis에 저장하므로 DB가 필요 없다.
+     * HikariCP가 연결을 내준 횟수(acquire)가 발급 전후로 같은지 본다. 이 테스트는 수집·복구 스케줄러를 꺼 두어 다른 DB 사용이 없다.
+     * 견적 발급에 트랜잭션이 남아 있으면 쿼리가 없어도 트랜잭션 시작 때 연결을 빌려 이 테스트가 실패한다.
+     */
+    @Test
+    void issuingQuoteDoesNotBorrowDbConnection() throws Exception {
+        collectOnce();
+        MockMvc mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
+        issueYenQuote(mockMvc); // 첫 요청의 준비 작업을 먼저 끝낸다
+        double acquiredBefore = acquiredConnections();
+
+        for (int i = 0; i < 5; i++) {
+            issueYenQuote(mockMvc);
+        }
+
+        assertEquals(acquiredBefore, acquiredConnections(), "견적 발급 5번 동안 DB 연결을 빌리지 않음");
+    }
+
+    private void issueYenQuote(MockMvc mockMvc) throws Exception {
+        mockMvc.perform(post("/api/v1/exchange-quotes")
+                        .header("User-Id", OWNER).header("User-Role", "USER")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"fromCurrency":"KRW","toCurrency":"JPY","amount":"100000"}
+                                """))
+                .andExpect(status().isCreated());
+    }
+
+    /** HikariCP가 지금까지 연결을 내준 횟수입니다. */
+    private double acquiredConnections() {
+        return meterRegistry.get("hikaricp.connections.acquire").timer().count();
     }
 
     /** 시나리오 7: 견적은 캐시에서 읽은 환율 행의 ID와 값을 그대로 남긴다 */
