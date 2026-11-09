@@ -20,12 +20,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import com.jayway.jsonpath.JsonPath;
+import com.travelpay.exchange.application.order.ExchangeOrderLedgerProcessor;
 import com.travelpay.exchange.application.order.ExchangeOrderRecoveryService;
 import com.travelpay.exchange.domain.ledger.LedgerClient;
 import com.travelpay.exchange.domain.ledger.LedgerLookupResult;
 import com.travelpay.exchange.domain.ledger.LedgerPostResult;
 import com.travelpay.exchange.domain.ledger.LedgerPosting;
 import com.travelpay.exchange.domain.money.Currency;
+import com.travelpay.exchange.domain.order.ExchangeOrder;
+import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.rate.CollectedRate;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
@@ -108,6 +112,12 @@ class ExchangeOrderIntegrationTest {
 
     @Autowired
     private ExchangeOrderRecoveryService recoveryService;
+
+    @Autowired
+    private ExchangeOrderLedgerProcessor ledgerProcessor;
+
+    @Autowired
+    private ExchangeOrderRepository orderRepository;
 
     private MockMvc mockMvc;
 
@@ -399,37 +409,40 @@ class ExchangeOrderIntegrationTest {
                 .andExpect(jsonPath("$.data.status").value("COMPLETED"));
     }
 
+    /**
+     * 결과를 모르는 주문의 재요청은 원장을 부르지 않고 저장된 상태(202 PROCESSING)로 응답한다.
+     * 원장이 살아나도 재요청으로는 확정하지 않고, 복구 스케줄러가 확정한 뒤에야 재요청이 확정 결과를 받는다.
+     */
     @Test
-    void retryWithinClaimLeaseDoesNotCallLedger() throws Exception {
+    void retryOfProcessingOrderReturnsStoredStateWithoutCallingLedger() throws Exception {
         String quoteId = issuedQuoteId(OWNER);
         place(OWNER, "key-1", quoteId).andExpect(status().isAccepted());
         ledger.postsSucceed();
 
-        // 첫 요청의 원장 호출이 아직 끝나지 않았을 수 있는 10초 안에는 원장을 부르지 않고 현재 상태로 응답한다
-        clock.set(NOW.plusSeconds(10).minusMillis(1));
+        clock.set(NOW.plusSeconds(30));
         place(OWNER, "key-1", quoteId)
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.data.status").value("PROCESSING"));
         assertEquals(1, ledger.calls());
 
-        clock.set(NOW.plusSeconds(10));
+        clock.set(NOW.plusSeconds(60));
+        assertEquals(1, recoveryService.recover(10).settled());
+        assertEquals(2, ledger.calls());
+
         place(OWNER, "key-1", quoteId)
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("COMPLETED"));
         assertEquals(2, ledger.calls());
     }
 
+    /** 원장이 느려 사용자가 여러 번 누른 경우. 재요청이 몇 개 몰려도 원장 호출은 늘지 않는다 */
     @Test
-    void concurrentRetriesCallLedgerOnceAndSettleOnce() throws Exception {
+    void concurrentRetriesDoNotCallLedger() throws Exception {
         String quoteId = issuedQuoteId(OWNER);
         place(OWNER, "key-1", quoteId).andExpect(status().isAccepted());
         UUID orderId = onlyOrderId();
-        // 첫 요청이 결과를 모른 채 끝나고 선점 유효 기간이 지난 뒤, 재요청 4개가 몰린 경우
         clock.set(NOW.plusSeconds(10));
-        ledger.respond(posting -> {
-            sleep(200);
-            return new LedgerPostResult.Posted(FakeLedger.transactionIdOf(posting.orderId()));
-        });
+        ledger.postsSucceed();
 
         int threads = 4;
         CountDownLatch start = new CountDownLatch(1);
@@ -444,24 +457,29 @@ class ExchangeOrderIntegrationTest {
             }
             start.countDown();
             for (Future<Integer> result : results) {
-                int status = result.get(10, TimeUnit.SECONDS);
-                assertTrue(status == 200 || status == 202, "status " + status);
+                assertEquals(202, result.get(10, TimeUnit.SECONDS));
             }
         } finally {
             executor.shutdownNow();
         }
 
-        assertEquals(2, ledger.calls());
-        assertEquals("COMPLETED", orderRow(orderId).get("status"));
-        assertEquals(List.of("PROCESSING", "COMPLETED"), historyStatuses(orderId));
+        assertEquals(1, ledger.calls());
+        assertEquals("PROCESSING", orderRow(orderId).get("status"));
+        assertEquals(List.of("PROCESSING"), historyStatuses(orderId));
     }
 
+    /** 24시간이 지나 사람 확인으로 보내는 것도 재요청이 아니라 복구 스케줄러가 한다 */
     @Test
-    void orderUnconfirmedForADayGoesToManualReviewOnRetry() throws Exception {
+    void orderUnconfirmedForADayGoesToManualReviewByRecoveryNotRetry() throws Exception {
         String quoteId = issuedQuoteId(OWNER);
         place(OWNER, "key-1", quoteId).andExpect(status().isAccepted());
 
         clock.set(NOW.plus(Duration.ofHours(24)));
+        place(OWNER, "key-1", quoteId)
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("PROCESSING"));
+
+        recoveryService.recover(10);
         place(OWNER, "key-1", quoteId)
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.data.status").value("MANUAL_REVIEW"));
@@ -481,10 +499,10 @@ class ExchangeOrderIntegrationTest {
         jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_orders SET last_ledger_checked_at = ?",
                 Timestamp.from(dayLater.minusSeconds(5)));
 
+        // 재요청은 원장 처리기를 부르지 않으므로, 처리기를 직접 불러 선점 중인 주문을 사람 확인으로 바꾸지 않는지 본다
         clock.set(dayLater);
-        place(OWNER, "key-1", quoteId)
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.data.status").value("PROCESSING"));
+        ExchangeOrder order = orderRepository.findById(onlyOrderId()).orElseThrow();
+        assertEquals(ExchangeOrderStatus.PROCESSING, ledgerProcessor.process(order).getStatus());
 
         assertEquals(1, ledger.calls());
         assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA
@@ -503,14 +521,6 @@ class ExchangeOrderIntegrationTest {
 
     private UUID onlyOrderId() {
         return jdbcTemplate.queryForObject("SELECT order_id FROM " + SCHEMA + ".exchange_orders", UUID.class);
-    }
-
-    private static void sleep(long millis) {
-        try {
-            Thread.sleep(millis);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     private String issuedQuoteId(UUID userId) throws Exception {
