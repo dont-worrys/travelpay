@@ -1,5 +1,6 @@
 package com.travelpay.exchange.domain.order;
 
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -33,5 +34,20 @@ public record IdempotencyKey(String value) {
     /** 예약 환전 체결 주문용 키인지 확인합니다. 회원의 환전 신청이 이 키를 쓰면 체결 주문과 겹칠 수 있습니다. */
     public boolean isReservedForReservation() {
         return value.startsWith(RESERVATION_PREFIX);
+    }
+
+    /**
+     * 예약 환전 체결 주문의 키면 그 예약 ID입니다(#254). 회원이 직접 신청한 주문의 키면 empty입니다.
+     * 접두어 뒤가 UUID가 아니면 체결 주문 키가 아니므로 empty입니다(예외로 응답을 깨뜨리지 않음).
+     */
+    public Optional<UUID> reservationId() {
+        if (!isReservedForReservation()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(UUID.fromString(value.substring(RESERVATION_PREFIX.length())));
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
     }
 }

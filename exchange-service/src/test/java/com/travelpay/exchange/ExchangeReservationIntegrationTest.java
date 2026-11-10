@@ -232,6 +232,15 @@ class ExchangeReservationIntegrationTest {
                 .andExpect(jsonPath("$.data.orderId").value(orderId.toString()))
                 .andExpect(jsonPath("$.data.orderStatus").value("COMPLETED"));
         cancel(OWNER, id).andExpect(status().isConflict());
+
+        // 주문 쪽에서도 어느 예약으로 만든 주문인지 보인다(#254): 환전 내역 목록·상세의 reservationId
+        mockMvc.perform(get("/api/v1/exchanges/{orderId}", orderId).header("User-Id", OWNER).header("User-Role", "USER"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.reservationId").value(id));
+        mockMvc.perform(get("/api/v1/exchanges").header("User-Id", OWNER).header("User-Role", "USER"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items[0].orderId").value(orderId.toString()))
+                .andExpect(jsonPath("$.data.items[0].reservationId").value(id));
     }
 
     /** 원장 결과를 모르면 주문은 PROCESSING으로 남지만 체결은 된 것이다. 이후는 보통 환전처럼 복구 스케줄러가 처리한다 */
