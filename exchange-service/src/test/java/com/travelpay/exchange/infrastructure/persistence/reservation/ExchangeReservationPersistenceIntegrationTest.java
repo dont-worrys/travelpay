@@ -275,6 +275,70 @@ class ExchangeReservationPersistenceIntegrationTest {
         });
     }
 
+    /**
+     * 만료 시각이 지난(같은 시각 포함) 대기 예약만, 오래된 것부터 limit건 만료로 바꾼다.
+     * 아직 만료 전이거나 대기가 아닌(취소된) 예약은 그대로다.
+     */
+    @Test
+    void expiresOnlyWaitingPastExpiryUpToLimit() {
+        Instant now = Instant.now().plus(Duration.ofDays(10));
+        UUID oldest = expiringAt("key-1", now.minus(Duration.ofHours(2)));
+        UUID atNow = expiringAt("key-2", now);
+        UUID future = expiringAt("key-3", now.plusSeconds(1));
+        UUID canceled = expiringAt("key-4", now.minus(Duration.ofHours(3)));
+        repository.cancelIfWaiting(canceled, USER_ID, Instant.now());
+
+        assertEquals(1, repository.expireWaiting(now, 1));
+        assertEquals(ReservationStatus.EXPIRED, statusOf(oldest));
+        assertEquals(ReservationStatus.WAITING, statusOf(atNow));
+
+        assertEquals(1, repository.expireWaiting(now, 10));
+        assertEquals(ReservationStatus.EXPIRED, statusOf(atNow));
+        assertEquals(ReservationStatus.WAITING, statusOf(future));
+        assertEquals(ReservationStatus.CANCELED, statusOf(canceled));
+    }
+
+    /** 체결 중이라 잠긴 예약은 기다리지 않고 건너뛴다(SKIP LOCKED). 잠금이 풀린 뒤 다음 주기에 만료된다 */
+    @Test
+    void expirySkipsReservationLockedByExecution() throws Exception {
+        Instant now = Instant.now().plus(Duration.ofDays(10));
+        UUID id = expiringAt("key-1", now.minus(Duration.ofHours(1)));
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> holder = pool.submit(() -> transactionTemplate.executeWithoutResult(status -> {
+                repository.lockWaiting(id).orElseThrow();
+                locked.countDown();
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+            assertTrue(locked.await(10, TimeUnit.SECONDS));
+
+            assertEquals(0, repository.expireWaiting(now, 10));
+
+            release.countDown();
+            holder.get(10, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(1, repository.expireWaiting(now, 10));
+    }
+
+    private UUID expiringAt(String key, Instant expiresAt) {
+        UUID id = repository.save(reservation(USER_ID, key)).getId();
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_reservations SET expires_at = ? WHERE reservation_id = ?",
+                Timestamp.from(expiresAt), id);
+        return id;
+    }
+
+    private ReservationStatus statusOf(UUID id) {
+        return repository.findById(id).orElseThrow().getStatus();
+    }
+
     /** 시스템 취소는 사유를 남기고, 대기 중일 때만 한 번 바뀐다. 사유와 상태는 DB CHECK로 함께 다닌다 */
     @Test
     void systemCancelKeepsReasonOnlyForCanceled() {

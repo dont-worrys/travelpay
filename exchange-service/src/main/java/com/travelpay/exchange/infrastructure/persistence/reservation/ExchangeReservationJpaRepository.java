@@ -111,6 +111,25 @@ interface ExchangeReservationJpaRepository extends JpaRepository<ExchangeReserva
             """)
     int markExecuted(@Param("id") UUID id, @Param("orderId") UUID orderId, @Param("now") Instant now);
 
+    /**
+     * 만료 시각이 지난 대기 예약을 오래된 것부터 limit건 만료로 바꾼다. 안쪽 조회는 ix_exchange_reservations_waiting_expiry
+     * 부분 인덱스를 타고, SKIP LOCKED라 체결·취소 중인 행은 기다리지 않고 다음 주기로 넘긴다.
+     * 바깥 WHERE의 status 조건은 안쪽 조회와 UPDATE 사이에 바뀐 행을 한 번 더 거른다.
+     */
+    @Transactional
+    @Modifying(clearAutomatically = true)
+    @Query(value = """
+            UPDATE exchange_reservations SET status = 'EXPIRED', updated_at = :now
+             WHERE status = 'WAITING'
+               AND reservation_id IN (
+                   SELECT reservation_id FROM exchange_reservations
+                    WHERE status = 'WAITING' AND expires_at <= :now
+                    ORDER BY expires_at
+                    LIMIT :limit
+                    FOR UPDATE SKIP LOCKED)
+            """, nativeQuery = true)
+    int expireWaiting(@Param("now") Instant now, @Param("limit") int limit);
+
     /** 시스템이 대기 예약을 취소한다(체결 중 지갑 사용 불가 등). 대기 중일 때만 1행. 호출하는 트랜잭션이 있으면 참여한다 */
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)

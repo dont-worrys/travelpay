@@ -89,6 +89,11 @@ exchange:
     # 예약 환전: 최대 예약 기간과 회원당 동시 대기 예약 수 (값이 없으면 같은 기본값을 씀)
     max-period: 30d
     max-waiting-per-user: 10
+    # 만료 시각이 지난 대기 예약을 EXPIRED로 바꾸는 주기와 한 배치 크기
+    expiry:
+      enabled: true
+      fixed-delay: 1m
+      batch-size: 500
 
 server:
   port: 8084

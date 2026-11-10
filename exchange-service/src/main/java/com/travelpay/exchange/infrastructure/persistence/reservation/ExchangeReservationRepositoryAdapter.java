@@ -100,6 +100,11 @@ class ExchangeReservationRepositoryAdapter implements ExchangeReservationReposit
     }
 
     @Override
+    public int expireWaiting(Instant now, int limit) {
+        return jpaRepository.expireWaiting(now, limit);
+    }
+
+    @Override
     public Page<ExchangeReservation> findPage(UUID userId, ReservationStatus status, Pageable pageable) {
         return jpaRepository.findPage(userId, status, pageable);
     }

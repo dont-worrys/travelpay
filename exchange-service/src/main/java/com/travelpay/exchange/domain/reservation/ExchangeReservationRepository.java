@@ -68,4 +68,10 @@ public interface ExchangeReservationRepository {
      * 주문 저장과 같은 트랜잭션에서 불러, 주문은 있는데 예약이 대기로 남거나 그 반대가 되는 일이 없게 합니다.
      */
     boolean markExecuted(UUID reservationId, UUID orderId, Instant now);
+
+    /**
+     * 만료 시각이 now 이전(같음 포함)인 대기 예약을 최대 limit건 만료(EXPIRED)로 바꾸고, 바꾼 수를 돌려줍니다.
+     * 지금 체결·취소 중이라 잠긴 예약은 건너뜁니다. 체결은 잠근 뒤 만료를 다시 확인하므로 만료된 예약을 체결하지 않습니다.
+     */
+    int expireWaiting(Instant now, int limit);
 }
