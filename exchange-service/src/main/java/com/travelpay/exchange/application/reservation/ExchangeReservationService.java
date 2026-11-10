@@ -2,6 +2,7 @@ package com.travelpay.exchange.application.reservation;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -62,6 +63,7 @@ public class ExchangeReservationService {
      * 대기 예약 수는 두 번 셉니다. 지갑 확인(원격 호출) 전에 한 번 세어 한도에 찬 요청을 빨리 거절하고,
      * 저장하는 트랜잭션에서 회원 단위로 잠근 뒤 다시 세어 같은 회원의 동시 요청도 한도를 넘지 못하게 합니다.
      * 지갑 확인은 잠금 밖에서 해, 원격 호출 동안 DB 커넥션과 잠금을 잡지 않습니다.
+     * 같은 키 재요청이 처음 요청과 겹쳐도 한도 초과가 아니라 처음 예약을 받도록, 두 번 다 세기 전에(또는 찼을 때) 같은 키 예약을 먼저 봅니다.
      *
      * @throws BusinessException 멱등 키 형식 오류(400), 통화쌍·금액·목표 환율·만료 오류(400), 같은 키로 다른 예약(409),
      *                           대기 예약 수 초과(409), 지갑 없음(404)·사용 불가(409)·확인 실패(503)
@@ -79,15 +81,29 @@ public class ExchangeReservationService {
         ExchangeReservation reservation = ExchangeReservation.reserve(command.userId(), command.walletId(), key,
                 currencies, amount, command.targetRate(), command.expiresAt(), quotePolicy, reservationPolicy,
                 clock.instant());
-        checkWaitingLimit(command.userId());
+        Optional<ExchangeReservation> raced = sameKeyIfLimitReached(command.userId(), key);
+        if (raced.isPresent()) {
+            return replay(raced.get(), command, currencies, amount);
+        }
         walletChecker.check(command.userId(), command.walletId(), currencies.from(), currencies.to());
 
         try {
-            ExchangeReservation saved = transactionOperations.execute(status -> {
+            Registration registration = transactionOperations.execute(status -> {
                 reservationRepository.lockUserForReservation(command.userId());
+                // 잠금을 기다리는 동안 같은 키의 요청이 먼저 저장했을 수 있다. 세기 전에 보아야, 그 요청이 마지막 자리를
+                // 채웠을 때 재요청이 한도 초과(409)가 아니라 처음 예약을 받는다
+                Optional<ExchangeReservation> sameKey =
+                        reservationRepository.findByUserIdAndIdempotencyKey(command.userId(), key);
+                if (sameKey.isPresent()) {
+                    return new Registration(sameKey.get(), false);
+                }
                 checkWaitingLimit(command.userId());
-                return reservationRepository.save(reservation);
+                return new Registration(reservationRepository.save(reservation), true);
             });
+            if (!registration.created()) {
+                return replay(registration.reservation(), command, currencies, amount);
+            }
+            ExchangeReservation saved = registration.reservation();
             log.info("환전 예약: reservationId={}, userId={}, {} → {}, targetRate={}, expiresAt={}", saved.getId(),
                     saved.getUserId(), saved.getFromCurrency(), saved.getToCurrency(), saved.getTargetRate(),
                     saved.getExpiresAt());
@@ -146,6 +162,22 @@ public class ExchangeReservationService {
         if (reservationRepository.countWaitingByUserId(userId) >= reservationPolicy.maxWaitingPerUser()) {
             throw new BusinessException(ExchangeReservationErrorCode.TOO_MANY_WAITING);
         }
+    }
+
+    /**
+     * 잠그기 전의 빠른 확인입니다. 한도에 찼으면, 처음 조회 뒤에 같은 키의 요청이 저장해 자리를 채운 것일 수 있어
+     * 같은 키 예약을 한 번 더 찾습니다. 있으면 그 예약(재요청으로 응답), 없으면 한도 초과(409)입니다.
+     */
+    private Optional<ExchangeReservation> sameKeyIfLimitReached(UUID userId, IdempotencyKey key) {
+        if (reservationRepository.countWaitingByUserId(userId) < reservationPolicy.maxWaitingPerUser()) {
+            return Optional.empty();
+        }
+        return Optional.of(reservationRepository.findByUserIdAndIdempotencyKey(userId, key)
+                .orElseThrow(() -> new BusinessException(ExchangeReservationErrorCode.TOO_MANY_WAITING)));
+    }
+
+    /** 잠금 안에서 저장했으면 created가 true, 같은 키 예약이 이미 있었으면 false(재요청) */
+    private record Registration(ExchangeReservation reservation, boolean created) {
     }
 
     private ExchangeReservationView replay(ExchangeReservation existing, ReserveCommand command,

@@ -309,6 +309,47 @@ class ExchangeReservationIntegrationTest {
                 + ".exchange_reservations WHERE user_id = ? AND status = 'WAITING'", Integer.class, OWNER));
     }
 
+    /**
+     * 대기 예약이 9건인 회원이 같은 키·같은 내용으로 8번 동시에 보내면(응답을 못 받은 앱의 재시도),
+     * 하나가 마지막 자리를 채우고 나머지는 한도 초과가 아니라 모두 그 예약을 받는다.
+     */
+    @Test
+    void concurrentRetriesOfSameKeyAtLastSlotAllGetSameReservation() throws Exception {
+        for (int i = 1; i <= 9; i++) {
+            reserve(OWNER, "seed-" + i, "830.00").andExpect(status().isCreated());
+        }
+
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<String>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < threads; i++) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        return reservationService.reserve(new ReserveCommand(OWNER, "retry-key", WALLET_ID, Currency.KRW,
+                                Currency.JPY, new BigDecimal("100000"), new BigDecimal("830.00"),
+                                Instant.parse("2026-11-17T03:00:00Z"))).reservation().getId().toString();
+                    } catch (BusinessException e) {
+                        return e.getErrorCode().getCode();
+                    }
+                }));
+            }
+            start.countDown();
+            List<String> outcomes = new ArrayList<>();
+            for (Future<String> result : results) {
+                outcomes.add(result.get(30, TimeUnit.SECONDS));
+            }
+            assertEquals(1, outcomes.stream().distinct().count(), outcomes.toString());
+            UUID.fromString(outcomes.getFirst());
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(10, jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA
+                + ".exchange_reservations WHERE user_id = ? AND status = 'WAITING'", Integer.class, OWNER));
+    }
+
     /** 여러 인스턴스가 같은 예약을 동시에 체결하려 해도 주문은 하나다(먼저 잠근 쪽만 체결, 나머지는 SKIP LOCKED로 건너뜀) */
     @Test
     void concurrentExecutionCreatesSingleOrder() throws Exception {

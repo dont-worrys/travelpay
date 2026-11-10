@@ -105,6 +105,35 @@ class ExchangeReservationServiceTest {
         verifyNoInteractions(walletChecker);
     }
 
+    /**
+     * 같은 키의 처음 요청이 잠금을 먼저 잡고 마지막 자리(10번째)를 채운 경우: 재요청은 잠금 뒤 세기 전에 같은 키 예약을 찾아
+     * 한도 초과(409)가 아니라 처음 예약으로 응답한다.
+     */
+    @Test
+    void retryWaitingOnLockGetsFirstReservationEvenIfItFilledLastSlot() {
+        ExchangeReservation first = reservation("830.00");
+        when(reservationRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
+                .thenReturn(Optional.empty(), Optional.of(first));
+        when(reservationRepository.countWaitingByUserId(USER_ID)).thenReturn(9L, 10L);
+
+        assertSame(first, service.reserve(command("100000", "830")).reservation());
+        verify(reservationRepository).countWaitingByUserId(USER_ID); // 잠근 뒤에는 세지 않음
+        verify(reservationRepository, never()).save(any());
+    }
+
+    /** 처음 조회와 잠그기 전 확인 사이에 같은 키 요청이 마지막 자리를 채웠어도, 한도 초과가 아니라 처음 예약으로 응답한다 */
+    @Test
+    void retrySeeingFullLimitBeforeLockGetsFirstReservation() {
+        ExchangeReservation first = reservation("830.00");
+        when(reservationRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
+                .thenReturn(Optional.empty(), Optional.of(first));
+        when(reservationRepository.countWaitingByUserId(USER_ID)).thenReturn(10L);
+
+        assertSame(first, service.reserve(command("100000", "830")).reservation());
+        verifyNoInteractions(walletChecker);
+        verify(reservationRepository, never()).lockUserForReservation(any());
+    }
+
     @Test
     void rejectsSameKeyForAnotherReservation() {
         when(reservationRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
