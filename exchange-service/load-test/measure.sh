@@ -119,10 +119,20 @@ printf "SELECT extract(epoch FROM now())::bigint, (SELECT count(*) FROM pg_stat_
     | docker compose exec -T measure-postgres psql -U exchange_app -d travelpay -qAt -F $'\t' >"$session_samples" &
 session_pid=$!
 
+k6_started=$(date +%s)
 docker compose run --rm -e VUS="${VUS}" -e LABEL="${LABEL}" -e WARMUP="${WARMUP_SECONDS}s" \
     -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet "/scripts/${SCRIPT}"
 k6_ended=$(date +%s)
 pc_after=$(bash pc-state.sh)
+# k6가 도는 동안 PC가 대기 모드에 들어간 횟수(Windows가 아니면 null). 하나라도 있으면 아래에서 무효로 끝낸다
+standby=$(bash standby-events.sh "$k6_started" "$k6_ended")
+standby=${standby:-null}
+if [ "$standby" != null ] && [ "$standby" != 0 ]; then
+    echo "무효 측정: k6가 도는 동안 PC가 대기 모드에 ${standby}번 들어갔습니다(CPU 제한·Docker 일시 정지)." >&2
+    echo "  Windows 설정 > 전원 > 전원에 연결된 경우 화면 끄기·절전을 '안 함'으로 두고 다시 잽니다 (README \"측정 전 PC 조건\")." >&2
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
 
 # 측정 중에 전원 모드나 충전기 연결이 바뀌면 PC 성능이 달라져 처리량이 흔들린다(README "측정 전 PC 조건"). 무효로 끝낸다
 pc_power() { echo "$1" | grep -o '"powerMode": [^,]*\|"charger": [^,]*' | tr '\n' ' '; }
@@ -175,7 +185,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
     -v quoteAll="$quote_all" -v quoteMeasure="$quote_measure" -v quoteDb="$quote_db" -v quoteRedis="$quote_redis" \
     -v redisUsed="$redis_used" -v redisMax="$redis_maxmemory" -v redisPolicy="$redis_policy" \
     -v label="$LABEL" -v vus="$VUS" \
-    -v pcBefore="$pc_before" -v pcAfter="$pc_after" -v histogram="$histogram" -v prometheus="$prometheus" '
+    -v pcBefore="$pc_before" -v pcAfter="$pc_after" -v histogram="$histogram" -v prometheus="$prometheus" -v standby="$standby" '
     FNR == 1 { file++ }
     $1 < from || $1 > to || $2 == "" { next }
     # 커넥션 풀 표본은 지표 6개가 모두 있어야 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 더해져
@@ -238,8 +248,8 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         acqAvgMs = (c1 > c0) ? (s1 - s0) / (c1 - c0) * 1000 : 0
         printf "{\n"
         printf "  \"label\": \"%s\",\n  \"vus\": %d,\n", label, vus
-        # 측정 조건: 히스토그램(true면 Grafana p95용 구간을 셈), Prometheus 수집 여부, k6 직전·직후 PC 상태
-        printf "  \"conditions\": {\"histogram\": \"%s\", \"prometheus\": \"%s\", \"pcBefore\": %s, \"pcAfter\": %s},\n", histogram, prometheus, pcBefore, pcAfter
+        # 측정 조건: 히스토그램(true면 Grafana p95용 구간을 셈), Prometheus 수집 여부, k6 직전·직후 PC 상태, k6 중 대기 모드 진입 수
+        printf "  \"conditions\": {\"histogram\": \"%s\", \"prometheus\": \"%s\", \"pcBefore\": %s, \"pcAfter\": %s, \"standbyEntries\": %s},\n", histogram, prometheus, pcBefore, pcAfter, standby
         printf "  \"samples\": {\"hikari\": %d, \"sessions\": %d},\n", n, m
         printf "  \"hikariPending\": {\"avg\": %.2f, \"max\": %d},\n", (n ? pend / n : 0), pendMax
         printf "  \"hikariActive\": {\"avg\": %.2f, \"max\": %d},\n", (n ? act / n : 0), actMax
