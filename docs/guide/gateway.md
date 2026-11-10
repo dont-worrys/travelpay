@@ -82,7 +82,7 @@ User 보호 API의 중복 세션 확인 호출을 줄이는 구조는 후속 검
 | `/api/v1/payments/**`, `/api/v1/transfers/**` | Payment | 제거 |
 | 환율·한도·견적·환전 경로 | Exchange | 제거 |
 
-환전 경로는 `/api/v1/exchange-rates/**`, `/api/v1/exchange-limits/**`, `/api/v1/exchange-quotes/**`, `/api/v1/exchanges/**`입니다. 정확한 매핑은 실행 시 사용하는 Gateway 설정의 `routes` 목록을 기준으로 합니다. `/internal/**`, `/actuator/**`는 외부 API 라우트에 없습니다.
+환전 경로는 `/api/v1/exchange-rates/**`, `/api/v1/exchange-limits/**`, `/api/v1/exchange-quotes/**`, `/api/v1/exchanges/**`, `/api/v1/exchange-reservations/**`입니다. 정확한 매핑은 실행 시 사용하는 Gateway 설정의 `routes` 목록을 기준으로 합니다. `/internal/**`, `/actuator/**`는 외부 API 라우트에 없습니다.
 
 로그인 없이 통과하는 조합은 다음과 같습니다. 공개 API라도 회원가입·로그인·로그아웃의 CSRF 및 세션 확인은 User가 담당합니다.
 

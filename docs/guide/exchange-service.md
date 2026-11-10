@@ -62,6 +62,10 @@ API 문서는 로컬에서 Swagger UI `http://localhost:8084/swagger-ui.html`로
 | `POST /api/v1/exchanges` | 환전 신청 | 필요 | **필수** | 200·202 |
 | `GET /api/v1/exchanges` | 본인 환전 내역 (`status`, `type`, `page`, `size`) | 필요 | 없음 | 200 |
 | `GET /api/v1/exchanges/{orderId}` | 본인 환전 상세 | 필요 | 없음 | 200 |
+| `POST /api/v1/exchange-reservations` | 예약 환전 등록 | 필요 | **필수** | 201 |
+| `GET /api/v1/exchange-reservations` | 본인 예약 목록 (`status`, `page`, `size`) | 필요 | 없음 | 200 |
+| `GET /api/v1/exchange-reservations/{reservationId}` | 본인 예약 상세 (체결됐으면 주문 ID·주문 상태) | 필요 | 없음 | 200 |
+| `POST /api/v1/exchange-reservations/{reservationId}/cancel` | 대기 중인 예약 취소 | 필요 | 없음 | 200 |
 
 관리자(MASTER) API는 [관리자 처리](#관리자-처리-manual_review) 절에 있습니다.
 
@@ -165,7 +169,7 @@ curl -s -H "User-Id: $USER" -H 'User-Role: USER' -H 'Content-Type: application/j
 
 | 항목 | 규칙 |
 |---|---|
-| `Idempotency-Key` 헤더 | 필수. 공백·제어 문자 없는 ASCII 1~100자. 없거나 형식이 틀리면 400 `EXCHANGE_INVALID_IDEMPOTENCY_KEY` |
+| `Idempotency-Key` 헤더 | 필수. 공백·제어 문자 없는 ASCII 1~100자. 없거나 형식이 틀리면 400 `EXCHANGE_INVALID_IDEMPOTENCY_KEY`. `reservation:`으로 시작하는 키는 예약 체결 주문 전용이라 같은 400 |
 | `quoteId` | 필수. 본인 견적 |
 | `walletId` | 필수. 본인 지갑 |
 
@@ -261,6 +265,83 @@ sequenceDiagram
 
 정체·대기 수는 복구 스케줄러가 30초마다 세어 두고, 지표는 그 값만 읽습니다. 세기에 실패하면 0이 아니라 이전 값을 유지합니다.
 
+## 예약 환전
+
+목표 환율(매매기준율)을 걸어 두면, 환율이 그 값에 닿았을 때 서버가 자동으로 환전 주문을 만듭니다. **예약할 때는 돈이 움직이지 않고**(잔액을 묶어 두지 않음), 체결할 때 보통 환전과 같은 주문·원장 처리를 거칩니다.
+
+### 등록 (`POST /api/v1/exchange-reservations`)
+
+| 항목 | 규칙 |
+|---|---|
+| `Idempotency-Key` 헤더 | 필수. 환전 신청과 같은 형식. 같은 키·같은 내용이면 처음 예약을 201로 다시 돌려주고, 내용이 다르면 409 `EXCHANGE_RESERVATION_IDEMPOTENCY_KEY_REUSED` |
+| `walletId` | 필수. 본인 지갑 (등록할 때 확인) |
+| `fromCurrency`·`toCurrency` | 원화 ↔ 외화 (JPY·CNY) |
+| `amount` | 보내는 금액. 견적과 같은 1회 한도 |
+| `targetRate` | 목표 매매기준율. 환율 조회와 같은 단위(JPY 100엔당, CNY 1위안당), 소수 둘째 자리까지 |
+| `expiresAt` | 만료 시각(UTC). 지금 이후, 최대 30일(`exchange.reservation.max-period`) |
+
+```json
+{ "walletId": "3b9a…", "fromCurrency": "KRW", "toCurrency": "JPY", "amount": "100000",
+  "targetRate": "830.00", "expiresAt": "2026-11-17T03:00:00Z" }
+```
+
+- 체결 조건은 통화쌍으로 정해지며 응답의 `condition`으로 보여 줍니다.
+  - 원화 → 외화(외화를 삼): 환율이 목표 **이하**가 되면 체결 (`AT_OR_BELOW`)
+  - 외화 → 원화(외화를 팖): 환율이 목표 **이상**이 되면 체결 (`AT_OR_ABOVE`)
+- 회원당 대기 예약은 최대 10건(`exchange.reservation.max-waiting-per-user`)입니다. 넘으면 409 `EXCHANGE_RESERVATION_TOO_MANY_WAITING`. 동시에 몰린 요청은 한도를 조금 넘을 수 있습니다(저장 전에 세기 때문).
+
+### 상태
+
+| 상태 | 뜻 |
+|---|---|
+| `WAITING` | 조건을 기다리는 중. 취소 가능 |
+| `EXECUTED` | 체결됨. `orderId`의 주문이 만들어졌고, 결과(완료·실패)는 `orderStatus`로 확인 |
+| `CANCELED` | 취소됨. `cancelReason`: `USER_REQUESTED`(사용자), `WALLET_UNAVAILABLE`(체결 때 지갑 해지·사용 불가), `EXECUTION_REJECTED`(체결 때 한도 변경 등으로 주문 불가) |
+| `EXPIRED` | 만료 시각까지 체결되지 않음 |
+
+`EXECUTED`는 "주문을 만들었다"는 뜻입니다. 잔액 부족 같은 이유로 원장이 거절하면 예약은 `EXECUTED`, 주문은 `FAILED`입니다.
+
+### 체결 흐름
+
+```mermaid
+sequenceDiagram
+    participant S as 환율 수집 스케줄러
+    participant E as exchange-service
+    participant W as wallet-service
+    participant L as ledger-service
+    S->>E: 새 환율 저장(커밋)·캐시 갱신
+    E->>E: 조건에 닿은 대기 예약 찾기 (만료 전, 먼저 예약한 순)
+    loop 예약마다
+        E->>W: 지갑 확인 (트랜잭션 밖)
+        E->>E: [한 트랜잭션] 예약 잠금 → 조건 재확인 → 주문 저장 → 예약 EXECUTED
+        E->>L: 원장 거래 등록 (보통 환전과 같은 처리)
+    end
+```
+
+1. 환율 수집기가 새 환율을 저장하면 그 환율로 조건에 닿은 대기 예약을 찾습니다. 환율은 수집할 때만 바뀌므로 주기적으로 전체를 훑지 않습니다. 새로 저장한 서버만 알림을 받아, 서버가 여러 대여도 한 곳에서 찾습니다.
+2. 예약마다 지갑을 확인합니다.
+3. 한 트랜잭션에서 예약을 `FOR UPDATE SKIP LOCKED`로 잠그고 조건·만료를 다시 확인한 뒤, **조건을 충족시킨 그 환율**로 체결용 견적(`QuoteType.RESERVATION`)을 메모리에서 만들어 주문에 복사합니다. 주문과 예약 상태(주문 ID·체결 시각)를 함께 커밋해, 주문만 있거나 체결만 기록되는 일이 없습니다.
+   - 주문 멱등 키는 `reservation:{예약 ID}`라 같은 예약으로 주문을 두 번 만들 수 없습니다. 이 접두어는 환전 신청에서 받지 않습니다.
+   - 주문 생성 이력은 `SYSTEM`으로 남습니다.
+4. 커밋 뒤 원장에 보냅니다. 결과를 모르면 주문은 `PROCESSING`으로 남고 [복구 스케줄러](#복구-스케줄러)가 이어서 처리합니다.
+
+| 체결 중 실패 | 결과 |
+|---|---|
+| 지갑 서비스·원장 장애 | `WAITING` 유지. 다음 새 환율 때 조건이 맞으면 다시 체결 |
+| 지갑 없음(해지)·통화 사용 불가 | `CANCELED` (`WALLET_UNAVAILABLE`) |
+| 체결 시점 1회 한도 밖 | `CANCELED` (`EXECUTION_REJECTED`) |
+| 사용자 취소·다른 서버의 체결과 겹침 | 먼저 잠근 쪽만 반영. 체결이 먼저면 취소는 409 `EXCHANGE_RESERVATION_NOT_WAITING` |
+| DB 장애 등 예상 밖 오류 | 롤백되어 `WAITING`. 다른 예약은 계속 체결 |
+
+- 지금은 수집 스레드에서 바로 체결합니다(`SynchronousReservationDispatcher`). 체결할 예약이 많으면 그만큼 다음 수집이 늦어지므로, 이후 Kafka로 넘기는 구현으로 바꿀 수 있게 `ReservationDispatcher`로 나눠 두었습니다.
+- `koreaexim` 모드는 하루 한 번 고시라 체결 판단도 하루 한 번입니다. 시연은 5초마다 환율이 바뀌는 `mock` 모드로 확인합니다.
+
+### 만료 스케줄러
+
+- 1분마다(`exchange.reservation.expiry.fixed-delay`) 만료 시각이 지난 대기 예약을 500건씩(`batch-size`) `EXPIRED`로 바꿉니다. 한 번에 최대 20배치, 남으면 다음 주기에 처리합니다.
+- 체결·취소 중이라 잠긴 예약은 건너뜁니다(SKIP LOCKED). 만료된 예약은 매칭·체결에서 이미 빠지므로, 상태 변경이 몇 분 늦어도 체결은 잘못되지 않습니다.
+- 끄려면 `exchange.reservation.expiry.enabled=false`.
+
 ## 관리자 처리 (MANUAL_REVIEW)
 
 `User-Role`이 `MASTER`가 아니면 403 `COMMON_FORBIDDEN`입니다. Gateway 경로는 `/api/v1/admin/exchanges/**`입니다.
@@ -296,16 +377,22 @@ sequenceDiagram
 | 400 | `EXCHANGE_UNSUPPORTED_CURRENCY` | KRW·JPY·CNY가 아닌 통화 |
 | 400 | `EXCHANGE_UNSUPPORTED_PAIR` | 원화 ↔ 외화가 아닌 통화쌍 |
 | 400 | `EXCHANGE_INVALID_AMOUNT` | 자릿수 초과, 1회 한도 밖, 받는 금액이 0 |
-| 400 | `EXCHANGE_INVALID_IDEMPOTENCY_KEY` | `Idempotency-Key` 없음·형식 오류 |
+| 400 | `EXCHANGE_INVALID_IDEMPOTENCY_KEY` | `Idempotency-Key` 없음·형식 오류, 환전 신청에 `reservation:` 키 |
+| 400 | `EXCHANGE_RESERVATION_INVALID_TARGET_RATE` | 목표 환율이 0 이하이거나 소수 셋째 자리 이상 |
+| 400 | `EXCHANGE_RESERVATION_INVALID_EXPIRY` | 만료 시각이 지금 이전이거나 최대 예약 기간 밖 |
 | 401 | `COMMON_UNAUTHORIZED` | 회원 헤더 없음(Gateway 경유 시 세션 없음) |
 | 403 | `COMMON_FORBIDDEN` | 관리자 API를 MASTER가 아닌 회원이 호출 |
 | 404 | `EXCHANGE_QUOTE_NOT_FOUND` | 견적 없음·남의 견적·키 수명(10분) 지남 |
 | 404 | `EXCHANGE_ORDER_NOT_FOUND` | 주문 없음·남의 주문 |
 | 404 | `EXCHANGE_WALLET_NOT_FOUND` | 지갑 없음·남의 지갑 |
+| 404 | `EXCHANGE_RESERVATION_NOT_FOUND` | 예약 없음·남의 예약 |
 | 409 | `EXCHANGE_QUOTE_EXPIRED` | 견적 만료 |
 | 409 | `EXCHANGE_QUOTE_ALREADY_USED` | 다른 신청에 이미 쓴 견적 |
 | 409 | `EXCHANGE_IDEMPOTENCY_KEY_REUSED` | 같은 키로 다른 견적·지갑 |
 | 409 | `EXCHANGE_WALLET_NOT_AVAILABLE` | 지갑·통화 계정을 쓸 수 없음 |
+| 409 | `EXCHANGE_RESERVATION_TOO_MANY_WAITING` | 대기 예약이 회원당 한도(10건) |
+| 409 | `EXCHANGE_RESERVATION_IDEMPOTENCY_KEY_REUSED` | 같은 키로 다른 내용의 예약 |
+| 409 | `EXCHANGE_RESERVATION_NOT_WAITING` | 이미 체결·취소·만료된 예약을 취소 |
 | 409 | `EXCHANGE_NOT_MANUAL_REVIEW` | 관리자 처리 대상이 아니거나 이미 처리됨 |
 | 409 | `EXCHANGE_LEDGER_CORRECTION_REQUIRED` | 원장 항목이 주문과 달라 처리 불가 |
 | 422 | `EXCHANGE_LEDGER_REJECTED_*` | 원장 거절 (주문 `FAILED`) |
@@ -326,6 +413,7 @@ sequenceDiagram
 | `exchange_rates` | 수집한 환율 이력. 출처·통화별 최신 행이 현재 환율. 수출입은행은 통화·고시일당 1건(`uk_exchange_rates_koreaexim_daily`) |
 | `exchange_orders` | 환전 주문. 견적 내용을 복사한 스냅샷이라 이 행만으로 어떤 환율·수수료로 얼마를 주고받았는지 증빙. 상태 변경은 조건부 UPDATE로만 |
 | `exchange_order_status_histories` | 주문 상태 이력 (INSERT만). 관리자 처리면 관리자 ID·원장 거래 ID·메모 |
+| `exchange_reservations` | 예약 환전. 체결되면 만든 주문 ID(`UNIQUE`)를 남김. 상태 변경은 조건부 UPDATE로만, 매칭·만료 조회는 대기 예약만 담은 부분 인덱스 |
 | `exchange_quotes` | **사용하지 않음.** 견적은 Redis로 옮겼고(#223), 비교 측정 뒤 지울 예정 |
 
 | 버전 | 내용 |
@@ -336,6 +424,8 @@ sequenceDiagram
 | V4 | `MANUAL_REVIEW` 상태 |
 | V5 | 관리자 처리 컬럼, `MANUAL_REVIEW` 목록 부분 인덱스 |
 | V6 | 관리자 처리 이력 부분 인덱스(`changed_by_type = 'MASTER'`) |
+| V7 | 예약 환전 테이블, 매칭·만료 부분 인덱스(`status = 'WAITING'`) |
+| V8 | 예약 취소 사유(`cancel_reason`) |
 
 Redis 키
 
@@ -356,6 +446,9 @@ Redis 키
 | 같은 키 재요청은 원장을 부르지 않음 | 원장 호출을 첫 신청과 복구 스케줄러 두 곳으로 줄여 경쟁과 부하를 막음 | 재요청한 사용자는 스케줄러 확정까지 202 |
 | 관리자 처리 결과는 서버가 원장 조회로 정함 | 돈의 원본은 원장. 사람이 상태를 고르면 원장과 어긋날 수 있음 | 원장 항목이 다르면 처리 못 함(원장 보정 필요) |
 | 최신 환율 Redis 캐시 | DB 연결 대기가 병목이었음(쿼리를 줄인 v0.5도 대기 159) | 캐시 장애 시 DB로 읽어 느려짐 |
+| 예약 체결은 메모리 견적 → 보통 주문 | 주문 테이블·원장 처리·복구·관리자 처리를 그대로 재사용 | 체결 견적은 따로 저장하지 않음(주문에 값이 복사됨) |
+| 예약 매칭은 수집 직후 한 번 | 환율은 수집할 때만 바뀜. 주기적으로 전체를 훑지 않고 부분 인덱스로 조건에 닿은 예약만 읽음 | `koreaexim`은 하루 한 번만 판단 |
+| 예약할 때 잔액을 묶지 않음 | 잔액 홀드는 지갑·원장 변경이 필요 | 체결 때 잔액이 부족하면 주문이 `FAILED` |
 | 견적 Redis 저장 | 5분짜리 데이터에 DB INSERT·커밋이 연결을 잡음 | Redis 장애·재시작 시 아직 안 쓴 견적은 다시 받아야 함. 배포 때 옛·새 버전을 함께 띄우면 서로 견적을 못 찾아 옛 인스턴스를 내린 뒤 새 버전을 띄움 |
 
 ## 테스트
@@ -367,7 +460,7 @@ Redis 키
 - 단위 테스트는 DB 없이 돕니다. 원장·지갑은 가짜 객체로 바꿔 응답별 주문 상태, 재요청, 복구 대기 시간, 관리자 처리 규칙을 확인합니다.
 - 통합 테스트(`*IntegrationTest`)는 Testcontainers로 PostgreSQL(`postgres:18.6-bookworm`)과 Redis(`redis:8.2.11-bookworm`)를 띄웁니다. Docker만 실행 중이면 되고, 없으면 건너뜁니다.
   - 견적을 쓰는 테스트는 공용 Redis 컨테이너(`TestRedis`)를 함께 씁니다.
-- 2026-11-09 기준(dev `6c0712e`) 569건이 모두 통과합니다.
+- 2026-11-10 기준(#240 예약 환전 브랜치) 644건이 모두 통과합니다.
 
 | 확인 대상 | 테스트 |
 |---|---|
@@ -378,6 +471,7 @@ Redis 키
 | 관리자 처리 (원장 흉내 HTTP 서버) | `ManualReviewResolutionTest`, `ExchangeAdminServiceTest`, `AdminExchangeManualReviewHttpIntegrationTest` |
 | 환율 수집·캐시·Redis 장애 | `ExchangeRateCollectorTest`, `KoreaEximRateProviderTest`, `ExchangeRateCacheIntegrationTest`, `ExchangeRateCacheOutageIntegrationTest`, `ExchangeRatePartialCollectionIntegrationTest` |
 | 견적 Redis 저장·상태 | `ExchangeQuoteServiceTest`, `ExchangeQuoteIntegrationTest` |
+| 예약 등록·매칭·체결·실패·만료 | `ExchangeReservationTest`, `ExchangeReservationServiceTest`, `ExchangeReservationExecutorTest`, `ExchangeReservationPersistenceIntegrationTest`, `ExchangeReservationIntegrationTest` |
 | 계층 규칙, API 문서 | `ArchitectureTest`, `ApiDocsProfileTest` |
 
 부하 측정 도구(k6, 버전 비교)는 `exchange-service/load-test/README.md`에 있습니다.
