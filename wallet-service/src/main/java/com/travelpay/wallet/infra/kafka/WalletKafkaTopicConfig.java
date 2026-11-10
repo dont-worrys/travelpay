@@ -10,11 +10,12 @@ import org.springframework.kafka.config.TopicBuilder;
 public class WalletKafkaTopicConfig {
 
     public static final String CHARGE_REQUESTED = "wallet.charge.requested";
+    public static final int CHARGE_REQUESTED_PARTITIONS = 3;
 
     @Bean
     public NewTopic chargeRequestedTopic() {
         return TopicBuilder.name(CHARGE_REQUESTED)
-                .partitions(3)
+                .partitions(CHARGE_REQUESTED_PARTITIONS)
                 .replicas(1)    // 로컬 브로커 1대
                 .build();
     }

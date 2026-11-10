@@ -23,10 +23,23 @@ spring:
             # 원장 최대 응답(약 5초)보다 길게
             connect-timeout: 1000
             read-timeout: 6000
+          # 원장 거래 등록 클라이언트 (contextId로 설정 키가 나뉨). 계정 클라이언트와 같은 값
+          ledger-transaction:
+            connect-timeout: 1000
+            read-timeout: 6000
+          mock-bank:
+            # 은행 응답이 이보다 늦으면 결과 모름으로 두고 같은 requestId로 다시 보낸다
+            connect-timeout: 1000
+            read-timeout: 5000
           user-service:
-            # 실명 조회는 단건 조회라 짧게. 초과하면 503 (재시도는 호출자가 같은 키로)
+            # 실명 조회는 단건 조회라 짧게. 초과하면 504 (재시도는 호출자가 같은 키로)
             connect-timeout: 1000
             read-timeout: 2000
+  task:
+    scheduling:
+      pool:
+        # 복구·Outbox 발행·충전 대사가 각자 스레드를 쓴다 (외부 호출이 긴 배치가 다른 스케줄러를 막지 않게)
+        size: 3
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -41,6 +54,11 @@ spring:
         linger.ms: 5
         # Kafka가 꺼져 있으면 send() 자체가 기본 60초 멈춤 → 짧게 제한
         max.block.ms: 3000
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 컨슈머 그룹이 처음 붙을 때 그 전에 쌓인 충전 이벤트도 처리
+      auto-offset-reset: earliest
 
 travelpay:
   auth:
@@ -55,7 +73,45 @@ travelpay:
         # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
         fixed-delay: 1s
         batch-size: 50
+    charge:
+      saga:
+        consumer:
+          # 끄면 충전 SAGA 컨슈머가 시작하지 않는다 (테스트용)
+          enabled: true
+          # 컨슈머 스레드 수 (1 이상). 토픽 파티션 수(3)보다 크면 남는 컨슈머는 유휴
+          concurrency: 1
+      recovery:
+        # 처리 중 상태로 멈춘 충전을 다시 실행. 끄면 복구 스케줄러가 등록되지 않는다 (테스트용)
+        enabled: true
+        # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
+        fixed-delay: 10s
+        batch-size: 10
+      reconciliation:
+        # 은행·충전·원장 3자 대사 스케줄러. 끄면 스케줄러만 등록되지 않고 관리자 수동 실행은 그대로 된다 (테스트용)
+        enabled: true
+        # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
+        fixed-delay: 10m
+        # 닫힌 기간의 끝 = 지금 − grace. 은행·원장 기록이 늦게 남는 시간을 기다린다
+        grace: 5m
+        # 다음 기간 시작 = 직전 실행 period_to − overlap (경계 근처 기록을 다시 본다)
+        overlap: 10m
+        # 실행 한 번의 최대 기간. 밀린 기간은 다음 주기들이 따라잡는다. 수동 실행이 넘으면 400
+        max-period: 1d
+        # 이보다 오래된 RUNNING은 새 실행 전에 FAILED로 정리한다
+        running-timeout: 30m
+        # 직전 실행(COMPLETED·PARTIAL)이 없을 때 시작점
+        initial-from: "2026-11-01T00:00:00Z"
+      resolution:
+        # 운영자 보정: MANUAL_REVIEW 전환(updated_at) 후 이 시간이 지난 은행·원장 NotFound만 "없음"으로 인정한다
+        not-found-confirm-after: 10m
   client:
+    bank:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 mock-bank를 찾는다
+      url: ${MOCK_BANK_URL:}
+      # 은행 응답 유실 재현 (로컬 검증 전용). 이후 rate 등 하위 키를 추가할 수 있게 묶어 둔다
+      fault-injection:
+        # 비우면 끔. LOST·DELAY면 출금 첫 시도에만 Mock-Fault 헤더를 보낸다. 그 외 값·prod 프로필에서 값 있음은 기동 실패
+        mode: ${BANK_FAULT_INJECTION_MODE:}
     ledger:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
       url: ${LEDGER_SERVICE_URL:}
@@ -65,6 +121,13 @@ travelpay:
 
 server:
   port: 8082
+
+# API 문서(Swagger UI: /swagger-ui.html). 외부 API만 그룹으로 노출하며 prod에서는 끕니다.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
 
 eureka:
   instance:
@@ -76,15 +139,29 @@ eureka:
       defaultZone: http://localhost:8761/eureka/
 
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # Prometheus에서 HTTP p95·p99를 계산할 수 있도록 bucket을 발행합니다.
+        http.server.requests: true
   endpoints:
     web:
       exposure:
         include: health,prometheus
 
 logging:
+  # IntelliJ 작업 디렉터리는 프로젝트 루트입니다. Alloy가 앱별 파일을 읽습니다.
+  file:
+    name: infra/monitoring/.local-logs/${spring.application.name}.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 3
+      total-size-cap: 50MB
   structured:
     format:
       console: logstash
+      file: logstash
     json:
       add:
         service: ${spring.application.name}

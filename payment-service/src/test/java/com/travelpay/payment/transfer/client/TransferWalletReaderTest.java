@@ -1,5 +1,7 @@
 package com.travelpay.payment.transfer.client;
 
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -8,6 +10,7 @@ import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
+import com.travelpay.payment.infra.client.wallet.WalletFeignApi;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
@@ -16,7 +19,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import tools.jackson.databind.json.JsonMapper;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,18 +35,18 @@ class TransferWalletReaderTest {
             {"success":false,"data":null,"error":{"code":"WALLET_NOT_FOUND","message":"지갑을 찾을 수 없습니다.","details":[]}}
             """;
 
-    private WalletClient walletClient;
+    private WalletFeignApi walletFeignApi;
     private TransferWalletReader walletReader;
 
     @BeforeEach
     void setUp() {
-        walletClient = mock(WalletClient.class);
-        walletReader = new TransferWalletReader(walletClient, JsonMapper.builder().build());
+        walletFeignApi = mock(WalletFeignApi.class);
+        walletReader = new TransferWalletReader(walletFeignApi);
     }
 
     @Test
     void returnsWalletIdOnlyForActiveWallet() {
-        when(walletClient.getWallet(USER_ID)).thenReturn(ApiResponse.success(new WalletResponse(WALLET_ID, "ACTIVE")));
+        when(walletFeignApi.getWallet(USER_ID)).thenReturn(ApiResponse.success(new WalletFeignApi.WalletResponse(WALLET_ID, "ACTIVE")));
 
         assertEquals(Optional.of(WALLET_ID), walletReader.findActiveWalletId(USER_ID));
     }
@@ -52,14 +54,14 @@ class TransferWalletReaderTest {
     @ParameterizedTest
     @ValueSource(strings = {"PENDING", "SUSPENDED", "CLOSED", "UNKNOWN_NEW_STATUS"})
     void treatsNonActiveWalletAsUnavailable(String status) {
-        when(walletClient.getWallet(USER_ID)).thenReturn(ApiResponse.success(new WalletResponse(WALLET_ID, status)));
+        when(walletFeignApi.getWallet(USER_ID)).thenReturn(ApiResponse.success(new WalletFeignApi.WalletResponse(WALLET_ID, status)));
 
         assertEquals(Optional.empty(), walletReader.findActiveWalletId(USER_ID));
     }
 
     @Test
     void treatsMissingWalletAsUnavailable() {
-        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(404, WALLET_NOT_FOUND_BODY));
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(feignError(404, WALLET_NOT_FOUND_BODY));
 
         assertEquals(Optional.empty(), walletReader.findActiveWalletId(USER_ID));
     }
@@ -67,14 +69,14 @@ class TransferWalletReaderTest {
     @ParameterizedTest
     @ValueSource(strings = {"ACTIVE", "SUSPENDED"})
     void returnsWalletRegardlessOfStatus(String status) {
-        when(walletClient.getWallet(USER_ID)).thenReturn(ApiResponse.success(new WalletResponse(WALLET_ID, status)));
+        when(walletFeignApi.getWallet(USER_ID)).thenReturn(ApiResponse.success(new WalletFeignApi.WalletResponse(WALLET_ID, status)));
 
         assertEquals(Optional.of(new WalletResponse(WALLET_ID, status)), walletReader.findWallet(USER_ID));
     }
 
     @Test
     void returnsEmptyWhenWalletIsMissing() {
-        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(404, WALLET_NOT_FOUND_BODY));
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(feignError(404, WALLET_NOT_FOUND_BODY));
 
         assertEquals(Optional.empty(), walletReader.findWallet(USER_ID));
     }
@@ -86,7 +88,7 @@ class TransferWalletReaderTest {
             ""
     })
     void reportsNotFoundOtherThanMissingWalletAsBadGateway(String body) {
-        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(404, body));
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(feignError(404, body));
 
         var exception = assertThrows(BusinessException.class, () -> walletReader.findWallet(USER_ID));
 
@@ -95,11 +97,31 @@ class TransferWalletReaderTest {
 
     @Test
     void reportsConnectionProblemsAsServiceUnavailable() {
-        when(walletClient.getWallet(USER_ID)).thenThrow(mock(RetryableException.class));
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(new RetryableException(-1, "Connection refused",
+                Request.HttpMethod.GET, new ConnectException("Connection refused"), (Long) null, request()));
 
         var exception = assertThrows(BusinessException.class, () -> walletReader.findActiveWalletId(USER_ID));
 
         assertSame(CommonErrorCode.SERVICE_UNAVAILABLE, exception.getErrorCode());
+    }
+
+    @Test
+    void reportsTimeoutAsGatewayTimeout() {
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(new RetryableException(-1, "Read timed out",
+                Request.HttpMethod.GET, new SocketTimeoutException("Read timed out"), (Long) null, request()));
+
+        var exception = assertThrows(BusinessException.class, () -> walletReader.findActiveWalletId(USER_ID));
+
+        assertSame(CommonErrorCode.GATEWAY_TIMEOUT, exception.getErrorCode());
+    }
+
+    @Test
+    void reportsWalletServiceGatewayTimeoutAsGatewayTimeout() {
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(feignError(504));
+
+        var exception = assertThrows(BusinessException.class, () -> walletReader.findWallet(USER_ID));
+
+        assertSame(CommonErrorCode.GATEWAY_TIMEOUT, exception.getErrorCode());
     }
 
     @ParameterizedTest
@@ -108,7 +130,7 @@ class TransferWalletReaderTest {
             "{\"success\":false,\"data\":null,\"error\":{\"code\":\"COMMON_SERVICE_UNAVAILABLE\",\"message\":\"서비스를 일시적으로 사용할 수 없습니다.\",\"details\":[]}}"
     })
     void reportsWalletServiceUnavailableAsServiceUnavailable(String body) {
-        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(503, body));
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(feignError(503, body));
 
         var exception = assertThrows(BusinessException.class, () -> walletReader.findWallet(USER_ID));
 
@@ -117,7 +139,7 @@ class TransferWalletReaderTest {
 
     @Test
     void reportsOtherWalletErrorsAsBadGateway() {
-        when(walletClient.getWallet(USER_ID)).thenThrow(feignError(500));
+        when(walletFeignApi.getWallet(USER_ID)).thenThrow(feignError(500));
 
         var exception = assertThrows(BusinessException.class, () -> walletReader.findActiveWalletId(USER_ID));
 
@@ -126,12 +148,13 @@ class TransferWalletReaderTest {
 
     @Test
     void reportsUnexpectedResponseBodyAsBadGateway() {
-        when(walletClient.getWallet(USER_ID))
+        when(walletFeignApi.getWallet(USER_ID))
+                .thenReturn(null)
                 .thenReturn(new ApiResponse<>(false, null, ErrorResponse.of(CommonErrorCode.INTERNAL_SERVER_ERROR)))
                 .thenReturn(ApiResponse.success(null))
-                .thenReturn(ApiResponse.success(new WalletResponse(null, "ACTIVE")));
+                .thenReturn(ApiResponse.success(new WalletFeignApi.WalletResponse(null, "ACTIVE")));
 
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             var exception = assertThrows(BusinessException.class, () -> walletReader.findActiveWalletId(USER_ID));
             assertSame(CommonErrorCode.BAD_GATEWAY, exception.getErrorCode());
         }
@@ -141,18 +164,21 @@ class TransferWalletReaderTest {
         return feignError(status, null);
     }
 
-    private static FeignException feignError(int status, String body) {
-        Request request = Request.create(Request.HttpMethod.GET, "http://wallet-service/internal/v1/wallets",
+    private static Request request() {
+        return Request.create(Request.HttpMethod.GET, "http://wallet-service/internal/v1/wallets",
                 Map.of(), null, UTF_8, null);
+    }
+
+    private static FeignException feignError(int status, String body) {
         Response.Builder builder = Response.builder()
                 .status(status)
                 .reason("error")
-                .request(request)
+                .request(request())
                 .headers(Map.of());
         if (body != null) {
             builder.body(body, UTF_8);
         }
         Response response = builder.build();
-        return FeignException.errorStatus("WalletClient#getWallet(UUID)", response);
+        return FeignException.errorStatus("WalletFeignApi#getWallet(UUID)", response);
     }
 }

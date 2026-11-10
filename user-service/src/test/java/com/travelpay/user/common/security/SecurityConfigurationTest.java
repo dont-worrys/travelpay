@@ -57,6 +57,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
@@ -327,7 +328,7 @@ class SecurityConfigurationTest {
         var userId = role == AuthRole.MASTER ? MASTER_ID : USER_ID;
         var securityContext = SecurityContextHolder.createEmptyContext();
         securityContext.setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
-                new UserSessionPrincipal(userId, role, Instant.parse("2026-10-30T00:00:00Z")),
+                new UserSessionPrincipal(userId, role, Instant.parse("2026-10-30T00:00:00Z"), 0L),
                 null, List.of(new SimpleGrantedAuthority(authority))));
         var session = new MockHttpSession(context.getServletContext());
         session.setAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY, securityContext);
@@ -354,7 +355,7 @@ class SecurityConfigurationTest {
         @Bean
         CurrentMemberService currentMemberService() {
             var service = mock(CurrentMemberService.class);
-            when(service.requireActive(any(UUID.class))).thenAnswer(invocation -> {
+            when(service.requireActiveSession(any(UUID.class), anyLong())).thenAnswer(invocation -> {
                 var userId = invocation.getArgument(0, UUID.class);
                 return new AuthenticatedUser(userId, userId.equals(MASTER_ID) ? AuthRole.MASTER : AuthRole.USER);
             });

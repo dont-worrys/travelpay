@@ -15,7 +15,8 @@ import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 /**
- * 로그인 시도 횟수를 세션 Redis에 저장합니다. 확인과 변경을 Lua 스크립트 하나로 실행해 동시 요청도 한도를 넘지 않습니다.
+ * 로그인·현재 비밀번호 확인의 시도 횟수를 세션 Redis에 저장합니다.
+ * 확인과 변경을 Lua 스크립트 하나로 실행해 동시 요청도 한도를 넘지 않습니다.
  * 진행 중인 시도는 실패로 확정하기 전까지 따로 세어, 겹친 요청이 실패 횟수를 부풀려 차단을 앞당기지 않게 합니다.
  * 세션 Redis는 메모리가 차도 키를 지우지 않는 설정이라 횟수와 차단이 조용히 사라지지 않습니다.
  */

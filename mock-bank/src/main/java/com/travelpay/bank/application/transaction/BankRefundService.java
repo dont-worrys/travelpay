@@ -4,7 +4,6 @@ import com.travelpay.bank.application.transaction.dto.BankRefundCommand;
 import com.travelpay.bank.application.transaction.dto.BankTransactionResult;
 import com.travelpay.bank.domain.transaction.BankDuplicateRefundException;
 import com.travelpay.bank.domain.transaction.BankDuplicateRequestException;
-import com.travelpay.bank.domain.transaction.BankTransactionType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -30,7 +29,7 @@ public class BankRefundService {
         } catch (BankDuplicateRefundException e) {
             result = recordAlreadyRefunded(command);
         } catch (BankDuplicateRequestException e) {
-            result = replayer.replay(command.requestId(), BankTransactionType.REFUND);
+            result = replayer.replayRefund(command);
         }
         log.info("환불 처리 requestId={}, originalTxId={}, status={}, failureCode={}, created={}",
                 result.requestId(), command.originalTxId(), result.status(), result.failureCode(), result.created());
@@ -41,7 +40,7 @@ public class BankRefundService {
         try {
             return recorder.recordAlreadyRefunded(command);
         } catch (BankDuplicateRequestException e) {
-            return replayer.replay(command.requestId(), BankTransactionType.REFUND);
+            return replayer.replayRefund(command);
         }
     }
 }

@@ -8,8 +8,9 @@ import lombok.Getter;
 @AllArgsConstructor
 public enum PaymentErrorCode implements ErrorCode {
     MERCHANT_NOT_FOUND("PAYMENT_MERCHANT_NOT_FOUND", "가맹점을 찾을 수 없습니다.", 404),
+    MERCHANT_OWNER_NOT_FOUND("PAYMENT_MERCHANT_OWNER_NOT_FOUND", "가맹점 주인으로 지정할 회원을 찾을 수 없습니다.", 404),
     MERCHANT_NOT_ACTIVE("PAYMENT_MERCHANT_NOT_ACTIVE", "현재 결제가 불가능한 가맹점입니다.", 422),
-    WALLET_NOT_FOUND("PAYMENT_WALLET_NOT_FOUND", "해당 통화의 지갑을 찾을 수 없습니다.", 404),
+    WALLET_NOT_FOUND("PAYMENT_WALLET_NOT_FOUND", "지갑을 찾을 수 없습니다.", 404),
     WALLET_NOT_ACTIVE("PAYMENT_WALLET_NOT_ACTIVE", "현재 결제가 불가능한 지갑입니다.", 422),
     CURRENCY_MISMATCH("PAYMENT_CURRENCY_MISMATCH", "가맹점에서 사용할 수 없는 통화입니다.", 400),
     INVALID_AMOUNT("PAYMENT_INVALID_AMOUNT", "결제 금액은 0보다 커야 합니다.", 400),
@@ -21,8 +22,20 @@ public enum PaymentErrorCode implements ErrorCode {
     REFUND_IN_PROGRESS("PAYMENT_REFUND_IN_PROGRESS", "환불이 진행 중인 결제입니다.", 409),
     ALREADY_REFUNDED("PAYMENT_ALREADY_REFUNDED", "이미 환불된 결제입니다.", 409),
     REFUND_DECLINED("PAYMENT_REFUND_DECLINED", "환불이 거절되었습니다.", 422),
+    REFUND_AMOUNT_EXCEEDED("PAYMENT_REFUND_AMOUNT_EXCEEDED", "환불 가능 금액을 초과했습니다.", 422),
+    REFUND_PERIOD_EXPIRED("PAYMENT_REFUND_PERIOD_EXPIRED", "환불 가능 기간이 지난 결제입니다.", 422),
+    REFUND_NOT_REQUESTED("PAYMENT_REFUND_NOT_REQUESTED", "환불 신청이 없는 결제입니다.", 422),
     REFUND_IDEMPOTENCY_KEY_REUSED("PAYMENT_REFUND_IDEMPOTENCY_KEY_REUSED", "이미 다른 환불에 사용된 요청 키입니다.", 409),
-    ;
+    ALREADY_SETTLED("PAYMENT_ALREADY_SETTLED", "이미 정산된 결제라 환불할 수 없습니다.", 409),
+    SETTLEMENT_WALLET_NOT_AVAILABLE("PAYMENT_SETTLEMENT_WALLET_NOT_AVAILABLE", "정산 받을 가맹점 주인의 지갑이 없거나 사용할 수 없습니다.", 422),
+    NO_SETTLEMENT_TARGET("PAYMENT_NO_SETTLEMENT_TARGET", "정산할 결제가 없습니다.", 422),
+    SETTLEMENT_DECLINED("PAYMENT_SETTLEMENT_DECLINED", "정산이 거절되었습니다.", 422),
+    SETTLEMENT_NOT_FOUND("PAYMENT_SETTLEMENT_NOT_FOUND", "정산을 찾을 수 없습니다.", 404),
+    SETTLEMENT_IDEMPOTENCY_KEY_REUSED("PAYMENT_SETTLEMENT_IDEMPOTENCY_KEY_REUSED", "이미 다른 정산에 사용된 요청 키입니다.", 409),
+    LEDGER_LOOKUP_UNAVAILABLE("PAYMENT_LEDGER_LOOKUP_UNAVAILABLE", "원장 거래 결과를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.", 503),
+    REFUND_NOT_FOUND("PAYMENT_REFUND_NOT_FOUND", "환불을 찾을 수 없습니다.", 404),
+    NOT_MANUAL_REVIEW("PAYMENT_NOT_MANUAL_REVIEW", "운영자 처리 대상(MANUAL_REVIEW)이 아니거나 이미 처리되었습니다.", 409),
+    LEDGER_CORRECTION_REQUIRED("PAYMENT_LEDGER_CORRECTION_REQUIRED", "원장 거래 내용이 요청과 달라 자동으로 처리할 수 없습니다. 원장 보정이 필요합니다.", 409),    ;
     private final String code;
     private final String message;
     private final int status;

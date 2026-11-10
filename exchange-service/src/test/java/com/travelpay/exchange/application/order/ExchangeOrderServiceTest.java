@@ -1,0 +1,344 @@
+package com.travelpay.exchange.application.order;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.error.ErrorCode;
+import com.travelpay.exchange.domain.money.Currency;
+import com.travelpay.exchange.domain.money.Money;
+import com.travelpay.exchange.domain.order.ChangedByType;
+import com.travelpay.exchange.domain.order.DuplicateExchangeOrderException;
+import com.travelpay.exchange.domain.order.ExchangeOrder;
+import com.travelpay.exchange.domain.order.ExchangeOrderErrorCode;
+import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistory;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatusHistoryRepository;
+import com.travelpay.exchange.domain.order.ExchangeOrderType;
+import com.travelpay.exchange.domain.order.IdempotencyKey;
+import com.travelpay.exchange.domain.order.OrderFixtures;
+import com.travelpay.exchange.domain.quote.ExchangeQuote;
+import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
+import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
+import com.travelpay.exchange.domain.quote.QuoteFixtures;
+import com.travelpay.exchange.domain.rate.ForeignCurrency;
+import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
+import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
+import com.travelpay.exchange.domain.wallet.WalletBalances;
+import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
+import org.mockito.ArgumentCaptor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionOperations;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+class ExchangeOrderServiceTest {
+
+    private static final Instant ISSUED_AT = Instant.parse("2026-10-29T03:00:00Z");
+    private static final Instant NOW = ISSUED_AT.plusSeconds(60);
+    private static final UUID USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
+    private static final UUID WALLET_ID = UUID.fromString("00000000-0000-0000-0000-0000000000a1");
+    private static final String KEY = "key-1";
+
+    private final ExchangeOrderRepository orderRepository = mock(ExchangeOrderRepository.class);
+    private final ExchangeOrderQueryRepository queryRepository = mock(ExchangeOrderQueryRepository.class);
+    private final ExchangeOrderStatusHistoryRepository historyRepository =
+            mock(ExchangeOrderStatusHistoryRepository.class);
+    private final ExchangeQuoteRepository quoteRepository = mock(ExchangeQuoteRepository.class);
+    private final WalletBalanceReader walletBalanceReader = mock(WalletBalanceReader.class);
+    private final ExchangeOrderLedgerProcessor ledgerProcessor = mock(ExchangeOrderLedgerProcessor.class);
+    private final ExchangeOrderService service = new ExchangeOrderService(orderRepository, queryRepository,
+            historyRepository, quoteRepository, walletBalanceReader, ledgerProcessor,
+            TransactionOperations.withoutTransaction(), Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
+
+    private ExchangeQuote quote;
+
+    @BeforeEach
+    void setUp() {
+        quote = savedQuote();
+        // 원장 처리 결과를 바꾸지 않는 기본값. 원장 처리 자체는 ExchangeOrderLedgerProcessorTest에서 본다.
+        when(ledgerProcessor.process(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
+                .thenReturn(Optional.empty());
+        when(quoteRepository.findByIdAndUserId(quote.getId(), USER_ID)).thenReturn(Optional.of(quote));
+        when(walletBalanceReader.read(USER_ID)).thenReturn(Optional.of(wallet(WALLET_ID, true, true, true)));
+        when(orderRepository.save(any())).thenAnswer(invocation -> {
+            ExchangeOrder order = invocation.getArgument(0);
+            ReflectionTestUtils.setField(order, "id", UUID.randomUUID());
+            return order;
+        });
+    }
+
+    @Test
+    void placesProcessingOrderWithCreationHistory() {
+        ExchangeOrder order = service.place(command(quote.getId(), WALLET_ID));
+
+        verify(orderRepository).save(order);
+        assertEquals(ExchangeOrderStatus.PROCESSING, order.getStatus());
+        assertEquals(NOW, order.getRequestedAt());
+        assertEquals(quote.getId(), order.getQuoteId());
+        assertEquals(new Money(Currency.KRW, 101000), order.totalDebitMoney());
+
+        ArgumentCaptor<ExchangeOrderStatusHistory> history = ArgumentCaptor.forClass(ExchangeOrderStatusHistory.class);
+        verify(historyRepository).save(history.capture());
+        assertEquals(order.getId(), history.getValue().getOrderId());
+        assertEquals(ExchangeOrderStatus.PROCESSING, history.getValue().getToStatus());
+        assertEquals(ChangedByType.USER, history.getValue().getChangedByType());
+    }
+
+    @Test
+    void replaysExistingOrderOfSameKeyBeforeCheckingQuoteAndWallet() {
+        ExchangeOrder existing = OrderFixtures.placed(quote, WALLET_ID, KEY);
+        when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
+                .thenReturn(Optional.of(existing));
+
+        assertSame(existing, service.place(command(quote.getId(), WALLET_ID)));
+        verifyNoInteractions(quoteRepository, walletBalanceReader);
+        verify(orderRepository, never()).save(any());
+        // PROCESSING이어도 재요청은 원장을 부르지 않는다. 결과는 복구 스케줄러가 반영한다
+        verify(ledgerProcessor, never()).process(any());
+    }
+
+    @Test
+    void returnsOrderAfterLedgerProcessing() {
+        ExchangeOrder completed = OrderFixtures.placed(quote, WALLET_ID, KEY);
+        when(ledgerProcessor.process(any())).thenReturn(completed);
+
+        assertSame(completed, service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void acceptedOrderIsReturnedEvenIfLedgerProcessingFails() {
+        when(ledgerProcessor.process(any())).thenThrow(new IllegalStateException("db down"));
+
+        ExchangeOrder order = service.place(command(quote.getId(), WALLET_ID));
+
+        assertEquals(ExchangeOrderStatus.PROCESSING, order.getStatus());
+        verify(orderRepository).save(order);
+    }
+
+    @Test
+    void rejectsSameKeyForAnotherRequest() {
+        when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
+                .thenReturn(Optional.of(OrderFixtures.placed(quote, WALLET_ID, KEY)));
+
+        assertError(ExchangeOrderErrorCode.IDEMPOTENCY_KEY_REUSED,
+                () -> service.place(command(UUID.randomUUID(), WALLET_ID)));
+    }
+
+    @Test
+    void rejectsInvalidKeyBeforeLookup() {
+        assertError(ExchangeOrderErrorCode.INVALID_IDEMPOTENCY_KEY,
+                () -> service.place(new PlaceOrderCommand(USER_ID, "key 1", quote.getId(), WALLET_ID)));
+        verifyNoInteractions(orderRepository);
+    }
+
+    @Test
+    void rejectsQuoteNotFoundOrOfAnotherUser() {
+        assertError(ExchangeQuoteErrorCode.QUOTE_NOT_FOUND,
+                () -> service.place(command(UUID.randomUUID(), WALLET_ID)));
+    }
+
+    @Test
+    void rejectsExpiredQuoteWithoutCallingWallet() {
+        // 유효 5분이라, 지금(NOW)보다 5분 전에 발급한 견적은 신청 시각에 딱 만료된다
+        ExchangeQuote expired = OrderFixtures.wonToYenQuote(USER_ID,
+                QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), NOW.minus(Duration.ofMinutes(5)));
+        when(quoteRepository.findByIdAndUserId(expired.getId(), USER_ID)).thenReturn(Optional.of(expired));
+
+        assertError(ExchangeOrderErrorCode.QUOTE_EXPIRED, () -> service.place(command(expired.getId(), WALLET_ID)));
+        verifyNoInteractions(walletBalanceReader);
+    }
+
+    @Test
+    void rejectsWhenUserHasNoWallet() {
+        when(walletBalanceReader.read(USER_ID)).thenReturn(Optional.empty());
+
+        assertError(ExchangeOrderErrorCode.WALLET_NOT_FOUND, () -> service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void treatsWalletOfAnotherUserAsNotFound() {
+        assertError(ExchangeOrderErrorCode.WALLET_NOT_FOUND,
+                () -> service.place(command(quote.getId(), UUID.randomUUID())));
+        verify(orderRepository, never()).save(any());
+    }
+
+    @Test
+    void rejectsInactiveWallet() {
+        when(walletBalanceReader.read(USER_ID)).thenReturn(Optional.of(wallet(WALLET_ID, false, true, true)));
+
+        assertError(ExchangeOrderErrorCode.WALLET_NOT_AVAILABLE,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void rejectsInactiveSendingAccount() {
+        when(walletBalanceReader.read(USER_ID)).thenReturn(Optional.of(wallet(WALLET_ID, true, false, true)));
+
+        assertError(ExchangeOrderErrorCode.WALLET_NOT_AVAILABLE,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void rejectsInactiveReceivingAccount() {
+        when(walletBalanceReader.read(USER_ID)).thenReturn(Optional.of(wallet(WALLET_ID, true, true, false)));
+
+        assertError(ExchangeOrderErrorCode.WALLET_NOT_AVAILABLE,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void rejectsWhenWalletCannotBeChecked() {
+        when(walletBalanceReader.read(USER_ID)).thenThrow(new WalletBalanceFetchException("timeout"));
+
+        assertError(ExchangeOrderErrorCode.WALLET_SERVICE_UNAVAILABLE,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+        verify(orderRepository, never()).save(any());
+    }
+
+    /** 원장이 꺼져 지갑이 잔액을 읽지 못하면, 지갑 장애가 아니라 원장 장애로 알리고 주문을 만들지 않습니다. */
+    @Test
+    void rejectsAsLedgerUnavailableWhenWalletCannotReadLedger() {
+        when(walletBalanceReader.read(USER_ID)).thenThrow(new WalletLedgerUnavailableException("ledger down"));
+
+        assertError(ExchangeOrderErrorCode.LEDGER_UNAVAILABLE,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+        verify(orderRepository, never()).save(any());
+        verify(ledgerProcessor, never()).process(any());
+    }
+
+    @Test
+    void concurrentRequestOfSameKeyReturnsWinnerOrder() {
+        ExchangeOrder winner = OrderFixtures.placed(quote, WALLET_ID, KEY);
+        doThrow(new DuplicateExchangeOrderException("dup", null)).when(orderRepository).save(any());
+        when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
+                .thenReturn(Optional.empty(), Optional.of(winner));
+
+        assertSame(winner, service.place(command(quote.getId(), WALLET_ID)));
+        verify(historyRepository, never()).save(any());
+        // 먼저 저장한 요청이 원장을 부르므로, 진 요청은 원장을 부르지 않고 그 주문으로 응답한다
+        verify(ledgerProcessor, never()).process(any());
+    }
+
+    @Test
+    void quoteUsedByAnotherKeyIsAlreadyUsed() {
+        doThrow(new DuplicateExchangeOrderException("dup", null)).when(orderRepository).save(any());
+
+        assertError(ExchangeOrderErrorCode.QUOTE_ALREADY_USED,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void concurrentRequestOfSameKeyForAnotherRequestIsReused() {
+        ExchangeOrder winner = OrderFixtures.placed(savedQuote(), WALLET_ID, KEY);
+        doThrow(new DuplicateExchangeOrderException("dup", null)).when(orderRepository).save(any());
+        when(orderRepository.findByUserIdAndIdempotencyKey(USER_ID, new IdempotencyKey(KEY)))
+                .thenReturn(Optional.empty(), Optional.of(winner));
+
+        assertError(ExchangeOrderErrorCode.IDEMPOTENCY_KEY_REUSED,
+                () -> service.place(command(quote.getId(), WALLET_ID)));
+    }
+
+    @Test
+    void findsOwnOrderOnly() {
+        ExchangeOrder order = OrderFixtures.placed(quote, WALLET_ID, KEY);
+        UUID orderId = UUID.randomUUID();
+        when(orderRepository.findByIdAndUserId(orderId, USER_ID)).thenReturn(Optional.of(order));
+
+        assertSame(order, service.find(USER_ID, orderId));
+        assertError(ExchangeOrderErrorCode.ORDER_NOT_FOUND, () -> service.find(USER_ID, UUID.randomUUID()));
+    }
+
+    @Test
+    void listsOwnOrdersNewestFirstWithStableOrder() {
+        Page<ExchangeOrder> expected = new PageImpl<>(List.of(OrderFixtures.placed(quote, WALLET_ID, KEY)));
+        when(queryRepository.findPage(any(), any())).thenReturn(expected);
+
+        Page<ExchangeOrder> page = service.list(USER_ID, ExchangeOrderStatus.COMPLETED,
+                ExchangeOrderType.RE_EXCHANGE, 2, 30);
+
+        assertSame(expected, page);
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(queryRepository).findPage(
+                eq(new ExchangeOrderListCondition(USER_ID, ExchangeOrderStatus.COMPLETED, ExchangeOrderType.RE_EXCHANGE)),
+                pageable.capture());
+        assertEquals(2, pageable.getValue().getPageNumber());
+        assertEquals(30, pageable.getValue().getPageSize());
+        assertEquals(Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")), pageable.getValue().getSort());
+    }
+
+    @Test
+    void listWithoutFiltersPassesNullConditions() {
+        when(queryRepository.findPage(any(), any())).thenReturn(Page.empty());
+
+        service.list(USER_ID, null, null, 0, 20);
+
+        verify(queryRepository).findPage(eq(new ExchangeOrderListCondition(USER_ID, null, null)), any());
+    }
+
+    @Test
+    void listCapsPageSizeAtHundred() {
+        when(queryRepository.findPage(any(), any())).thenReturn(Page.empty());
+
+        service.list(USER_ID, null, null, 0, 500);
+
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(queryRepository).findPage(any(), pageable.capture());
+        assertEquals(100, pageable.getValue().getPageSize());
+    }
+
+    @Test
+    void listRejectsNegativePageOrNonPositiveSize() {
+        assertError(CommonErrorCode.INVALID_REQUEST, () -> service.list(USER_ID, null, null, -1, 20));
+        assertError(CommonErrorCode.INVALID_REQUEST, () -> service.list(USER_ID, null, null, 0, 0));
+        verifyNoInteractions(queryRepository);
+    }
+
+    private static PlaceOrderCommand command(UUID quoteId, UUID walletId) {
+        return new PlaceOrderCommand(USER_ID, KEY, quoteId, walletId);
+    }
+
+    /** 원화 10만 원 → 엔화 견적입니다. */
+    private static ExchangeQuote savedQuote() {
+        ExchangeQuote saved = OrderFixtures.wonToYenQuote(USER_ID,
+                QuoteFixtures.savedRate(ForeignCurrency.JPY, "838.30"), ISSUED_AT);
+        return saved;
+    }
+
+    /** 원화(보내는 통화)와 엔화(받는 통화) 계정이 있는 지갑입니다. */
+    private static WalletBalances wallet(UUID walletId, boolean walletActive, boolean wonActive, boolean yenActive) {
+        return new WalletBalances(walletId, walletActive, Map.of(
+                Currency.KRW, new WalletBalances.Account(new Money(Currency.KRW, 500_000), wonActive),
+                Currency.JPY, new WalletBalances.Account(new Money(Currency.JPY, 0), yenActive)));
+    }
+
+    private static void assertError(ErrorCode expected, Executable call) {
+        assertEquals(expected, assertThrows(BusinessException.class, call).getErrorCode());
+    }
+}

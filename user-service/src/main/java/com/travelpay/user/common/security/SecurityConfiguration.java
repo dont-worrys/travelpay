@@ -1,12 +1,16 @@
 package com.travelpay.user.common.security;
 
+import com.travelpay.common.auth.AuthHeaders;
 import com.travelpay.user.application.service.CurrentMemberService;
 import com.travelpay.user.common.security.access.CurrentMemberAuthorizationManager;
+import com.travelpay.user.common.security.access.OriginalMethod;
+import com.travelpay.user.common.security.access.OriginalMethodHeaderFilter;
 import com.travelpay.user.common.security.access.RedisSessionErrorResponseFilter;
 import com.travelpay.user.common.security.access.RestAccessDeniedHandler;
 import com.travelpay.user.common.security.access.RestAuthenticationEntryPoint;
 import com.travelpay.user.common.security.access.SecurityErrorResponseWriter;
 import jakarta.servlet.DispatcherType;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
@@ -39,14 +43,15 @@ import org.springframework.session.web.http.SessionRepositoryFilter;
 public class SecurityConfiguration {
 
     private static final String LOGOUT_PATH = "/api/v1/auth/logout";
+    private static final String SESSION_VERIFICATION_PATH = "/internal/v1/auth/session";
 
     private final RestAuthenticationEntryPoint authenticationEntryPoint;
     private final RestAccessDeniedHandler accessDeniedHandler;
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http, CsrfTokenRepository csrfTokenRepository,
-            SecurityContextRepository securityContextRepository, CurrentMemberService currentMemberService)
-            throws Exception {
+            SecurityContextRepository securityContextRepository, CurrentMemberService currentMemberService,
+            SecurityErrorResponseWriter errorResponseWriter) throws Exception {
         http
                 .formLogin(AbstractHttpConfigurer::disable)
                 .httpBasic(AbstractHttpConfigurer::disable)
@@ -61,6 +66,8 @@ public class SecurityConfiguration {
                         .accessDeniedHandler(accessDeniedHandler))
                 .csrf(csrf -> csrf.csrfTokenRepository(csrfTokenRepository)
                         .requireCsrfProtectionMatcher(csrfProtectedRequests()))
+                .addFilterBefore(new OriginalMethodHeaderFilter(sessionVerificationRequests(), errorResponseWriter),
+                        CsrfFilter.class)
                 .authorizeHttpRequests(requests -> requests
                         .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/auth/csrf", "/api/v1/terms").permitAll()
@@ -68,13 +75,14 @@ public class SecurityConfiguration {
                                 "/actuator/prometheus").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/users", "/api/v1/auth/login").permitAll()
                         // 팀 결정(2026-10-31): 서비스 간 호출은 서비스 인증 없이 내부망 격리로 보호하므로 세션 없이 엽니다.
-                        // 외부 차단은 Gateway·배포 망이 맡고, I03 본인 확인·I02 호출 횟수 제한은 요청자 헤더 계약 후 추가합니다.
+                        // 외부 차단은 Gateway·배포 망이 맡고, 회원 헤더 검사·충전 예금주 본인 확인·수취인 실명 조회 횟수 제한은 컨트롤러와 응용 서비스가 맡습니다.
                         .requestMatchers(HttpMethod.GET, "/internal/v1/users/{userId}/real-name",
                                 "/internal/v1/users/{userId}/funding-identity").permitAll()
                         .requestMatchers(HttpMethod.POST, LOGOUT_PATH)
                         .access(CurrentMemberAuthorizationManager.sessionMembers(currentMemberService))
                         .requestMatchers("/api/v1/admin/**")
                         .access(CurrentMemberAuthorizationManager.masters(currentMemberService))
+                        // 그 밖의 요청(세션 확인 API 포함)은 지금 DB 기준 ACTIVE 회원만 통과
                         .anyRequest().access(CurrentMemberAuthorizationManager.activeMembers(currentMemberService)));
         return http.build();
     }
@@ -98,7 +106,7 @@ public class SecurityConfiguration {
     @Bean
     HttpSessionCsrfTokenRepository csrfTokenRepository() {
         var repository = new HttpSessionCsrfTokenRepository();
-        repository.setHeaderName("Csrf-Token");
+        repository.setHeaderName(AuthHeaders.CSRF_TOKEN);
         return repository;
     }
 
@@ -107,10 +115,30 @@ public class SecurityConfiguration {
         return new ValidatingPasswordEncoder(PasswordEncoderFactories.createDelegatingPasswordEncoder());
     }
 
-    /** 세션이 없는 로그아웃은 바꿀 상태가 없으므로 CSRF 오류 대신 인가 단계에서 401로 응답합니다. */
+    // CSRF를 확인할 요청을 고름. 아래 두 경로는 세션이 없으면 확인하지 않고 인가 단계의 401로 넘김(빈 세션도 안 만듦)
+    // - 로그아웃: 세션이 있을 때만
+    // - 세션 확인 API: 원래 요청이 상태 변경 메소드이고 로그인 세션이 있을 때만. 헤더를 못 읽으면 확인하는 쪽
     private static RequestMatcher csrfProtectedRequests() {
         var logout = PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, LOGOUT_PATH);
-        return request -> CsrfFilter.DEFAULT_CSRF_MATCHER.matches(request)
-                && !(logout.matches(request) && request.getSession(false) == null);
+        var sessionVerification = sessionVerificationRequests();
+        return request -> {
+            if (sessionVerification.matches(request)) {
+                return OriginalMethod.from(request).map(OriginalMethod::changesState).orElse(true)
+                        && hasLoginSession(request);
+            }
+            return CsrfFilter.DEFAULT_CSRF_MATCHER.matches(request)
+                    && !(logout.matches(request) && request.getSession(false) == null);
+        };
+    }
+
+    // 로그인 전 CSRF 조회로 생긴 세션은 로그인 정보(SecurityContext)가 없으므로 로그인 세션이 아님
+    private static boolean hasLoginSession(HttpServletRequest request) {
+        var session = request.getSession(false);
+        return session != null
+                && session.getAttribute(HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY) != null;
+    }
+
+    private static RequestMatcher sessionVerificationRequests() {
+        return PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, SESSION_VERIFICATION_PATH);
     }
 }

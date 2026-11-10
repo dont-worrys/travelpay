@@ -9,6 +9,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -22,9 +24,12 @@ import java.io.IOException;
  * Mock-Fault 헤더로 응답 장애를 흉내 낸다 (POST만).
  * 처리와 커밋이 끝난 뒤 적용하도록 응답을 버퍼에 받아 둔다.
  * DELAY: 설정 시간만큼 늦게 원래 응답 / LOST: 원래 응답을 버리고 500
+ * mock-bank.fault.enabled=true이고 prod 프로필이 아닐 때만 빈을 만든다.
  */
 @Slf4j
 @Component
+@Profile("!prod")
+@ConditionalOnProperty(prefix = "mock-bank.fault", name = "enabled", havingValue = "true", matchIfMissing = false)
 @RequiredArgsConstructor
 public class BankFaultInjectionFilter extends OncePerRequestFilter {
 

@@ -7,17 +7,18 @@ import java.util.UUID;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
 import com.travelpay.exchange.domain.money.Money;
+import com.travelpay.exchange.domain.order.ExchangeOrderRepository;
 import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteRepository;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuotePolicy;
+import com.travelpay.exchange.domain.quote.QuoteStatus;
 import com.travelpay.exchange.domain.quote.QuoteType;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.RateFreshnessPolicy;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 /** 저장된 최신 환율로 견적을 발급하고, 본인 견적을 조회합니다. 외부 환율 API는 호출하지 않습니다. */
 @Service
@@ -28,13 +29,16 @@ public class ExchangeQuoteService {
     private final RateFreshnessPolicy freshnessPolicy;
     private final QuotePolicy quotePolicy;
     private final ExchangeQuoteRepository repository;
+    private final ExchangeOrderRepository orderRepository;
     private final Clock clock;
 
     /**
      * 통화쌍과 금액 형식을 먼저 확인한 뒤, 현재 모드의 최신 환율이 견적에 쓸 수 있을 만큼 최신일 때만 발급합니다.
      * 환율이 없거나 오래됐으면 EXCHANGE_RATE_UNAVAILABLE 오류입니다.
+     *
+     * 트랜잭션을 걸지 않습니다. 견적은 Redis에 저장하고 환율도 캐시에서 읽으므로, 트랜잭션을 걸면 쓰지도 않을 DB 연결을
+     * 요청마다 빌리게 됩니다(JPA 트랜잭션은 시작할 때 연결을 빌림). 캐시가 비어 환율을 DB에서 읽을 때만 연결을 씁니다.
      */
-    @Transactional
     public ExchangeQuoteView issue(IssueQuoteCommand command) {
         QuoteCurrencies currencies = new QuoteCurrencies(command.fromCurrency(), command.toCurrency());
         Money amount = Money.of(command.fromCurrency(), command.amount());
@@ -44,14 +48,27 @@ public class ExchangeQuoteService {
                 .orElseThrow(() -> new BusinessException(ExchangeQuoteErrorCode.RATE_UNAVAILABLE));
         ExchangeQuote quote = repository.save(
                 ExchangeQuote.issue(command.userId(), QuoteType.USER, currencies, amount, rate, quotePolicy, now));
-        return new ExchangeQuoteView(quote, false);
+        return new ExchangeQuoteView(quote, QuoteStatus.ISSUED);
     }
 
-    /** 본인 견적을 조회합니다. 없거나 다른 사람의 견적이면 EXCHANGE_QUOTE_NOT_FOUND 오류입니다. */
-    @Transactional(readOnly = true)
+    /**
+     * 본인 견적을 조회합니다. 없거나 다른 사람의 견적이면 EXCHANGE_QUOTE_NOT_FOUND 오류입니다.
+     * 견적은 만료 후 일정 시간만 남아 있다가 사라지므로, 오래된 견적도 EXCHANGE_QUOTE_NOT_FOUND입니다.
+     *
+     * 상태는 저장하지 않고 이 순서로 정합니다: 이 견적으로 만든 주문이 있으면 USED(시간과 무관) → 없고 만료면 EXPIRED → 그 외 ISSUED.
+     * 사용 여부는 주문 테이블(UNIQUE(quote_id))에서 확인하므로 견적과 주문의 상태가 어긋날 일이 없습니다.
+     * 이 조회는 DB 쿼리 하나를 쓰지만 발급 경로가 아니라 측정 대상(발급)에는 영향이 없습니다.
+     */
     public ExchangeQuoteView find(UUID userId, UUID quoteId) {
         ExchangeQuote quote = repository.findByIdAndUserId(quoteId, userId)
                 .orElseThrow(() -> new BusinessException(ExchangeQuoteErrorCode.QUOTE_NOT_FOUND));
-        return new ExchangeQuoteView(quote, quote.isExpired(clock.instant()));
+        return new ExchangeQuoteView(quote, statusOf(quote));
+    }
+
+    private QuoteStatus statusOf(ExchangeQuote quote) {
+        if (orderRepository.existsByQuoteId(quote.getId())) {
+            return QuoteStatus.USED;
+        }
+        return quote.isExpired(clock.instant()) ? QuoteStatus.EXPIRED : QuoteStatus.ISSUED;
     }
 }

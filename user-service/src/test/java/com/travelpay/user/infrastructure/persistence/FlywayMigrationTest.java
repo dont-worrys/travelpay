@@ -93,6 +93,24 @@ class FlywayMigrationTest {
         }
     }
 
+    @Test
+    void membersCreatedBeforeTheSessionVersionMigrationStartAtVersionZero() {
+        // 운영·개발 DB처럼 회원이 이미 있는 상태에서 V3를 적용합니다.
+        var schema = "before_session_version";
+        Flyway.configure().dataSource(jdbc.getDataSource()).defaultSchema(schema).target("2").load().migrate();
+        var memberId = UUID.randomUUID();
+        jdbc.update("""
+                insert into before_session_version.users
+                    (id, real_name, status, role, phone, phone_verified_at, created_at, updated_at)
+                values (?, '홍길동', 'ACTIVE', 'USER', '010-1000-0001', now(), now(), now())
+                """, memberId);
+
+        Flyway.configure().dataSource(jdbc.getDataSource()).defaultSchema(schema).load().migrate();
+
+        assertEquals(0L, jdbc.queryForObject(
+                "select session_version from before_session_version.users where id = ?", Long.class, memberId));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"application.yml", "application-prod.yml"})
     void bothConfigurationsLetFlywayOwnTheSchemaAndHibernateOnlyValidateIt(String filename) throws IOException {

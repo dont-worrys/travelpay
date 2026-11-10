@@ -2,6 +2,13 @@ package com.travelpay.user.infrastructure.persistence;
 
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import javax.sql.DataSource;
 
 import com.travelpay.common.auth.AuthRole;
 import com.travelpay.common.error.BusinessException;
@@ -18,6 +25,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.orm.jpa.SharedEntityManagerCreator;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -51,6 +60,9 @@ class UserCredentialsRepositoryPersistenceTest {
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @Autowired
+    private DataSource dataSource;
 
     private TransactionTemplate transactions;
 
@@ -132,6 +144,88 @@ class UserCredentialsRepositoryPersistenceTest {
     }
 
     @Test
+    void lockingLookupReadsOnlyTheRequestedMembersCredentialsAndStateWithOneStatement() {
+        var userId = saveCredentials("repository.locked@example.com", "010-1300-0010");
+        saveCredentials("repository.other-lock@example.com", "010-1300-0011");
+        var statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        var statisticsWereEnabled = statistics.isStatisticsEnabled();
+        statistics.setStatisticsEnabled(true);
+        statistics.clear();
+
+        try {
+            transactions.executeWithoutResult(status -> {
+                var credentials = credentialsRepository.findByUserIdForUpdate(userId).orElseThrow();
+
+                assertEquals(userId, credentials.getUserId());
+                assertEquals("repository.locked@example.com", credentials.getLoginEmail());
+                assertEquals(UserStatus.ACTIVE, credentials.getUser().getStatus());
+                assertEquals(AuthRole.USER, credentials.getUser().getRole());
+            });
+
+            assertEquals(1L, statistics.getPrepareStatementCount());
+        } finally {
+            statistics.setStatisticsEnabled(statisticsWereEnabled);
+        }
+    }
+
+    @Test
+    void lockingLookupReturnsEmptyWhenTheMemberHasNoCredentials() {
+        var userId = transactions.execute(status ->
+                userRepository.save(User.register("홍길동", "010-1300-0012", REGISTERED_AT)).getId());
+
+        var found = transactions.execute(status -> credentialsRepository.findByUserIdForUpdate(userId));
+
+        assertTrue(found.isEmpty());
+    }
+
+    @Test
+    void aSecondLockingLookupWaitsForTheFirstTransactionAndReadsItsCommittedPassword() throws Exception {
+        var userId = saveCredentials("repository.lock-race@example.com", "010-1300-0013");
+        var changedHash = "{bcrypt}$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
+        var changedAt = REGISTERED_AT.plusSeconds(60);
+        var firstLocked = new CountDownLatch(1);
+        var releaseFirst = new CountDownLatch(1);
+        var secondStarted = new CountDownLatch(1);
+        var firstPid = new AtomicInteger();
+        var secondPid = new AtomicInteger();
+        var entityManager = SharedEntityManagerCreator.createSharedEntityManager(entityManagerFactory);
+
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> transactions.executeWithoutResult(status -> {
+                firstPid.set(((Number) entityManager.createNativeQuery("select pg_backend_pid()")
+                        .getSingleResult()).intValue());
+                var credentials = credentialsRepository.findByUserIdForUpdate(userId).orElseThrow();
+                firstLocked.countDown();
+                awaitRelease(releaseFirst);
+                credentials.changePassword(changedHash, changedAt);
+            }));
+
+            try {
+                assertTrue(firstLocked.await(10, TimeUnit.SECONDS));
+                var second = executor.submit(() -> transactions.execute(status -> {
+                    secondPid.set(((Number) entityManager.createNativeQuery("select pg_backend_pid()")
+                            .getSingleResult()).intValue());
+                    secondStarted.countDown();
+                    var credentials = credentialsRepository.findByUserIdForUpdate(userId).orElseThrow();
+                    return new StoredPassword(credentials.getPasswordHash(), credentials.getPasswordChangedAt());
+                }));
+
+                assertTrue(secondStarted.await(10, TimeUnit.SECONDS));
+                assertTrue(waitingForTransaction(firstPid.get(), secondPid.get(), second),
+                        "두 번째 조회는 첫 번째 트랜잭션의 잠금을 기다려야 합니다.");
+                releaseFirst.countDown();
+
+                first.get(10, TimeUnit.SECONDS);
+                var observed = second.get(10, TimeUnit.SECONDS);
+                assertEquals(changedHash, observed.hash());
+                assertEquals(changedAt, observed.changedAt());
+            } finally {
+                releaseFirst.countDown();
+            }
+        }
+    }
+
+    @Test
     void recognizesARegisteredLoginEmail() {
         saveCredentials("repository.exists@example.com", "010-1300-0003");
 
@@ -208,6 +302,37 @@ class UserCredentialsRepositoryPersistenceTest {
             var credentials = UserCredentials.createFor(user, loginEmail, PASSWORD_HASH, REGISTERED_AT);
             return credentialsRepository.save(credentials).getUserId();
         });
+    }
+
+    private boolean waitingForTransaction(int blockerPid, int waitingPid, Future<?> waiting) throws Exception {
+        var jdbc = new JdbcTemplate(dataSource);
+        var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            if (Boolean.TRUE.equals(jdbc.queryForObject(
+                    "select ? = any(pg_blocking_pids(?))", Boolean.class, blockerPid, waitingPid))) {
+                return true;
+            }
+            if (waiting.isDone()) {
+                waiting.get(1, TimeUnit.SECONDS);
+                return false;
+            }
+            Thread.sleep(10);
+        }
+        return false;
+    }
+
+    private static void awaitRelease(CountDownLatch release) {
+        try {
+            if (!release.await(30, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("잠금 검증의 해제 신호를 기다리지 못했습니다.");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("잠금 검증 중 인터럽트되었습니다.", exception);
+        }
+    }
+
+    private record StoredPassword(String hash, Instant changedAt) {
     }
 
 }

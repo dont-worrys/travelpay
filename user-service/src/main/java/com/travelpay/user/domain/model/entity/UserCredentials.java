@@ -71,6 +71,16 @@ public class UserCredentials {
         return new UserCredentials(user, loginEmail, passwordHash, passwordSetAt);
     }
 
+    /** 새 비밀번호의 저장 형식과 변경 시각을 검증한 뒤 함께 반영합니다. */
+    public void changePassword(String newPasswordHash, Instant changedAt) {
+        if (changedAt == null) {
+            throw new IllegalArgumentException("비밀번호 변경 시각은 비어 있을 수 없습니다.");
+        }
+        var validatedHash = requirePasswordHash(newPasswordHash);
+        this.passwordHash = validatedHash;
+        this.passwordChangedAt = changedAt;
+    }
+
     private static String requireLoginEmail(String loginEmail) {
         if (loginEmail == null) {
             throw new IllegalArgumentException("로그인 이메일은 비어 있을 수 없습니다.");

@@ -13,7 +13,7 @@ import com.travelpay.exchange.domain.quote.ExchangeQuote;
  * 적용 환율은 rateUnit 단위 외화의 원화 가격입니다. (예: JPY rateUnit=100이면 100엔당 가격)
  *
  * @param totalDebitAmount 보내는 통화로 지갑에서 빠질 금액 (보내는 금액 + 수수료)
- * @param status           ISSUED, USED, EXPIRED. EXPIRED는 저장 상태가 아니라 조회 시각 기준 판단입니다.
+ * @param status           ISSUED, USED, EXPIRED. 저장값이 아니라 응답 시점에 계산한 상태입니다.
  */
 public record ExchangeQuoteResponse(
         UUID quoteId,
@@ -32,7 +32,7 @@ public record ExchangeQuoteResponse(
         Instant createdAt
 ) {
 
-    /** 최소 단위 금액을 통화 단위 문자열로 바꿉니다. 조회 시각에 만료됐으면 저장 상태와 관계없이 EXPIRED입니다. */
+    /** 최소 단위 금액을 통화 단위 문자열로 바꿉니다. 상태는 서비스가 응답 시점에 계산한 값입니다. */
     public static ExchangeQuoteResponse from(ExchangeQuoteView view) {
         ExchangeQuote quote = view.quote();
         return new ExchangeQuoteResponse(
@@ -47,9 +47,9 @@ public record ExchangeQuoteResponse(
                 plain(quote.getAppliedRate()),
                 quote.getRateUnit(),
                 quote.getRateDate(),
-                view.expired() ? "EXPIRED" : quote.getStatus().name(),
+                view.status().name(),
                 quote.getExpiresAt(),
-                quote.getCreatedAt()
+                quote.getIssuedAt()
         );
     }
 

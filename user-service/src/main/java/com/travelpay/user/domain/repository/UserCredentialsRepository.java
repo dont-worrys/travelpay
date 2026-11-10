@@ -20,6 +20,9 @@ public interface UserCredentialsRepository {
     /** 회원 ID로 자체 로그인 수단을 조회하며, 등록하지 않은 회원이면 빈 결과를 반환합니다. */
     Optional<UserCredentials> findByUserId(UUID userId);
 
+    /** 회원 ID로 변경할 자격 증명을 잠금 조회합니다. 쓰기 트랜잭션 안에서 호출하며 종료 시 잠금을 해제합니다. */
+    Optional<UserCredentials> findByUserIdForUpdate(UUID userId);
+
     /** 해당 이메일로 등록된 자체 로그인 수단이 있는지 확인합니다. */
     boolean existsByLoginEmail(String loginEmail);
 }

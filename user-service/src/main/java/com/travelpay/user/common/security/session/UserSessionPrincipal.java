@@ -11,8 +11,9 @@ import com.travelpay.common.auth.AuthRole;
 /**
  * 정식 회원의 로그인 인증 정보이며, HTTP 세션에 저장할 최소 값입니다.
  * 역할은 로그인 시점의 값이므로, 현재 회원 상태와 권한은 DB에서 별도로 확인합니다.
+ * 세션 버전도 로그인 시점의 DB 값이며, 로그인이 필요한 요청(로그아웃 제외)마다 지금 DB 값과 같은지 확인합니다.
  */
-public record UserSessionPrincipal(UUID userId, AuthRole role, Instant authenticatedAt)
+public record UserSessionPrincipal(UUID userId, AuthRole role, Instant authenticatedAt, long sessionVersion)
         implements Principal, Serializable {
 
     public UserSessionPrincipal {

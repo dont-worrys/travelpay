@@ -1,6 +1,7 @@
 package com.travelpay.exchange.infrastructure.persistence.rate;
 
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Optional;
 
 import com.travelpay.exchange.domain.rate.DuplicateExchangeRateException;
@@ -8,8 +9,8 @@ import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
+import com.travelpay.exchange.infrastructure.persistence.ConstraintViolations;
 import lombok.RequiredArgsConstructor;
-import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Repository;
 
@@ -32,7 +33,7 @@ class ExchangeRateRepositoryAdapter implements ExchangeRateRepository {
         try {
             return jpaRepository.saveAndFlush(exchangeRate);
         } catch (DataIntegrityViolationException e) {
-            if (violates(e, DAILY_UNIQUE_INDEX)) {
+            if (ConstraintViolations.violates(e, DAILY_UNIQUE_INDEX)) {
                 throw new DuplicateExchangeRateException("이미 저장된 고시분입니다: source=" + exchangeRate.getSource()
                         + ", currency=" + exchangeRate.getCurrency() + ", rateDate=" + exchangeRate.getRateDate());
             }
@@ -46,17 +47,16 @@ class ExchangeRateRepositoryAdapter implements ExchangeRateRepository {
     }
 
     @Override
-    public boolean existsByRateDate(RateSource source, ForeignCurrency currency, LocalDate rateDate) {
-        return jpaRepository.existsBySourceAndCurrencyAndRateDate(source, currency, rateDate);
+    public List<ExchangeRate> findLatestOfEach(RateSource source, List<ForeignCurrency> currencies) {
+        if (currencies.isEmpty()) {
+            return List.of();
+        }
+        String codes = String.join(",", currencies.stream().map(ForeignCurrency::name).toList());
+        return jpaRepository.findLatestOfEach(source.name(), codes);
     }
 
-    /** 예외 원인 중 Hibernate가 해석한 제약 이름이 주어진 이름과 같은지 확인합니다. */
-    private static boolean violates(Throwable e, String constraintName) {
-        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
-            if (cause instanceof ConstraintViolationException violation) {
-                return constraintName.equalsIgnoreCase(violation.getConstraintName());
-            }
-        }
-        return false;
+    @Override
+    public boolean existsByRateDate(RateSource source, ForeignCurrency currency, LocalDate rateDate) {
+        return jpaRepository.existsBySourceAndCurrencyAndRateDate(source, currency, rateDate);
     }
 }

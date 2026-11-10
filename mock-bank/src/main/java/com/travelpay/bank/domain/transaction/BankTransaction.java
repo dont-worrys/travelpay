@@ -169,6 +169,16 @@ public class BankTransaction {
         return status == BankTransactionStatus.SUCCEEDED;
     }
 
+    /** 같은 requestId 재요청이 이 출금과 같은 내용인지. fromAccountId는 요청 계좌를 찾은 id (없으면 null) */
+    public boolean hasSameDebit(UUID fromAccountId, long amount) {
+        return this.amount == amount && Objects.equals(this.fromAccountId, fromAccountId);
+    }
+
+    /** 같은 requestId 재요청이 이 환불과 같은 내용인지. originalTxId는 요청 원거래가 있으면 그 id, 없으면 null */
+    public boolean hasSameRefund(UUID originalTxId, long amount) {
+        return this.amount == amount && Objects.equals(this.originalTxId, originalTxId);
+    }
+
     /** 환불 가능한 원거래인지: 성공한 출금 */
     public boolean isRefundable() {
         return type == BankTransactionType.DEBIT && isSucceeded();

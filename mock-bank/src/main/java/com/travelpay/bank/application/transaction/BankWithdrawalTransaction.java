@@ -3,12 +3,10 @@ package com.travelpay.bank.application.transaction;
 import com.travelpay.bank.application.transaction.dto.BankTransactionResult;
 import com.travelpay.bank.application.transaction.dto.BankWithdrawalCommand;
 import com.travelpay.bank.domain.account.BankAccount;
-import com.travelpay.bank.domain.account.BankAccountOwnerType;
 import com.travelpay.bank.domain.account.BankAccountRepository;
 import com.travelpay.bank.domain.transaction.BankFailureCode;
 import com.travelpay.bank.domain.transaction.BankTransaction;
 import com.travelpay.bank.domain.transaction.BankTransactionRepository;
-import com.travelpay.bank.domain.transaction.BankTransactionType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,16 +29,14 @@ public class BankWithdrawalTransaction {
 
     @Transactional
     public BankTransactionResult withdraw(BankWithdrawalCommand command) {
-        Optional<BankTransactionResult> existing = replayer.find(command.requestId(), BankTransactionType.DEBIT);
+        Optional<BankTransactionResult> existing = replayer.findDebit(command);
         if (existing.isPresent()) {
             return existing.get();
         }
 
         BankAccount platform = bankAccountRepository.findPlatformAccount()
                 .orElseThrow(() -> new IllegalStateException("플랫폼 계좌가 없습니다."));
-        Optional<BankAccount> found = bankAccountRepository
-                .findByBankCodeAndAccountNumber(command.bankCode(), command.accountNumber())
-                .filter(account -> account.getOwnerType() == BankAccountOwnerType.USER);
+        Optional<BankAccount> found = replayer.findUserAccount(command);
         if (found.isEmpty()) {
             return fail(command, null, platform.getId(), BankFailureCode.ACCOUNT_NOT_FOUND);
         }

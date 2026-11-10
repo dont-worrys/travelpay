@@ -20,7 +20,9 @@ import java.util.concurrent.TimeoutException;
 
 /**
  * 미발행 Outbox를 잠근 채 보내고, 응답에 따라 같은 트랜잭션에서 상태를 바꾼다.
- * 상태 변경이 실패해 롤백되면 이미 보낸 건도 PENDING으로 남아 다시 보낸다 (컨슈머는 eventId로 중복 제거).
+ * 상태 변경이 실패해 롤백되면 이미 보낸 건도 PENDING으로 남아 다시 보낸다.
+ * 컨슈머(ChargeSagaConsumer)는 eventId로 중복 제거하지 않고 trace_id 기록에만 쓴다. 같은 이벤트를 두 번 받아도
+ * 실행기가 현재 충전 상태를 보고 판단하고(종료 상태면 아무것도 안 함), 상태 전이는 이전 상태 조건부라 먼저 진행된 건은 0행으로 멈춘다.
  */
 @Slf4j
 @Service

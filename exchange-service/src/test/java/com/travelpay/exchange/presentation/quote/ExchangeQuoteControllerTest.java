@@ -19,11 +19,11 @@ import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.ExchangeQuoteErrorCode;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
+import com.travelpay.exchange.domain.quote.QuoteStatus;
 import com.travelpay.exchange.domain.quote.QuoteType;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
-import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -52,7 +52,7 @@ class ExchangeQuoteControllerTest {
 
     @Test
     void issuesQuoteForCurrentUser() throws Exception {
-        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), false));
+        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), QuoteStatus.ISSUED));
 
         mockMvc.perform(post("/api/v1/exchange-quotes").contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -80,7 +80,7 @@ class ExchangeQuoteControllerTest {
 
     @Test
     void acceptsAmountAsJsonNumber() throws Exception {
-        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), false));
+        when(quoteService.issue(any())).thenReturn(new ExchangeQuoteView(yuanToWon(), QuoteStatus.ISSUED));
 
         mockMvc.perform(post("/api/v1/exchange-quotes").contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -144,7 +144,7 @@ class ExchangeQuoteControllerTest {
 
     @Test
     void showsExpiredQuoteAsExpired() throws Exception {
-        when(quoteService.find(USER_ID, QUOTE_ID)).thenReturn(new ExchangeQuoteView(yuanToWon(), true));
+        when(quoteService.find(USER_ID, QUOTE_ID)).thenReturn(new ExchangeQuoteView(yuanToWon(), QuoteStatus.EXPIRED));
 
         mockMvc.perform(get("/api/v1/exchange-quotes/{quoteId}", QUOTE_ID))
                 .andExpect(status().isOk())
@@ -174,7 +174,6 @@ class ExchangeQuoteControllerTest {
         ExchangeQuote quote = ExchangeQuote.issue(USER_ID, QuoteType.USER,
                 new QuoteCurrencies(Currency.CNY, Currency.KRW), new Money(Currency.CNY, 10050),
                 QuoteFixtures.savedRate(ForeignCurrency.CNY, "198.69000000"), QuoteFixtures.policy(), NOW);
-        ReflectionTestUtils.setField(quote, "id", QUOTE_ID);
-        return quote;
+        return QuoteFixtures.withId(quote, QUOTE_ID);
     }
 }

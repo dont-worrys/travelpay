@@ -1,0 +1,117 @@
+# 환율 조회 부하 측정 전용 환경입니다. 팀 공용 compose와 별도이며, 측정할 때만 띄웁니다.
+# 실행 방법은 같은 폴더의 README.md를 봅니다.
+name: travelpay-load-test
+
+services:
+  # 측정 전용 Postgres. 쿼리별 실행 횟수를 보려고 pg_stat_statements를 켭니다(서버 시작 설정이라 공용 DB와 분리).
+  # 데이터를 볼륨에 남기지 않아, 다시 띄우면 항상 빈 DB에서 시작합니다(측정마다 같은 출발점).
+  measure-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18.6-bookworm}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+    environment:
+      POSTGRES_DB: travelpay
+      POSTGRES_USER: exchange_app
+      POSTGRES_PASSWORD: load-test-only
+    ports:
+      # 공용 DB(5432)와 겹치지 않는 포트
+      - "127.0.0.1:5439:5432"
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d:ro
+      # 적재 SQL을 컨테이너 안 psql로 실행하려고 이 폴더를 읽기 전용으로 연결
+      - ./:/load-test:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "exchange_app", "-d", "travelpay"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # 측정 전용 Redis(환율 캐시 + 견적 저장소). 기본값은 환율 조회 비교 측정(v0·v0.5·v1) 때와 같은 128MB·allkeys-lru·디스크 저장 안 함.
+  # Redis를 쓰지 않는 jar(v0·v0.5)를 잴 때도 함께 띄워, 버전끼리 jar 말고는 환경이 같게 합니다.
+  # 견적 발급 측정은 견적이 키로 쌓여(초당 발급 수 × 10분 × 약 500바이트) 128MB가 몇 분 안에 차므로, 메모리와 정책을 바꿔 띄웁니다:
+  #   MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction (운영 redis-cache 정책과 같음, README "견적 발급 측정")
+  # 값을 바꾸면 compose가 이 컨테이너를 새로 만들므로, 같은 비교의 모든 측정을 같은 값으로 실행합니다.
+  measure-redis:
+    image: ${REDIS_IMAGE:-redis:8.2.11-bookworm}
+    command:
+      - redis-server
+      - --requirepass
+      - load-test-only
+      - --maxmemory
+      - ${MEASURE_REDIS_MAXMEMORY:-128mb}
+      - --maxmemory-policy
+      - ${MEASURE_REDIS_POLICY:-allkeys-lru}
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    environment:
+      # redis-cli가 이 비밀번호를 씀 (명령줄에 비밀번호를 쓰지 않게)
+      REDISCLI_AUTH: load-test-only
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # 측정 대상 환전 서비스(mock 모드). 저장소 루트에서 빌드한 jar를 그대로 실행합니다.
+  # k6·앱·DB를 모두 같은 Docker 네트워크에 둡니다. 앱을 PC에 띄우면 앱↔DB, k6↔앱 요청이 전부
+  # Docker Desktop의 포트 전달(PC↔Docker 경계)을 지나는데, 부하 중 그 왕복이 0.05ms → 2.7ms로 느려지고
+  # 실행마다 처리량이 2배 넘게 흔들렸습니다(README "측정 환경을 Docker 안에 두는 이유").
+  # 이미지는 JRE가 아닌 JDK. #211 이전 jar(v0·v0.5·v1)는 가짜 환율 공급자가 RandomGenerator.getDefault()를 써서
+  # jdk.random 모듈이 없는 Temurin JRE 이미지에서 시작하다 실패합니다. 이전 jar와 같은 조건으로 재려고 JDK를 유지합니다.
+  app:
+    image: ${APP_IMAGE:-eclipse-temurin:21.0.13_9-jdk}
+    profiles: ["app"]
+    depends_on:
+      measure-postgres:
+        condition: service_healthy
+      measure-redis:
+        condition: service_healthy
+    command:
+      - java
+      - -jar
+      - /app/exchange-service.jar
+      - --eureka.client.enabled=false
+      - --server.port=18084
+      # Actuator(지표)를 별도 포트로. 같은 포트면 지표 요청이 부하 요청 뒤에 줄 섬
+      - --management.server.port=18085
+      # 톰캣 기본은 연결 하나에 요청 100번을 받으면 끊음. 측정 중 연결을 계속 재사용하게 함
+      - --server.tomcat.max-keep-alive-requests=-1
+    environment:
+      EXCHANGE_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=exchange_service
+      EXCHANGE_DB_USERNAME: exchange_app
+      EXCHANGE_DB_PASSWORD: load-test-only
+      EXCHANGE_RATE_MODE: mock
+      # 환율 캐시(v1부터 사용). Redis를 쓰지 않는 jar는 이 값을 읽지 않음
+      REDIS_CACHE_HOST: measure-redis
+      REDIS_CACHE_PORT: "6379"
+      REDIS_CACHE_PASSWORD: load-test-only
+    ports:
+      # 손으로 확인할 때만 쓰는 PC 쪽 포트. 측정(k6·지표 수집)은 Docker 네트워크 안에서 app:18084/18085로 요청함
+      - "127.0.0.1:18084:18084"
+      - "127.0.0.1:18085:18085"
+    volumes:
+      # 측정할 jar. 버전끼리 비교할 때는 커밋별로 빌드한 jar를 APP_JAR로 바꿔 끼운다 (README "버전별 jar로 비교")
+      - ${APP_JAR:-../build/libs/exchange-service-0.0.1-SNAPSHOT.jar}:/app/exchange-service.jar:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:18085/actuator/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  # 부하 생성기. 필요할 때만 `docker compose run --rm k6 run /scripts/<스크립트>`로 실행합니다(profile 지정).
+  # 같은 Docker 네트워크의 app 서비스로 요청합니다.
+  k6:
+    image: ${K6_IMAGE:-grafana/k6:1.3.0}
+    profiles: ["k6"]
+    environment:
+      BASE_URL: ${BASE_URL:-http://app:18084}
+    volumes:
+      - ./:/scripts:ro
+      # 측정 결과 JSON을 남기는 곳 (results/는 커밋하지 않음)
+      - ./results:/results

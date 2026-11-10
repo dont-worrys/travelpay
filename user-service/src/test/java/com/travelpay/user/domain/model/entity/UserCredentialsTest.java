@@ -67,6 +67,45 @@ class UserCredentialsTest {
                 () -> UserCredentials.createFor(user(), "member@example.com", PASSWORD_HASH, null));
     }
 
+    @Test
+    void changesThePasswordHashAndTimeWhileKeepingTheLoginIdentity() {
+        var member = user();
+        var credentials = UserCredentials.createFor(member, "member@example.com", PASSWORD_HASH, PASSWORD_SET_AT);
+        var newPasswordHash = "{bcrypt}$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
+        var changedAt = PASSWORD_SET_AT.plusSeconds(60);
+
+        credentials.changePassword(newPasswordHash, changedAt);
+
+        assertEquals(newPasswordHash, credentials.getPasswordHash());
+        assertEquals(changedAt, credentials.getPasswordChangedAt());
+        assertSame(member, credentials.getUser());
+        assertEquals("member@example.com", credentials.getLoginEmail());
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidPasswordHashes")
+    void rejectsAnInvalidNewPasswordHashWithoutChangingTheCredentials(String passwordHash) {
+        var credentials = UserCredentials.createFor(user(), "member@example.com", PASSWORD_HASH, PASSWORD_SET_AT);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> credentials.changePassword(passwordHash, PASSWORD_SET_AT.plusSeconds(60)));
+
+        assertEquals(PASSWORD_HASH, credentials.getPasswordHash());
+        assertEquals(PASSWORD_SET_AT, credentials.getPasswordChangedAt());
+    }
+
+    @Test
+    void rejectsAMissingChangeTimeWithoutChangingThePasswordHash() {
+        var credentials = UserCredentials.createFor(user(), "member@example.com", PASSWORD_HASH, PASSWORD_SET_AT);
+        var newPasswordHash = "{bcrypt}$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
+
+        assertThrows(IllegalArgumentException.class,
+                () -> credentials.changePassword(newPasswordHash, null));
+
+        assertEquals(PASSWORD_HASH, credentials.getPasswordHash());
+        assertEquals(PASSWORD_SET_AT, credentials.getPasswordChangedAt());
+    }
+
     private static User user() {
         return User.register("홍길동", "010-1234-5678", PASSWORD_SET_AT);
     }

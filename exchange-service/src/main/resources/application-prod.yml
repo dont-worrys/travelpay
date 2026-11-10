@@ -11,6 +11,23 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  data:
+    redis:
+      # 환율 캐시·견적 저장소용 Redis(redis-cache 컨테이너, 내부 포트 6379)입니다. 세션 Redis와 다른 인스턴스입니다.
+      host: ${REDIS_CACHE_HOST:redis-cache}
+      port: ${REDIS_CACHE_PORT:6379}
+      password: ${REDIS_CACHE_PASSWORD}
+      # 명령 하나를 200ms까지만 기다리고 넘으면 DB로 조회한다. 빠지면 Lettuce 기본값(60초)이 되어
+      # Redis가 멈췄을 때 환율 조회·견적 발급이 60초씩 붙잡힌다
+      connect-timeout: 1s
+      timeout: 200ms
+      repositories:
+        enabled: false
+  task:
+    scheduling:
+      pool:
+        # 기본 1스레드면 주문 복구가 길어질 때 환율 수집이 멈춘다. 수집과 복구가 서로 기다리지 않게 둘로 나눈다
+        size: 2
   cloud:
     openfeign:
       client:
@@ -19,6 +36,12 @@ spring:
           wallet-service:
             connect-timeout: 2000
             read-timeout: 3000
+          # 원장 최대 응답(약 5초)까지 기다린다. 넘으면 결과 모름으로 두고 복구 스케줄러가 같은 요청을 다시 보낸다.
+          # 배포는 이 파일만 읽으므로(SPRING_CONFIG_NAME=application-prod) 빠지면 OpenFeign 기본값(연결 10초, 읽기 60초)이 되어
+          # 선점 유효 기간(10초)의 전제(원장 호출 최대 약 7초)가 깨진다
+          ledger-service:
+            connect-timeout: 2000
+            read-timeout: 5000
 
 travelpay:
   auth:
@@ -31,6 +54,9 @@ exchange:
     mode: koreaexim
     koreaexim:
       api-key: ${KOREAEXIM_API_KEY:}
+    # 최신 환율 캐시(Redis). false면 Redis를 쓰지 않고 모두 DB에서 읽는다
+    cache:
+      enabled: true
   quote:
     # 견적 유효 시간과 수수료율(0.01 = 1%)
     ttl: 5m
@@ -60,6 +86,10 @@ eureka:
       defaultZone: http://eureka-server:8761/eureka/
 
 management:
+  health:
+    redis:
+      # 캐시 Redis가 꺼져도 DB로 조회해 서비스는 동작하므로, Redis 상태로 앱 health를 DOWN으로 만들지 않는다
+      enabled: false
   endpoints:
     web:
       exposure:
@@ -72,3 +102,10 @@ logging:
     json:
       add:
         service: ${spring.application.name}
+
+# API 문서는 운영에서 끕니다 (내부 구조를 외부에 드러내지 않게).
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

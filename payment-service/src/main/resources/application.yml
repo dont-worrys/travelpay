@@ -5,31 +5,65 @@ spring:
     url: ${PAYMENT_DB_URL}
     username: ${PAYMENT_DB_USERNAME}
     password: ${PAYMENT_DB_PASSWORD}
+    hikari:
+      data-source-properties:
+        # JDBC 배치 INSERT를 여러 행 INSERT 한 문장으로 바꿔 보냄 (PostgreSQL 드라이버)
+        reWriteBatchedInserts: true
+  # 송금 복구·결제 정산 복구 스케줄러가 서로의 원장 호출(건당 최대 약 6초)을 기다리지 않도록 스레드를 나눕니다. (결제 담당자 합의)
+  task:
+    scheduling:
+      pool:
+        size: 2
   jpa:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        # 정산 항목처럼 여러 건을 한 번에 저장할 때 DB 왕복을 줄이도록 묶어서 보냄
+        jdbc:
+          batch_size: 100
+        order_inserts: true
+        order_updates: true
   flyway:
     default-schema: payment_service
   cloud:
     openfeign:
       client:
         config:
-          wallet-service:
+          # 결제·송금이 함께 쓰는 Feign 클라이언트(contextId 기준)
+          paymentWalletApi:
             connect-timeout: 2000
             read-timeout: 3000
-          # 송금 쪽 Wallet 클라이언트와 중복이라 공통화 리팩토링 때 정리할 예정입니다.
-          paymentWalletApi:
+          # 원장 최대 응답(약 5초)보다 길게 기다리고, 넘으면 결과 모름(송금은 PROCESSING)
+          paymentLedgerApi:
+            connect-timeout: 1000
+            read-timeout: 6000
+          paymentUserApi:
             connect-timeout: 2000
             read-timeout: 3000
 
 travelpay:
+  client:
+    ledger:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
+      url: ${LEDGER_SERVICE_URL:}
+    user:
+      # 로컬 테스트용 직접 주소. 비우면 Eureka에서 user-service를 찾는다
+      url: ${USER_SERVICE_URL:}
   auth:
     header-context:
       enabled: true
 
 server:
   port: 8083
+
+# API 문서(Swagger UI: /swagger-ui.html). 외부 API만 그룹으로 노출하며 prod에서는 끕니다.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
 
 eureka:
   instance:
@@ -41,15 +75,29 @@ eureka:
       defaultZone: http://localhost:8761/eureka/
 
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # Prometheus에서 HTTP p95·p99를 계산할 수 있도록 bucket을 발행합니다.
+        http.server.requests: true
   endpoints:
     web:
       exposure:
         include: health,prometheus
 
 logging:
+  # IntelliJ 작업 디렉터리는 프로젝트 루트입니다. Alloy가 앱별 파일을 읽습니다.
+  file:
+    name: infra/monitoring/.local-logs/${spring.application.name}.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 3
+      total-size-cap: 50MB
   structured:
     format:
       console: logstash
+      file: logstash
     json:
       add:
         service: ${spring.application.name}

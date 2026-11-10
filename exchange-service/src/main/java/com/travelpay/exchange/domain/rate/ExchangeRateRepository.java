@@ -1,6 +1,7 @@
 package com.travelpay.exchange.domain.rate;
 
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -18,6 +19,14 @@ public interface ExchangeRateRepository {
 
     /** 출처·통화별 가장 최근 고시일의 가장 최근 수집분입니다. */
     Optional<ExchangeRate> findLatest(RateSource source, ForeignCurrency currency);
+
+    /**
+     * 여러 통화의 최신 환율을 쿼리 하나로 함께 읽습니다. 통화마다 findLatest와 같은 규칙으로 고릅니다.
+     * 한 번에 읽으므로 모든 통화가 같은 시점(같은 수집 회차)의 데이터입니다.
+     *
+     * @return 요청한 통화 순서대로의 최신 환율. 아직 수집된 환율이 없는 통화는 빠집니다.
+     */
+    List<ExchangeRate> findLatestOfEach(RateSource source, List<ForeignCurrency> currencies);
 
     boolean existsByRateDate(RateSource source, ForeignCurrency currency, LocalDate rateDate);
 }

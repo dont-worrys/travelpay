@@ -45,6 +45,11 @@ public class UserCredentialsRepositoryImpl implements UserCredentialsRepository 
     }
 
     @Override
+    public Optional<UserCredentials> findByUserIdForUpdate(UUID userId) {
+        return userCredentialsJpaRepository.findByUserIdForUpdate(userId);
+    }
+
+    @Override
     public boolean existsByLoginEmail(String loginEmail) {
         return userCredentialsJpaRepository.existsByLoginEmail(loginEmail);
     }

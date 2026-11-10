@@ -66,6 +66,15 @@ class UserErrorCodeResponseTest {
                         "USER_TERMS_CONSENT_INVALID", "필수 약관 동의와 적용 버전을 확인해 주세요."),
                 Arguments.of(UserErrorCode.INVALID_CREDENTIALS, 401,
                         "USER_INVALID_CREDENTIALS", "이메일 또는 비밀번호가 올바르지 않습니다."),
+                Arguments.of(UserErrorCode.CURRENT_PASSWORD_MISMATCH, 400,
+                        "USER_CURRENT_PASSWORD_MISMATCH", "현재 비밀번호가 올바르지 않습니다."),
+                Arguments.of(UserErrorCode.NEW_PASSWORD_SAME_AS_CURRENT, 400,
+                        "USER_NEW_PASSWORD_SAME_AS_CURRENT", "새 비밀번호는 현재 비밀번호와 다르게 입력해 주세요."),
+                Arguments.of(UserErrorCode.CREDENTIAL_CONFLICT, 409,
+                        "USER_CREDENTIAL_CONFLICT", "로그인 정보가 변경되었습니다. 다시 로그인한 후 시도해 주세요."),
+                Arguments.of(UserErrorCode.ACCOUNT_UPDATED_SESSION_UNAVAILABLE, 503,
+                        "USER_ACCOUNT_UPDATED_SESSION_UNAVAILABLE",
+                        "계정 정보는 변경되었지만 로그인 상태를 갱신하지 못했습니다. 다시 로그인해 주세요."),
                 Arguments.of(UserErrorCode.ACCOUNT_SUSPENDED, 403,
                         "USER_ACCOUNT_SUSPENDED", "이용이 정지된 계정입니다."),
                 Arguments.of(UserErrorCode.ACCOUNT_CLOSED, 403,
@@ -73,7 +82,15 @@ class UserErrorCodeResponseTest {
                 Arguments.of(UserErrorCode.RECIPIENT_NOT_FOUND, 404,
                         "USER_RECIPIENT_NOT_FOUND", "수취인을 찾을 수 없습니다."),
                 Arguments.of(UserErrorCode.NOT_FOUND, 404,
-                        "USER_NOT_FOUND", "회원을 찾을 수 없습니다.")
+                        "USER_NOT_FOUND", "회원을 찾을 수 없습니다."),
+                Arguments.of(UserErrorCode.MASTER_PROTECTION_CONFLICT, 409,
+                        "USER_MASTER_PROTECTION_CONFLICT", "자기 계정은 정지할 수 없습니다."),
+                Arguments.of(UserErrorCode.CLOSED_ACCOUNT_UNCHANGEABLE, 409,
+                        "USER_CLOSED_ACCOUNT_UNCHANGEABLE", "이용이 종료된 계정의 상태는 바꿀 수 없습니다."),
+                Arguments.of(UserErrorCode.TERMS_VERSION_CONFLICT, 409,
+                        "USER_TERMS_VERSION_CONFLICT", "같은 약관 버전이나 같은 시행 시각의 약관이 이미 있습니다."),
+                Arguments.of(UserErrorCode.TERMS_EFFECTIVE_AT_NOT_FUTURE, 400,
+                        "USER_TERMS_EFFECTIVE_AT_NOT_FUTURE", "시행 시각은 등록 시점보다 1분 이상 뒤로 지정해 주세요.")
         );
     }
 

@@ -5,20 +5,22 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.response.PageResponse;
+import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.transfer.application.TransferService;
 import com.travelpay.payment.transfer.dto.TransferResponse;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,13 +31,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 실제 PostgreSQL에 Flyway 마이그레이션을 적용한 뒤 엔티티 매핑(validate), 제약 조건, 목록 쿼리를 검증합니다.
- * 로컬 compose의 postgres를 사용하므로 PAYMENT_DB_URL 등 DB 환경 변수가 있을 때만 실행합니다.
+ * Testcontainers PostgreSQL을 사용하며 Docker가 없으면 건너뜁니다.
  * 각 테스트는 트랜잭션 안에서 실행 후 롤백되며, 무작위 회원 ID를 사용해 기존 데이터의 영향을 받지 않습니다.
  */
-@SpringBootTest(properties = "eureka.client.enabled=false")
+@SpringBootTest(properties = {"eureka.client.enabled=false", "transfer.recovery.enabled=false"})
 @Transactional
-@EnabledIfEnvironmentVariable(named = "PAYMENT_DB_URL", matches = ".+")
-class TransferRepositoryIntegrationTest {
+class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
 
     private static final String REQUEST_HASH = "0".repeat(64);
 
@@ -210,6 +211,119 @@ class TransferRepositoryIntegrationTest {
         assertEquals(TransferFailureReason.INSUFFICIENT_BALANCE, found.getFailureReason());
     }
 
+    /** 기존 로컬 데이터와 섞이지 않도록 2000년 시각을 쓰고, 대기 시간(30초 × 2^max(attempt_count - 1, 0))과 순서를 확인합니다. */
+    @Test
+    void findRecoveryTargetsReturnsOnlyDueProcessingTransfersInOldestOrder() {
+        Instant base = Instant.parse("2000-01-01T00:00:00Z");
+        Transfer firstTry = saveWithTimes(processing(UUID.randomUUID(), "due-first"), base, base.plusSeconds(1));
+        Transfer fourthTry = saveWithTimes(processing(UUID.randomUUID(), "due-fourth"), base, base);
+        jdbcTemplate.update("update transfer set attempt_count = 3 where id = ?", fourthTry.getId());
+        Transfer requested = saveWithTimes(transfer(UUID.randomUUID(), UUID.randomUUID(), "due-requested", 1_000L),
+                base, base);
+        Set<UUID> created = Set.of(firstTry.getId(), fourthTry.getId(), requested.getId());
+
+        List<UUID> afterThirtySeconds = ids(transferRepository.findRecoveryTargets(base.plusSeconds(32), 100), created);
+        List<UUID> afterTwoMinutes = ids(transferRepository.findRecoveryTargets(base.plusSeconds(121), 100), created);
+        List<Transfer> limited = transferRepository.findRecoveryTargets(base.plusSeconds(121), 1);
+
+        assertEquals(List.of(firstTry.getId()), afterThirtySeconds);
+        assertEquals(List.of(fourthTry.getId(), firstTry.getId()), afterTwoMinutes);
+        assertEquals(1, limited.size());
+    }
+
+    @Test
+    void claimForRecoveryUpdatesOnlyUnchangedProcessingTransfer() {
+        Instant base = Instant.parse("2000-01-01T00:00:00Z");
+        Transfer processing = saveWithTimes(processing(UUID.randomUUID(), "claim"), base, base);
+        Instant claimedAt = Instant.parse("2026-11-02T00:00:00Z");
+
+        int first = transferRepository.claimForRecovery(processing.getId(), base, claimedAt);
+        int second = transferRepository.claimForRecovery(processing.getId(), base, claimedAt.plusSeconds(1));
+
+        assertEquals(1, first);
+        assertEquals(0, second);
+        assertEquals(claimedAt, transferRepository.findById(processing.getId()).orElseThrow().getUpdatedAt());
+    }
+
+    @Test
+    void recordUnknownAttemptCountsOnceAndMovesToManualReviewAtLimit() {
+        Transfer saved = transferRepository.saveAndFlush(processing(UUID.randomUUID(), "unknown"));
+        Instant now = Instant.parse("2026-11-02T00:00:00Z");
+
+        int first = transferRepository.recordUnknownAttempt(saved.getId(), 0, TransferStatus.PROCESSING, null, now);
+        int stale = transferRepository.recordUnknownAttempt(saved.getId(), 0, TransferStatus.PROCESSING, null, now);
+        int exhausted = transferRepository.recordUnknownAttempt(saved.getId(), 1, TransferStatus.MANUAL_REVIEW,
+                TransferReviewReason.RETRY_EXHAUSTED, now);
+        int afterReview = transferRepository.markManualReview(saved.getId(),
+                TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, now);
+
+        assertEquals(List.of(1, 0, 1, 0), List.of(first, stale, exhausted, afterReview));
+        Transfer found = transferRepository.findById(saved.getId()).orElseThrow();
+        assertEquals(2, found.getAttemptCount());
+        assertEquals(TransferStatus.MANUAL_REVIEW, found.getStatus());
+        assertEquals(TransferReviewReason.RETRY_EXHAUSTED, found.getReviewReason());
+    }
+
+    @Test
+    void markManualReviewChangesOnlyProcessingTransfer() {
+        Transfer processing = transferRepository.saveAndFlush(processing(UUID.randomUUID(), "review"));
+        Transfer requested = transferRepository.saveAndFlush(
+                transfer(UUID.randomUUID(), UUID.randomUUID(), "review-requested", 1_000L));
+        Instant now = Instant.parse("2026-11-02T00:00:00Z");
+
+        int processingUpdated = transferRepository.markManualReview(processing.getId(),
+                TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, now);
+        int requestedUpdated = transferRepository.markManualReview(requested.getId(),
+                TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, now);
+
+        assertEquals(1, processingUpdated);
+        assertEquals(0, requestedUpdated);
+        Transfer found = transferRepository.findById(processing.getId()).orElseThrow();
+        assertEquals(TransferStatus.MANUAL_REVIEW, found.getStatus());
+        assertEquals(TransferReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, found.getReviewReason());
+    }
+
+    /** PostgreSQL은 제약 위반 후 트랜잭션을 더 쓸 수 없으므로 위반 하나씩 따로 실행합니다. */
+    @ParameterizedTest
+    @CsvSource(value = {"MANUAL_REVIEW, NULL", "PROCESSING, RETRY_EXHAUSTED", "MANUAL_REVIEW, UNKNOWN_REASON"},
+            nullValues = "NULL")
+    void reviewReasonIsRequiredOnlyForManualReviewTransfer(String status, String reviewReason) {
+        Transfer saved = transferRepository.saveAndFlush(processing(UUID.randomUUID(), "review-ck"));
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update transfer set status = ?, review_reason = ? where id = ?", status, reviewReason, saved.getId()));
+    }
+
+    @Test
+    void negativeAttemptCountViolatesCheckConstraint() {
+        Transfer saved = transferRepository.saveAndFlush(processing(UUID.randomUUID(), "attempt-ck"));
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update transfer set attempt_count = -1 where id = ?", saved.getId()));
+    }
+
+    private static List<UUID> ids(List<Transfer> transfers, Set<UUID> created) {
+        return transfers.stream().map(Transfer::getId).filter(created::contains).toList();
+    }
+
+    @Test
+    void countsAndListsProcessingTransfersCreatedBeforeGivenTime() {
+        Instant base = Instant.parse("2000-01-01T00:00:00Z");
+        long existing = transferRepository.countProcessingCreatedBefore(base.plusSeconds(5));
+        Transfer second = saveWithTimes(processing(UUID.randomUUID(), "stuck-second"), base.plusSeconds(1), base);
+        Transfer first = saveWithTimes(processing(UUID.randomUUID(), "stuck-first"), base, base);
+        saveWithTimes(processing(UUID.randomUUID(), "stuck-recent"), base.plusSeconds(10), base);
+        saveWithTimes(transfer(UUID.randomUUID(), UUID.randomUUID(), "stuck-requested", 1_000L), base, base);
+
+        long count = transferRepository.countProcessingCreatedBefore(base.plusSeconds(5));
+        List<UUID> ids = transferRepository.findProcessingIdsCreatedBefore(base.plusSeconds(5), PageRequest.of(0, 100));
+
+        assertEquals(existing + 2, count);
+        assertEquals(List.of(first.getId(), second.getId()), ids.stream()
+                .filter(id -> id.equals(first.getId()) || id.equals(second.getId()))
+                .toList());
+    }
+
     private List<UUID> collectAllPages(UUID userId, TransferDirection direction, int size) {
         List<UUID> ids = new ArrayList<>();
         int pageNumber = 0;
@@ -227,6 +341,15 @@ class TransferRepositoryIntegrationTest {
         Transfer saved = transferRepository.saveAndFlush(transfer);
         jdbcTemplate.update("update transfer set created_at = ? where id = ?",
                 createdAt.atOffset(ZoneOffset.UTC), saved.getId());
+        entityManager.detach(saved);
+        return transferRepository.findById(saved.getId()).orElseThrow();
+    }
+
+    /** 생성·수정 시각은 @PrePersist가 정하므로, 저장 후 SQL로 원하는 시각으로 바꿉니다. */
+    private Transfer saveWithTimes(Transfer transfer, Instant createdAt, Instant updatedAt) {
+        Transfer saved = transferRepository.saveAndFlush(transfer);
+        jdbcTemplate.update("update transfer set created_at = ?, updated_at = ? where id = ?",
+                createdAt.atOffset(ZoneOffset.UTC), updatedAt.atOffset(ZoneOffset.UTC), saved.getId());
         entityManager.detach(saved);
         return transferRepository.findById(saved.getId()).orElseThrow();
     }

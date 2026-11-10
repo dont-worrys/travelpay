@@ -1,6 +1,9 @@
 package com.travelpay.wallet.application.charge;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.util.PageableUtils;
+import com.travelpay.wallet.application.charge.dto.AdminChargeResult;
 import com.travelpay.wallet.application.charge.dto.ChargeAcceptedResult;
 import com.travelpay.wallet.application.charge.dto.ChargeResult;
 import com.travelpay.wallet.application.charge.dto.RequestChargeCommand;
@@ -11,13 +14,24 @@ import com.travelpay.wallet.domain.charge.AccountNumberCipher;
 import com.travelpay.wallet.domain.charge.AccountNumberCipherException;
 import com.travelpay.wallet.domain.charge.BankAccount;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
+import com.travelpay.wallet.domain.charge.ChargeRequestRepository;
+import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.domain.charge.DuplicateChargeRequestException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -31,15 +45,20 @@ public class ChargeService {
 
     private final ChargeTransactionSteps steps;
     private final WalletTransactionSteps walletSteps;
-    private final UserRealNameClient userRealNameClient;
+    private final UserFundingIdentityClient userFundingIdentityClient;
     private final AccountNumberCipher cipher;
+    private final ChargeRequestRepository chargeRequestRepository;
+
+    public static final int MAX_PAGE_SIZE = 100;
+    private static final Sort LIST_SORT = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
+    private static final Set<String> LIST_SORT_FIELDS = Set.of("createdAt", "id");
 
     /**
      * 충전 접수. 회원 실명 조회는 트랜잭션 밖에서 하고, 실패하면 아무것도 저장하지 않는다.
      * 같은 멱등 키의 기존 충전은 지갑 확인·외부 호출보다 먼저 찾아, 내용이 같으면 그 결과를, 다르면 409를 돌려준다.
      */
     public ChargeAcceptedResult requestCharge(RequestChargeCommand command) {
-        UUID idempotencyKey = parseIdempotencyKey(command.idempotencyKey());
+        UUID idempotencyKey = IdempotencyKeys.parse(command.idempotencyKey());
         if (command.currency() != CHARGE_CURRENCY) {
             throw new BusinessException(WalletErrorCode.CHARGE_CURRENCY_NOT_SUPPORTED);
         }
@@ -51,7 +70,7 @@ public class ChargeService {
         }
 
         UUID walletId = walletSteps.findActiveWalletId(userId);
-        String realName = userRealNameClient.findRealName(userId);
+        String realName = userFundingIdentityClient.findRealName(userId);
         BankAccount bankAccount = BankAccount.encrypt(command.bankCode(), command.accountNumber(), cipher);
         ChargeRequest chargeRequest = ChargeRequest.create(userId, walletId, command.amount(), command.currency(),
                 bankAccount, realName, idempotencyKey);
@@ -73,6 +92,68 @@ public class ChargeService {
         ChargeRequest charge = steps.findById(chargeId)
                 .filter(found -> found.isOwnedBy(userId))
                 .orElseThrow(() -> new BusinessException(WalletErrorCode.CHARGE_NOT_FOUND));
+        return toResult(charge);
+    }
+
+    /**
+     * 본인 충전 목록. createdAt 내림차순, 같으면 id 내림차순. 기간은 createdAt 기준 [from, to).
+     * page는 0부터, size는 1 이상이며 최대 크기를 넘으면 최대 크기로 조회한다. offset이 int 범위를 넘으면 400.
+     * 마이크로초보다 세밀한 from·to는 다음 마이크로초로 올려 조회한다
+     */
+    @Transactional(readOnly = true, timeout = ChargeTransactionSteps.TX_TIMEOUT_SECONDS)
+    public Page<ChargeResult> listMyCharges(UUID userId, ChargeStatus status, Instant from, Instant to,
+                                            int page, int size) {
+        Objects.requireNonNull(userId, "userId");
+        Pageable pageable = toListPageable(from, to, page, size);
+        return chargeRequestRepository.findByUser(userId, status, ceilToMicros(from), ceilToMicros(to), pageable)
+                .map(this::toResult);
+    }
+
+    /** 전체 충전 목록(관리자). 정렬·기간·페이지·offset·마이크로초 올림 규칙은 listMyCharges와 같다 */
+    @Transactional(readOnly = true, timeout = ChargeTransactionSteps.TX_TIMEOUT_SECONDS)
+    public Page<AdminChargeResult> listCharges(UUID userId, ChargeStatus status, Instant from, Instant to,
+                                               int page, int size) {
+        Pageable pageable = toListPageable(from, to, page, size);
+        return chargeRequestRepository.search(userId, status, ceilToMicros(from), ceilToMicros(to), pageable)
+                .map(charge -> new AdminChargeResult(toResult(charge), charge.getUserId(),
+                        charge.getAttemptCount()));
+    }
+
+    private static Pageable toListPageable(Instant from, Instant to, int page, int size) {
+        if (page < 0 || size < 1 || (from != null && to != null && from.isAfter(to))) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        // 정렬은 고정이며, 생성 시각이 같은 항목은 ID로 순서를 정한다
+        Pageable pageable = PageableUtils.toStablePageable(
+                PageRequest.of(page, size, LIST_SORT), LIST_SORT_FIELDS, "id", MAX_PAGE_SIZE);
+        // 보정된 size 기준 offset이 int를 넘으면 JPA firstResult(int)에서 넘친다
+        if (pageable.getOffset() > Integer.MAX_VALUE) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        return pageable;
+    }
+
+    /**
+     * DB(timestamptz)는 마이크로초 단위라, 저장 시각 t에 대해 t >= x ⇔ t >= ceil(x) 이고 t < x ⇔ t < ceil(x) 이다.
+     * 올려서 비교해도 [from, to) 계약은 그대로다. 올림이 범위를 넘으면 400
+     */
+    private static Instant ceilToMicros(Instant instant) {
+        if (instant == null) {
+            return null;
+        }
+        Instant truncated = instant.truncatedTo(ChronoUnit.MICROS);
+        if (truncated.equals(instant)) {
+            return instant;
+        }
+        try {
+            return truncated.plus(1, ChronoUnit.MICROS);
+        } catch (DateTimeException e) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+    }
+
+    /** 계좌번호는 마스킹 값만 담는다. 원문·실명은 결과에 넣지 않는다 */
+    private ChargeResult toResult(ChargeRequest charge) {
         String accountNumberMask = decrypting(charge.getId(),
                 () -> charge.getBankAccount().maskedAccountNumber(cipher));
         return new ChargeResult(charge.getId(), charge.getStatus(), charge.getAmount(), charge.getCurrency(),
@@ -100,24 +181,5 @@ public class ChargeService {
                     e.getCause() != null ? e.getCause().getClass().getName() : e.getClass().getName());
             throw e;
         }
-    }
-
-    /** 표준 UUID 표기만 받는다. 형식 오류는 DB 조회 전에 400 */
-    private static UUID parseIdempotencyKey(String value) {
-        if (value == null || value.isBlank()) {
-            throw new BusinessException(WalletErrorCode.CHARGE_INVALID_IDEMPOTENCY_KEY);
-        }
-        String normalized = value.strip();
-        UUID parsed;
-        try {
-            parsed = UUID.fromString(normalized);
-        } catch (IllegalArgumentException e) {
-            throw new BusinessException(WalletErrorCode.CHARGE_INVALID_IDEMPOTENCY_KEY);
-        }
-        // UUID.fromString이 허용하는 축약형까지 받아들이지 않도록 표준 표기와 비교
-        if (!parsed.toString().equalsIgnoreCase(normalized)) {
-            throw new BusinessException(WalletErrorCode.CHARGE_INVALID_IDEMPOTENCY_KEY);
-        }
-        return parsed;
     }
 }

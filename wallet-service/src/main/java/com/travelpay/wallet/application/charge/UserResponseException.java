@@ -1,6 +1,6 @@
 package com.travelpay.wallet.application.charge;
 
-/** 재시도로 풀리지 않는 회원 서비스 응답(그 밖의 4xx, 형식 이상). 공통 처리기가 500으로 응답한다 */
+/** 재시도로 풀리지 않는 회원 서비스 2xx 응답 내용 이상. 공통 처리기가 500으로 응답한다 */
 public class UserResponseException extends RuntimeException {
 
     public UserResponseException() {

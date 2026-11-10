@@ -34,7 +34,8 @@ public class SessionLoginHandler {
     }
 
     public void onLoginSuccess(LoginResult result, HttpServletRequest request, HttpServletResponse response) {
-        var principal = new UserSessionPrincipal(result.userId(), result.role(), clock.instant());
+        var principal = new UserSessionPrincipal(result.userId(), result.role(), clock.instant(),
+                result.sessionVersion());
         var authentication = UsernamePasswordAuthenticationToken.authenticated(principal, null,
                 List.of(new SimpleGrantedAuthority("ROLE_" + principal.role().name())));
 

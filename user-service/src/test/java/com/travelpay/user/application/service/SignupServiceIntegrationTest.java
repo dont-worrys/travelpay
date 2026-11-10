@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -32,6 +33,8 @@ import com.travelpay.user.domain.model.vo.UserStatus;
 import com.travelpay.user.domain.repository.UserConsentRepository;
 import com.travelpay.user.domain.repository.UserCredentialsRepository;
 import com.travelpay.user.domain.repository.UserRepository;
+import com.travelpay.user.domain.repository.UserSearchCondition;
+import com.travelpay.user.domain.repository.UserSearchItem;
 import com.travelpay.user.infrastructure.persistence.JpaRepositoryTestConfiguration;
 import com.travelpay.user.infrastructure.persistence.PostgresJpaTestConfiguration;
 import com.travelpay.user.infrastructure.persistence.UserConsentRepositoryImpl;
@@ -477,6 +480,15 @@ class SignupServiceIntegrationTest {
                     state.synchronizeWrite(Race.PHONE);
                     return exists;
                 }
+                @Override public boolean increaseSessionVersion(UUID userId) {
+                    return delegate.increaseSessionVersion(userId);
+                }
+                @Override public List<User> findAllByIdForUpdate(Collection<UUID> userIds) {
+                    return delegate.findAllByIdForUpdate(userIds);
+                }
+                @Override public List<UserSearchItem> search(UserSearchCondition condition, int offset, int limit) {
+                    return delegate.search(condition, offset, limit);
+                }
             };
         }
 
@@ -490,6 +502,9 @@ class SignupServiceIntegrationTest {
                 }
                 @Override public Optional<UserCredentials> findByUserId(UUID userId) {
                     return delegate.findByUserId(userId);
+                }
+                @Override public Optional<UserCredentials> findByUserIdForUpdate(UUID userId) {
+                    return delegate.findByUserIdForUpdate(userId);
                 }
                 @Override public boolean existsByLoginEmail(String email) {
                     var exists = delegate.existsByLoginEmail(email);

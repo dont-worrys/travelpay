@@ -93,6 +93,16 @@ class TransferControllerTest {
                 .andExpect(jsonPath("$.data.status").value("PROCESSING"));
     }
 
+    /** 자동 처리를 멈춘 송금(MANUAL_REVIEW)도 결과가 확정되지 않았으므로 202입니다. */
+    @Test
+    void returnsAcceptedWhenTransferIsUnderManualReview() throws Exception {
+        givenTransferResult(TransferStatus.MANUAL_REVIEW);
+
+        postTransfer()
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.data.status").value("MANUAL_REVIEW"));
+    }
+
     @Test
     void returnsUnprocessableEntityForInsufficientBalance() throws Exception {
         when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
@@ -197,16 +207,18 @@ class TransferControllerTest {
     }
 
     @Test
-    void returnsRecipientWithOnlyTransferableFlag() throws Exception {
+    void returnsRecipientWithMaskedNameAndTransferableFlagOnly() throws Exception {
         when(transferService.findRecipient(SENDER.userId(), RECEIVER_ID))
-                .thenReturn(new RecipientResponse(RECEIVER_ID, true));
+                .thenReturn(new RecipientResponse(RECEIVER_ID, "홍*동", true));
 
         mvc(SENDER).perform(get("/api/v1/transfers/recipients/{receiverId}", RECEIVER_ID))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(true))
                 .andExpect(jsonPath("$.data.receiverId").value(RECEIVER_ID.toString()))
+                .andExpect(jsonPath("$.data.receiverName").value("홍*동"))
                 .andExpect(jsonPath("$.data.transferable").value(true))
                 .andExpect(jsonPath("$.data.walletId").doesNotExist())
+                .andExpect(jsonPath("$.data.realName").doesNotExist())
                 .andExpect(jsonPath("$.error").doesNotExist());
     }
 

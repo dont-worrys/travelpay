@@ -49,7 +49,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
-        "travelpay.wallet.outbox.publisher.enabled=false"
+        "travelpay.wallet.outbox.publisher.enabled=false",
+        "travelpay.wallet.charge.recovery.enabled=false",
+        "travelpay.wallet.charge.reconciliation.enabled=false",
+        "travelpay.wallet.charge.saga.consumer.enabled=false"
 })
 class OutboxPublisherIntegrationTest {
 

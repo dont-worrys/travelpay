@@ -1,14 +1,13 @@
 package com.travelpay.exchange;
 
 import java.math.BigDecimal;
-import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import com.jayway.jsonpath.JsonPath;
@@ -26,7 +25,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.core.env.Environment;
-import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -40,7 +39,8 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -54,7 +54,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
-        "exchange.rate.koreaexim.api-key=integration-test"
+        "exchange.rate.koreaexim.api-key=integration-test",
+        "exchange.order.recovery.enabled=false"
 })
 class ExchangeQuoteIntegrationTest {
 
@@ -72,6 +73,7 @@ class ExchangeQuoteIntegrationTest {
     @DynamicPropertySource
     static void datasource(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+        TestRedis.register(registry);
         registry.add("spring.datasource.username", POSTGRES::getUsername);
         registry.add("spring.datasource.password", POSTGRES::getPassword);
     }
@@ -91,12 +93,22 @@ class ExchangeQuoteIntegrationTest {
     @Autowired
     private Environment environment;
 
+    @Autowired
+    private StringRedisTemplate redis;
+
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
+        // 주문이 환율을 FK로 참조하므로 참조하는 테이블까지 함께 비운다 (CASCADE 대신 대상을 명시)
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+                + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
+        // 견적은 Redis에 있으므로 견적 개수를 세기 전에 견적 키를 비운다
+        Set<String> quoteKeys = redis.keys("exchange:quote:*");
+        if (!quoteKeys.isEmpty()) {
+            redis.delete(quoteKeys);
+        }
         clock.set(NOW);
     }
 
@@ -104,7 +116,7 @@ class ExchangeQuoteIntegrationTest {
     void appliesFlywayMigrationsAndStartsWithSchemaValidation() {
         assertEquals("validate", environment.getProperty("spring.jpa.hibernate.ddl-auto"));
         // version이 없는 행은 Flyway가 스키마를 만들었다는 기록입니다.
-        assertEquals(List.of("1", "2"), jdbcTemplate.queryForList(
+        assertEquals(List.of("1", "2", "3", "4", "5", "6"), jdbcTemplate.queryForList(
                 "SELECT version FROM " + SCHEMA + ".flyway_schema_history"
                         + " WHERE success AND version IS NOT NULL ORDER BY installed_rank",
                 String.class));
@@ -124,24 +136,26 @@ class ExchangeQuoteIntegrationTest {
                 .andExpect(jsonPath("$.data.status").value("ISSUED"))
                 .andReturn().getResponse().getContentAsString();
 
-        Map<String, Object> row = quoteRow(JsonPath.read(body, "$.data.quoteId"));
-        assertEquals("USER", row.get("quote_type"));
-        assertEquals(rateId, row.get("rate_id"));
-        assertEquals(OWNER, row.get("user_id"));
-        assertEquals("KRW", row.get("from_currency"));
-        assertEquals("JPY", row.get("to_currency"));
-        assertEquals(100000L, row.get("from_amount"));
-        assertEquals(11928L, row.get("to_amount"));
-        assertEquals(1000L, row.get("fee_amount"));
-        assertEquals(101000L, row.get("total_debit_amount"));
-        assertEquals(new BigDecimal("838.30000000"), row.get("applied_rate"));
-        assertEquals(100, row.get("rate_unit"));
-        assertEquals(RATE_DATE, ((java.sql.Date) row.get("rate_date")).toLocalDate());
-        assertEquals(new BigDecimal("0.010000"), row.get("fee_rate"));
-        assertEquals("ISSUED", row.get("status"));
-        assertEquals(NOW.plus(Duration.ofMinutes(5)), instant(row, "expires_at"));
-        assertEquals(NOW, instant(row, "created_at"));
-        assertEquals(NOW, instant(row, "updated_at"));
+        String quoteId = JsonPath.read(body, "$.data.quoteId");
+        String stored = storedQuote(quoteId);
+        assertEquals("USER", JsonPath.read(stored, "$.quoteType"));
+        assertEquals(rateId.toString(), JsonPath.read(stored, "$.rateId"));
+        assertEquals(OWNER.toString(), JsonPath.read(stored, "$.userId"));
+        assertEquals("KRW", JsonPath.read(stored, "$.fromCurrency"));
+        assertEquals("JPY", JsonPath.read(stored, "$.toCurrency"));
+        assertEquals(100000, (int) JsonPath.read(stored, "$.fromAmount"));
+        assertEquals(11928, (int) JsonPath.read(stored, "$.toAmount"));
+        assertEquals(1000, (int) JsonPath.read(stored, "$.feeAmount"));
+        assertEquals(101000, (int) JsonPath.read(stored, "$.totalDebitAmount"));
+        assertEquals(0, new BigDecimal("838.30").compareTo(new BigDecimal(JsonPath.read(stored, "$.appliedRate").toString())));
+        assertEquals(100, (int) JsonPath.read(stored, "$.rateUnit"));
+        assertEquals(RATE_DATE.toString(), JsonPath.read(stored, "$.rateDate"));
+        assertEquals(0, new BigDecimal("0.01").compareTo(new BigDecimal(JsonPath.read(stored, "$.feeRate").toString())));
+        assertEquals(NOW.toString(), JsonPath.read(stored, "$.issuedAt"));
+        assertEquals(NOW.plus(Duration.ofMinutes(5)).toString(), JsonPath.read(stored, "$.expiresAt"));
+        // 키 수명 = 유효 5분 + 만료 뒤 남겨 두는 5분
+        long ttlSeconds = redis.getExpire("exchange:quote:" + quoteId);
+        assertTrue(ttlSeconds > 590 && ttlSeconds <= 600, "ttl " + ttlSeconds);
     }
 
     @Test
@@ -156,11 +170,11 @@ class ExchangeQuoteIntegrationTest {
                 .andExpect(jsonPath("$.data.totalDebitAmount").value("101.51"))
                 .andReturn().getResponse().getContentAsString();
 
-        Map<String, Object> row = quoteRow(JsonPath.read(body, "$.data.quoteId"));
-        assertEquals(10050L, row.get("from_amount"));
-        assertEquals(19968L, row.get("to_amount"));
-        assertEquals(101L, row.get("fee_amount"));
-        assertEquals(10151L, row.get("total_debit_amount"));
+        String stored = storedQuote(JsonPath.read(body, "$.data.quoteId"));
+        assertEquals(10050, (int) JsonPath.read(stored, "$.fromAmount"));
+        assertEquals(19968, (int) JsonPath.read(stored, "$.toAmount"));
+        assertEquals(101, (int) JsonPath.read(stored, "$.feeAmount"));
+        assertEquals(10151, (int) JsonPath.read(stored, "$.totalDebitAmount"));
     }
 
     @Test
@@ -213,7 +227,7 @@ class ExchangeQuoteIntegrationTest {
     }
 
     @Test
-    void showsExpiredAtExpiryWithoutChangingStoredStatus() throws Exception {
+    void showsExpiredAtExpiry() throws Exception {
         saveRate(ForeignCurrency.JPY, "838.30", RATE_DATE);
         String quoteId = issuedQuoteId();
 
@@ -225,18 +239,6 @@ class ExchangeQuoteIntegrationTest {
         mockMvc.perform(get("/api/v1/exchange-quotes/{id}", quoteId).header("User-Id", OWNER).header("User-Role", "USER"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("EXPIRED"));
-
-        assertEquals("ISSUED", quoteRow(quoteId).get("status"));
-    }
-
-    @Test
-    void databaseRejectsQuoteWhoseTotalDebitDoesNotAddUp() {
-        UUID rateId = saveRate(ForeignCurrency.JPY, "838.30", RATE_DATE);
-
-        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
-                "INSERT INTO " + SCHEMA + ".exchange_quotes VALUES (gen_random_uuid(), 'USER', ?, ?, 'KRW', 'JPY',"
-                        + " 100000, 11928, 838.3, 100, ?, 0.01, 1000, 100999, 'ISSUED', now(), now(), now())",
-                rateId, OWNER, RATE_DATE));
     }
 
     private UUID saveRate(ForeignCurrency currency, String midRate, LocalDate rateDate) {
@@ -264,17 +266,15 @@ class ExchangeQuoteIntegrationTest {
         return JsonPath.read(body, "$.data.quoteId");
     }
 
-    private Map<String, Object> quoteRow(String quoteId) {
-        return jdbcTemplate.queryForMap(
-                "SELECT * FROM " + SCHEMA + ".exchange_quotes WHERE quote_id = ?", UUID.fromString(quoteId));
+    /** Redis에 저장된 견적 JSON입니다. */
+    private String storedQuote(String quoteId) {
+        String value = redis.opsForValue().get("exchange:quote:" + quoteId);
+        assertNotNull(value, "견적이 Redis에 저장됨");
+        return value;
     }
 
     private int quoteCount() {
-        return jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA + ".exchange_quotes", Integer.class);
-    }
-
-    private static Instant instant(Map<String, Object> row, String column) {
-        return ((Timestamp) row.get(column)).toInstant();
+        return redis.keys("exchange:quote:*").size();
     }
 
     /** 테스트에서 시각을 옮길 수 있는 시계입니다. 서비스와 JPA Auditing이 같은 시계를 씁니다. */

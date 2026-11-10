@@ -16,6 +16,7 @@ public record BankTransactionResponse(
         BankFailureCode failureCode,
         long amount,
         UUID originalTxId,
+        Instant createdAt,
         Instant completedAt
 ) {
 
@@ -28,6 +29,7 @@ public record BankTransactionResponse(
                 result.failureCode(),
                 result.amount(),
                 result.originalTxId(),
+                result.createdAt(),
                 result.completedAt()
         );
     }

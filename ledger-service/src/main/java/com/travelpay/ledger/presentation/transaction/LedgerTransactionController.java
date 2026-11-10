@@ -3,11 +3,15 @@ package com.travelpay.ledger.presentation.transaction;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.ledger.application.transaction.LedgerTransactionService;
+import com.travelpay.ledger.application.transaction.dto.TransactionDetailResult;
+import com.travelpay.ledger.application.transaction.dto.TransactionPeriodQuery;
+import com.travelpay.ledger.application.transaction.dto.TransactionPeriodResult;
 import com.travelpay.ledger.application.transaction.dto.TransactionResult;
 import com.travelpay.ledger.domain.LedgerErrorCode;
 import com.travelpay.ledger.domain.transaction.ReferenceType;
 import com.travelpay.ledger.presentation.transaction.dto.RegisterTransactionRequest;
 import com.travelpay.ledger.presentation.transaction.dto.RegisterTransactionResponse;
+import com.travelpay.ledger.presentation.transaction.dto.TransactionPeriodResponse;
 import com.travelpay.ledger.presentation.transaction.dto.TransactionResultResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +25,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.Instant;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -51,14 +56,31 @@ public class LedgerTransactionController {
     @GetMapping
     public ApiResponse<TransactionResultResponse> getByReference(@RequestParam ReferenceType referenceType,
                                                                  @RequestParam UUID referenceId) {
-        TransactionResult result = callLogging(referenceType, referenceId,
+        TransactionDetailResult result = callLogging(referenceType, referenceId,
                 () -> transactionService.getByReference(referenceType, referenceId));
         return ApiResponse.success(TransactionResultResponse.from(result));
     }
 
+    /** 기간 [from, to) 거래 목록. 다음 페이지는 응답의 nextCursor를 같은 referenceType·from·to와 함께 보낸다 */
+    @GetMapping("/period")
+    public ApiResponse<TransactionPeriodResponse> getByPeriod(@RequestParam ReferenceType referenceType,
+                                                              @RequestParam Instant from,
+                                                              @RequestParam Instant to,
+                                                              @RequestParam(required = false) String cursor,
+                                                              @RequestParam(required = false) Integer size) {
+        try {
+            TransactionPeriodResult result = transactionService.getByPeriod(
+                    new TransactionPeriodQuery(referenceType, from, to, cursor, size));
+            return ApiResponse.success(TransactionPeriodResponse.from(result));
+        } catch (RuntimeException e) {
+            log.warn("원장 거래 기간 조회 실패 referenceType={} from={} to={} exception={}",
+                    referenceType, from, to, e.getClass().getName());
+            throw e;
+        }
+    }
+
     /** 트랜잭션 시작(커넥션 획득) 실패까지 잡히도록 서비스 프록시 바깥에서 기록. 예외 메시지는 SQL이 섞일 수 있어 남기지 않음 */
-    private TransactionResult callLogging(ReferenceType referenceType, UUID referenceId,
-                                          Supplier<TransactionResult> call) {
+    private <T> T callLogging(ReferenceType referenceType, UUID referenceId, Supplier<T> call) {
         try {
             return call.get();
         } catch (RuntimeException e) {

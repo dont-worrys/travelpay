@@ -16,6 +16,7 @@ import com.travelpay.exchange.domain.rate.ExchangeRateFetchException;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import tools.jackson.core.JacksonException;
@@ -26,6 +27,7 @@ import tools.jackson.databind.json.JsonMapper;
  * 한국수출입은행 환율 API에서 영업일 오전에 고시되는 환율을 가져옵니다.
  * 엔화는 100엔 단위(JPY(100))로, 위안화는 CNH 코드로 내려오므로 우리 통화 코드와 단위로 바꿉니다.
  */
+@Slf4j
 public class KoreaEximRateProvider implements ExchangeRateProvider {
 
     private static final DateTimeFormatter SEARCH_DATE = DateTimeFormatter.BASIC_ISO_DATE;
@@ -84,6 +86,10 @@ public class KoreaEximRateProvider implements ExchangeRateProvider {
     /**
      * 응답 본문을 지원 통화의 환율 목록으로 바꿉니다. 지원하지 않는 통화는 건너뜁니다.
      * 본문이 비어 있으면 고시 전·휴일로 보고 빈 목록을, result 코드가 오류면 예외를 던집니다.
+     *
+     * 지원 통화 중 값이 이상한 통화는 경고 로그를 남기고 그 통화만 건너뜁니다. 한 통화 때문에 정상인 통화까지 버리지 않기 위해서입니다.
+     * 건너뛴 통화는 저장된 최신 고시일이 오늘보다 앞이라, 수집기가 다음 주기에 다시 가져옵니다(ExchangeRateStore.latestRateDate).
+     * 다만 지원 통화가 있었는데 하나도 쓸 수 없으면 예외를 던집니다. 빈 목록을 돌려주면 고시 전·휴일과 구분되지 않기 때문입니다.
      */
     private List<CollectedRate> parse(String body, LocalDate date) {
         if (body == null || body.isBlank()) {
@@ -98,18 +104,27 @@ public class KoreaEximRateProvider implements ExchangeRateProvider {
         }
 
         List<CollectedRate> rates = new ArrayList<>();
+        ExchangeRateFetchException lastInvalid = null;
         for (KoreaEximRateResponse response : responses) {
             if (response.result() != null && response.result() != RESULT_SUCCESS) {
                 throw apiError(response.result());
             }
-            toCollectedRate(response, date).ifPresent(rates::add);
+            try {
+                toCollectedRate(response, date).ifPresent(rates::add);
+            } catch (ExchangeRateFetchException e) {
+                log.warn("수출입은행 환율 한 통화를 건너뜁니다: date={}, reason={}", date, e.getMessage());
+                lastInvalid = e;
+            }
+        }
+        if (rates.isEmpty() && lastInvalid != null) {
+            throw lastInvalid;
         }
         return List.copyOf(rates);
     }
 
     /**
      * 응답 한 건을 우리 통화 코드와 단위로 바꿉니다. 예: JPY(100)은 JPY·100, CNH는 CNY·1입니다.
-     * 지원하지 않는 통화면 empty를, 환율 값이 비었거나 숫자가 아니면 예외를 던집니다.
+     * 지원하지 않는 통화면 empty를, 환율 값이 비었거나 숫자가 아니거나 단위가 다르면 예외를 던집니다.
      */
     private Optional<CollectedRate> toCollectedRate(KoreaEximRateResponse response, LocalDate date) {
         if (response.curUnit() == null) {

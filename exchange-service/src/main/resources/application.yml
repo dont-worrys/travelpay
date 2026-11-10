@@ -11,6 +11,25 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+  data:
+    redis:
+      # 환율 캐시·견적 저장소용 Redis(팀 compose의 redis-cache)입니다. 세션 Redis(16379)와 다른 인스턴스입니다.
+      host: ${REDIS_CACHE_HOST:localhost}
+      port: ${REDIS_CACHE_PORT:16380}
+      password: ${REDIS_CACHE_PASSWORD}
+      # 캐시는 DB보다 빨라야 의미가 있어, 명령 하나를 200ms까지만 기다리고 넘으면 DB로 조회한다.
+      # 연결은 앱 시작·재연결 때만 맺으므로 조금 더 기다린다. application-prod.yml에도 같은 값을 둔다
+      connect-timeout: 1s
+      timeout: 200ms
+      # Spring Data Redis 저장소(@RedisHash)는 쓰지 않고 키·명령을 직접 다룬다
+      repositories:
+        enabled: false
+  task:
+    scheduling:
+      pool:
+        # 기본 1스레드면 주문 복구(원장 호출 최대 50건 × 약 7초)가 길어질 때 환율 수집이 멈춘다.
+        # mock 모드는 환율이 30초 넘게 오래되면 견적을 막으므로, 수집과 복구가 서로 기다리지 않게 둘로 나눈다
+        size: 2
   cloud:
     openfeign:
       client:
@@ -19,6 +38,11 @@ spring:
           wallet-service:
             connect-timeout: 2000
             read-timeout: 3000
+          # 원장 최대 응답(약 5초)까지 기다린다. 넘으면 결과 모름으로 두고 복구 스케줄러가 같은 요청을 다시 보낸다.
+          # 선점 유효 기간(10초)이 이 값(최대 약 7초)보다 길다는 전제라, application-prod.yml에도 같은 값을 둔다
+          ledger-service:
+            connect-timeout: 2000
+            read-timeout: 5000
 
 travelpay:
   auth:
@@ -27,10 +51,19 @@ travelpay:
 
 exchange:
   rate:
-    # 환율 수집 모드: koreaexim(한국수출입은행 공식 환율)
-    mode: koreaexim
+    # 환율 수집 모드: koreaexim(한국수출입은행 공식 환율), mock(공식 환율을 중심으로 변동하는 가짜 환율)
+    mode: ${EXCHANGE_RATE_MODE:koreaexim}
     koreaexim:
       api-key: ${KOREAEXIM_API_KEY:}
+    # 최신 환율 캐시(Redis). false면 Redis를 쓰지 않고 모두 DB에서 읽는다
+    cache:
+      enabled: true
+    # mock 모드에서만 읽습니다. 간격·변동 비율·신선도는 코드 기본값(5s, 0.0005, 0.02, 30s)을 씁니다.
+    mock:
+      # 공식 환율이 DB에 없을 때 쓸 매매기준율 (JPY는 100엔당, CNY는 1위안당)
+      default-mid-rates:
+        JPY: 900.00
+        CNY: 190.00
   quote:
     # 견적 유효 시간과 수수료율(0.01 = 1%)
     ttl: 5m
@@ -46,6 +79,12 @@ exchange:
       CNY:
         min: 10.00
         max: 10000.00
+  order:
+    # 결과를 모르는 주문을 원장에 다시 보내는 주기와 한 번에 처리할 주문 수
+    recovery:
+      enabled: true
+      fixed-delay: 30s
+      batch-size: 50
 
 server:
   port: 8084
@@ -60,15 +99,40 @@ eureka:
       defaultZone: http://localhost:8761/eureka/
 
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # Prometheus에서 HTTP p95·p99를 계산할 수 있도록 bucket을 발행합니다.
+        http.server.requests: true
+  health:
+    redis:
+      # 캐시 Redis가 꺼져도 DB로 조회해 서비스는 동작하므로, Redis 상태로 앱 health를 DOWN으로 만들지 않는다
+      enabled: false
   endpoints:
     web:
       exposure:
         include: health,prometheus
 
 logging:
+  # IntelliJ 작업 디렉터리는 프로젝트 루트입니다. Alloy가 앱별 파일을 읽습니다.
+  file:
+    name: infra/monitoring/.local-logs/${spring.application.name}.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 3
+      total-size-cap: 50MB
   structured:
     format:
       console: logstash
+      file: logstash
     json:
       add:
         service: ${spring.application.name}
+
+# API 문서: 로컬에서만 켭니다 (http://localhost:8084/swagger-ui.html). 운영(application-prod.yml)은 끕니다.
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true

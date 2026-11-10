@@ -17,6 +17,7 @@ import org.springframework.stereotype.Component;
 /**
  * 외부 환율을 가져와 저장합니다. 모드별 차이는 Provider와 정책이 결정하며, 이 클래스는 모드를 알지 못합니다.
  * 외부 호출 실패는 다음 주기에 다시 시도하도록 로그만 남깁니다.
+ * 저장이 커밋되면 새로 저장한 환율을 최신 환율 캐시에 넣습니다. 캐시에 쓰는 곳은 이 수집기 하나입니다.
  */
 @Slf4j
 @Component
@@ -29,6 +30,8 @@ public class ExchangeRateCollector {
     private final ExchangeRateProvider provider;
     private final RateCollectionPolicy policy;
     private final ExchangeRateStore store;
+    private final LatestRateCache cache;
+    private final CacheFailureLog failureLog;
     private final Clock clock;
 
     /**
@@ -103,9 +106,31 @@ public class ExchangeRateCollector {
         }
     }
 
+    /**
+     * store.saveNew는 자기 트랜잭션(@Transactional)이라, 반환된 시점에는 DB 커밋이 끝나 있습니다.
+     * 그래서 캐시는 그 다음에 넣어, DB에 없는(롤백된) 환율이 캐시에 들어가지 않게 합니다.
+     * 이 메서드를 트랜잭션 안에서 부르면 커밋 전에 캐시에 넣게 되므로 수집기에는 트랜잭션을 걸지 않습니다.
+     */
     private void saveNew(LocalDate date, List<CollectedRate> rates) {
         List<ExchangeRate> saved = store.saveNew(rates, clock.instant());
         log.info("환율 저장: source={}, date={}, fetched={}, saved={}",
                 provider.source(), date, rates.size(), saved.size());
+        putIntoCache(saved);
+    }
+
+    /**
+     * 캐시 갱신이 실패해도 수집은 실패로 만들지 않습니다. DB는 이미 맞게 저장됐고,
+     * 캐시에 남은 이전 값은 유효 시간이 지나면 사라져 그동안은 DB에서 읽습니다. 다음 수집이 다시 채웁니다.
+     */
+    private void putIntoCache(List<ExchangeRate> saved) {
+        if (saved.isEmpty()) {
+            return;
+        }
+        try {
+            cache.putAll(saved);
+        } catch (RuntimeException e) {
+            // mock 모드는 5초마다 수집하므로, Redis가 꺼진 동안 경고가 쌓이지 않게 1분에 한 번만 남깁니다.
+            failureLog.warn("갱신", e);
+        }
     }
 }

@@ -1,7 +1,13 @@
 package com.travelpay.wallet.domain.charge;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
 import java.time.Instant;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 
 public interface ChargeRequestRepository {
@@ -19,4 +25,64 @@ public interface ChargeRequestRepository {
      */
     int transitionStatus(UUID chargeId, ChargeStatus from, ChargeStatus to,
                          ChargeFailureCode failureCode, String lastError, Instant now);
+
+    /**
+     * 다음 단계로 전이: transitionStatus에 더해 bank_tx_id·ledger_ref·refund_bank_tx_id를 함께 저장하고
+     * attempt_count를 0으로 초기화한다. null인 값은 기존 값을 유지한다. 트랜잭션 안에서만 사용
+     */
+    int advanceStatus(UUID chargeId, ChargeStatus from, ChargeStatus to,
+                      ChargeFailureCode failureCode, String lastError,
+                      UUID bankTxId, UUID ledgerRef, UUID refundBankTxId, Instant now);
+
+    /**
+     * 운영자 보정 반영 전 행 잠금(FOR UPDATE). MANUAL_REVIEW면 잠그고 true, 아니면 false.
+     * 다른 트랜잭션이 잠그고 있으면 커밋까지 기다린 뒤 다시 판단한다. 트랜잭션 안에서만 사용
+     */
+    boolean lockManualReview(UUID chargeId);
+
+    /**
+     * 운영자 보정: 현재 상태가 MANUAL_REVIEW일 때만 to로 바꾸고 updated_at을 갱신한다. 반환값은 바뀐 행 수(0 또는 1).
+     * failure_code는 failureCode로 바꾸고(null이면 비움), resume이면 attempt_count를 0으로 초기화한다.
+     * failureCode는 정상 흐름에서 to 상태에 도달했을 때와 같은 값이다.
+     * MANUAL_REVIEW 진입 원인은 상태 이력·보정 기록에만 남는다.
+     * bankTxId·ledgerRef·refundBankTxId는 컬럼이 비어 있을 때만 채운다(null이면 그대로). 트랜잭션 안에서만 사용
+     */
+    int resolveFromManualReview(UUID chargeId, ChargeStatus to, boolean resume, ChargeFailureCode failureCode,
+                                UUID bankTxId, UUID ledgerRef, UUID refundBankTxId, Instant now);
+
+    /**
+     * 결과 모름 기록: 현재 상태가 status일 때만 attempt_count +1, last_error 갱신.
+     * 바뀐 뒤의 attempt_count를 돌려주고, 상태가 달라 바꾸지 않았으면 empty. 트랜잭션 안에서만 사용
+     */
+    OptionalInt increaseAttempt(UUID chargeId, ChargeStatus status, String lastError, Instant now);
+
+    /**
+     * 처리 중 상태이고 재시도 대기 시간이 지난 충전을 updated_at 오름차순으로 limit건까지 읽는다.
+     * 대기 시간: 30초 × 2^min(max(attempt_count - 1, 0), 5). 시간은 DB now() 기준
+     */
+    List<ChargeRecoveryTarget> findRecoveryTargets(int limit);
+
+    /**
+     * 복구 선점: 상태와 updated_at이 조회한 값 그대로일 때만 updated_at을 DB now()로 갱신한다.
+     * updatedAt은 findRecoveryTargets가 돌려준 값을 그대로 넘긴다. 반환값은 바뀐 행 수(0 또는 1). 트랜잭션 안에서만 사용
+     */
+    int claimForRecovery(UUID chargeId, ChargeStatus status, Instant updatedAt);
+
+    /**
+     * 한 회원의 충전 목록. userId 조건은 항상 걸려 (user_id, created_at) 인덱스를 쓴다.
+     * status·from·to는 null이면 조건 없음. 기간은 createdAt 기준 [from, to). 정렬은 pageable을 따른다
+     */
+    Page<ChargeRequest> findByUser(UUID userId, ChargeStatus status, Instant from, Instant to, Pageable pageable);
+
+    /** 전체 충전 목록(관리자). 모든 조건이 null이면 조건 없음. 기간은 createdAt 기준 [from, to) */
+    Page<ChargeRequest> search(UUID userId, ChargeStatus status, Instant from, Instant to, Pageable pageable);
+
+    /** 대사 후보: created_at이 [from, to)인 충전 전체 (상태 무관) */
+    List<ChargeRequest> findCreatedBetween(Instant from, Instant to);
+
+    /** 대사: bank_request_id 또는 refund_request_id가 requestIds 중 하나인 충전 */
+    List<ChargeRequest> findByBankOrRefundRequestIds(Collection<String> requestIds);
+
+    /** 대사: id가 chargeIds 중 하나인 충전 */
+    List<ChargeRequest> findAllByIds(Collection<UUID> chargeIds);
 }

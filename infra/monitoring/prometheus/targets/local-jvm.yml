@@ -1,0 +1,51 @@
+
+# TRAVELPAY 로컬 Spring Boot 메트릭 수집 대상
+# Spring Boot 서비스는 개발 PC에서 JVM으로 실행합니다.
+
+- targets:
+    - host.docker.internal:18080
+  labels:
+    service: gateway
+    environment: local
+
+- targets:
+    - host.docker.internal:8761
+  labels:
+    service: eureka-server
+    environment: local
+
+- targets:
+    - host.docker.internal:8081
+  labels:
+    service: user-service
+    environment: local
+
+- targets:
+    - host.docker.internal:8082
+  labels:
+    service: wallet-service
+    environment: local
+
+- targets:
+    - host.docker.internal:8083
+  labels:
+    service: payment-service
+    environment: local
+
+- targets:
+    - host.docker.internal:8084
+  labels:
+    service: exchange-service
+    environment: local
+
+- targets:
+    - host.docker.internal:8085
+  labels:
+    service: ledger-service
+    environment: local
+
+- targets:
+    - host.docker.internal:8090
+  labels:
+    service: mock-bank
+    environment: local

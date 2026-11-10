@@ -6,16 +6,19 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.travelpay.common.response.ApiResponse;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
+import com.travelpay.exchange.domain.wallet.WalletLedgerUnavailableException;
 import feign.FeignException;
 import feign.Request;
 import feign.Response;
 import feign.RetryableException;
 import feign.codec.DecodeException;
 import org.junit.jupiter.api.Test;
+import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.json.JsonMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,17 +39,18 @@ class WalletBalanceClientAdapterTest {
     private final WalletFeignClient feignClient = mock(WalletFeignClient.class);
     private final WalletBalanceClientAdapter adapter = new WalletBalanceClientAdapter(feignClient);
 
-    /** PR #47 응답 JSON이 응답 record로 해석되는지 확인합니다. Feign도 Jackson으로 같은 record를 만듭니다. */
+    /** PR #47 응답 JSON이 공통 ApiResponse와 data record로 해석되는지 확인합니다. Feign도 Jackson으로 같은 타입을 만듭니다. */
     @Test
-    void readsWalletServiceJsonIntoResponseRecord() {
-        WalletBalancesResponse response = JsonMapper.builder().build().readValue("""
+    void readsWalletServiceJsonIntoCommonApiResponse() {
+        ApiResponse<WalletBalancesResponse> response = JsonMapper.builder().build().readValue("""
                 {"success":true,"data":{"walletId":"%s","status":"ACTIVE","balances":[
                   {"currency":"CNY","balance":3520,"status":"SUSPENDED"}
                 ]},"error":null}
-                """.formatted(WALLET_ID), WalletBalancesResponse.class);
+                """.formatted(WALLET_ID), new TypeReference<ApiResponse<WalletBalancesResponse>>() {
+        });
 
-        assertEquals(new WalletBalancesResponse(new WalletBalancesResponse.Data(WALLET_ID, "ACTIVE",
-                List.of(new WalletBalancesResponse.Balance("CNY", 3520L, "SUSPENDED"))), null), response);
+        assertEquals(ApiResponse.success(new WalletBalancesResponse(WALLET_ID, "ACTIVE",
+                List.of(new WalletBalancesResponse.Balance("CNY", 3520L, "SUSPENDED")))), response);
     }
 
     /** 잔액은 최소 단위 정수이고, 상태는 ACTIVE 여부로만 봅니다. */
@@ -114,6 +118,40 @@ class WalletBalanceClientAdapterTest {
         assertEquals("지갑 잔액 API 호출 실패: HTTP 500", exception.getMessage());
     }
 
+    /** 지갑이 잔액을 원장에서 읽지 못했다고 알려 주면(#134) 원장 장애로 구분합니다. */
+    @Test
+    void ledgerOutageReportedByWalletIsLedgerUnavailable() {
+        when(feignClient.getBalances(USER_ID)).thenThrow(errorResponse(503, """
+                {"success":false,"data":null,"error":{"code":"WALLET_LEDGER_UNAVAILABLE","message":"잔액 정보를 일시적으로 확인할 수 없습니다."}}
+                """));
+
+        assertThrows(WalletLedgerUnavailableException.class, () -> adapter.read(USER_ID));
+    }
+
+    /** 같은 503이라도 다른 코드면 지갑 장애입니다. 상태 코드만으로 원장 장애라고 판단하지 않습니다. */
+    @Test
+    void otherServiceUnavailableIsWalletFailure() {
+        when(feignClient.getBalances(USER_ID)).thenThrow(errorResponse(503, """
+                {"success":false,"data":null,"error":{"code":"COMMON_SERVICE_UNAVAILABLE","message":"서비스를 일시적으로 사용할 수 없습니다."}}
+                """));
+
+        WalletBalanceFetchException exception =
+                assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
+        assertFalse(exception instanceof WalletLedgerUnavailableException);
+    }
+
+    /** 원장 장애 코드라도 503이 아니면 계약과 다른 응답이라 지갑 장애로 둡니다. */
+    @Test
+    void ledgerCodeWithOtherStatusIsWalletFailure() {
+        when(feignClient.getBalances(USER_ID)).thenThrow(errorResponse(500, """
+                {"success":false,"data":null,"error":{"code":"WALLET_LEDGER_UNAVAILABLE","message":"x"}}
+                """));
+
+        WalletBalanceFetchException exception =
+                assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
+        assertFalse(exception instanceof WalletLedgerUnavailableException);
+    }
+
     @Test
     void timeoutIsFailure() {
         when(feignClient.getBalances(USER_ID)).thenThrow(
@@ -136,11 +174,11 @@ class WalletBalanceClientAdapterTest {
         when(feignClient.getBalances(USER_ID)).thenReturn(null);
         assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
 
-        when(feignClient.getBalances(USER_ID)).thenReturn(new WalletBalancesResponse(null, null));
+        when(feignClient.getBalances(USER_ID)).thenReturn(ApiResponse.success(null));
         assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
 
-        when(feignClient.getBalances(USER_ID)).thenReturn(new WalletBalancesResponse(
-                new WalletBalancesResponse.Data(WALLET_ID, "ACTIVE", null), null));
+        when(feignClient.getBalances(USER_ID)).thenReturn(ApiResponse.success(
+                new WalletBalancesResponse(WALLET_ID, "ACTIVE", null)));
         assertThrows(WalletBalanceFetchException.class, () -> adapter.read(USER_ID));
     }
 
@@ -157,8 +195,8 @@ class WalletBalanceClientAdapterTest {
     }
 
     private void respondWith(String walletStatus, WalletBalancesResponse.Balance... balances) {
-        when(feignClient.getBalances(USER_ID)).thenReturn(new WalletBalancesResponse(
-                new WalletBalancesResponse.Data(WALLET_ID, walletStatus, List.of(balances)), null));
+        when(feignClient.getBalances(USER_ID)).thenReturn(ApiResponse.success(
+                new WalletBalancesResponse(WALLET_ID, walletStatus, List.of(balances))));
     }
 
     private static WalletBalancesResponse.Balance balance(String currency, Long balance, String status) {

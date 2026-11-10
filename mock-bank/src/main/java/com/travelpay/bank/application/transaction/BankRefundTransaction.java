@@ -7,7 +7,6 @@ import com.travelpay.bank.domain.transaction.BankDuplicateRefundException;
 import com.travelpay.bank.domain.transaction.BankFailureCode;
 import com.travelpay.bank.domain.transaction.BankTransaction;
 import com.travelpay.bank.domain.transaction.BankTransactionRepository;
-import com.travelpay.bank.domain.transaction.BankTransactionType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -28,7 +27,7 @@ public class BankRefundTransaction {
 
     @Transactional
     public BankTransactionResult refund(BankRefundCommand command) {
-        Optional<BankTransactionResult> existing = replayer.find(command.requestId(), BankTransactionType.REFUND);
+        Optional<BankTransactionResult> existing = replayer.findRefund(command);
         if (existing.isPresent()) {
             return existing.get();
         }
@@ -56,7 +55,11 @@ public class BankRefundTransaction {
             if (bankTransactionRepository.existsSucceededRefund(original.getId())) {
                 throw new BankDuplicateRefundException();
             }
-            throw new IllegalStateException("플랫폼 계좌 잔액이 환불 금액보다 적습니다.");
+            // 업무 거절: 먼저 늘린 사용자 잔액을 되돌리고 FAILED로 기록한다 (사용자 계좌 잠금을 이미 잡고 있어 반드시 1행)
+            if (bankAccountRepository.decreaseBalance(original.getFromAccountId(), command.amount()) == 0) {
+                throw new IllegalStateException("환불 거절 후 사용자 잔액을 되돌리지 못했습니다.");
+            }
+            return fail(command, original, BankFailureCode.INSUFFICIENT_BALANCE);
         }
 
         return save(BankTransaction.succeededRefund(command.requestId(), original.getToAccountId(),

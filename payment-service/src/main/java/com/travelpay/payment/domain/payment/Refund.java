@@ -45,6 +45,11 @@ public class Refund {
 
     private String declineReason;
 
+    private int attemptCount;
+
+    @Enumerated(EnumType.STRING)
+    private SettlementReviewReason reviewReason;
+
     @CreationTimestamp
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
@@ -79,8 +84,8 @@ public class Refund {
         this.declineReason = reason;
     }
 
-    public boolean isSameRequest(UUID paymentId) {
-        return this.paymentId.equals(paymentId);
+    public boolean isSameRequest(UUID paymentId, Long amount) {
+        return this.paymentId.equals(paymentId) && this.amount.equals(amount);
     }
 
     private void changeStatus(RefundStatus next) {

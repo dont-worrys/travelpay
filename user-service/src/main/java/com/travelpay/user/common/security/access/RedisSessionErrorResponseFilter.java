@@ -3,6 +3,9 @@ package com.travelpay.user.common.security.access;
 import java.io.IOException;
 
 import com.travelpay.common.error.CommonErrorCode;
+import com.travelpay.common.error.ErrorCode;
+import com.travelpay.user.common.error.UserErrorCode;
+import com.travelpay.user.common.security.session.SessionPasswordChangeHandler;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -33,15 +36,20 @@ public class RedisSessionErrorResponseFilter extends OncePerRequestFilter {
             if (response.isCommitted()) {
                 throw exception;
             }
-            errorResponseWriter.write(response, CommonErrorCode.SERVICE_UNAVAILABLE);
+            errorResponseWriter.write(response, failureCode(request, CommonErrorCode.SERVICE_UNAVAILABLE));
         }
         catch (IllegalStateException exception) {
             if (!isConcurrentSessionChange(exception) || response.isCommitted()) {
                 throw exception;
             }
             SecurityContextHolder.clearContext();
-            errorResponseWriter.write(response, CommonErrorCode.CONFLICT);
+            errorResponseWriter.write(response, failureCode(request, CommonErrorCode.CONFLICT));
         }
+    }
+
+    private ErrorCode failureCode(HttpServletRequest request, CommonErrorCode fallback) {
+        return Boolean.TRUE.equals(request.getAttribute(SessionPasswordChangeHandler.ACCOUNT_UPDATED_ATTRIBUTE))
+                ? UserErrorCode.ACCOUNT_UPDATED_SESSION_UNAVAILABLE : fallback;
     }
 
     /** Spring Session 4.1.1의 save 전용 오류이며, 업그레이드 시 동시 요청 시험으로 확인합니다. */

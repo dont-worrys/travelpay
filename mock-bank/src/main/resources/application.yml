@@ -15,21 +15,43 @@ spring:
 server:
   port: 8090
 
-# Mock-Fault: DELAY 헤더로 처리·커밋 후 응답을 늦추는 시간
+# enabled: 장애 주입(Mock-Fault 헤더, 출금 응답 유실 비율) 스위치. 기본 false(꺼짐)
+#   true이고 prod 프로필이 아닐 때만 동작한다. prod에서는 true여도 꺼짐
+#   실행 인자 --mock-bank.fault.enabled=true 또는 환경 변수 MOCK_BANK_FAULT_ENABLED=true로 켠다
+# delay: Mock-Fault: DELAY 헤더로 처리·커밋 후 응답을 늦추는 시간
+# withdrawal-lost-rate: 출금 정상 응답(2xx)을 처리·커밋 후 500으로 유실시키는 비율 (0.0~1.0, 0이면 끔)
+#   출금만 적용(환불·조회 제외, 같은 requestId 재요청 포함), 400·409 제외, Mock-Fault 헤더가 있으면 판정 안 함. enabled=true일 때만 읽고 검증함
+#   환경 변수 MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE로 덮어쓴다
 mock-bank:
   fault:
+    enabled: false
     delay: 10s
+    withdrawal-lost-rate: 0.0
 
 management:
+  metrics:
+    distribution:
+      percentiles-histogram:
+        # Prometheus에서 HTTP p95·p99를 계산할 수 있도록 bucket을 발행합니다.
+        http.server.requests: true
   endpoints:
     web:
       exposure:
         include: health,prometheus
 
 logging:
+  # IntelliJ 작업 디렉터리는 프로젝트 루트입니다. Alloy가 앱별 파일을 읽습니다.
+  file:
+    name: infra/monitoring/.local-logs/${spring.application.name}.log
+  logback:
+    rollingpolicy:
+      max-file-size: 10MB
+      max-history: 3
+      total-size-cap: 50MB
   structured:
     format:
       console: logstash
+      file: logstash
     json:
       add:
         service: ${spring.application.name}

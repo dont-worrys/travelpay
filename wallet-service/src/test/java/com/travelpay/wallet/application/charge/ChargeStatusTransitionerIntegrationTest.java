@@ -6,6 +6,7 @@ import com.travelpay.wallet.domain.charge.BankAccount;
 import com.travelpay.wallet.domain.charge.ChargeFailureCode;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
+import com.travelpay.wallet.domain.charge.IllegalChargeTransitionException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,6 +39,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @SpringBootTest(properties = {
         "eureka.client.enabled=false",
         "travelpay.wallet.outbox.publisher.enabled=false",
+        "travelpay.wallet.charge.recovery.enabled=false",
+        "travelpay.wallet.charge.reconciliation.enabled=false",
+        "travelpay.wallet.charge.saga.consumer.enabled=false",
         "spring.kafka.admin.auto-create=false"
 })
 class ChargeStatusTransitionerIntegrationTest {
@@ -78,7 +82,7 @@ class ChargeStatusTransitionerIntegrationTest {
     @BeforeEach
     void setUp() {
         jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".charge_status_history, " + SCHEMA + ".outbox_events, "
-                + SCHEMA + ".charge_requests, " + SCHEMA + ".wallet_currencies, " + SCHEMA + ".wallets");
+                + SCHEMA + ".charge_requests, " + SCHEMA + ".wallet_currencies, " + SCHEMA + ".wallets CASCADE");
         UUID userId = UUID.randomUUID();
         UUID walletId = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO wallets (id, user_id, status) VALUES (?, ?, 'ACTIVE')", walletId, userId);
@@ -115,19 +119,34 @@ class ChargeStatusTransitionerIntegrationTest {
 
     @Test
     void 실패_코드_없이_전이해도_기존_실패_코드와_오류는_유지한다() {
-        inTransaction(() -> transitioner.transition(chargeId, ChargeStatus.REQUESTED, ChargeStatus.FAILED,
-                ChargeFailureCode.BANK_INSUFFICIENT_BALANCE, "bank rejected"));
+        jdbcTemplate.update("UPDATE charge_requests SET status = 'CREDIT_PROCESSING' WHERE id = ?", chargeId);
+        inTransaction(() -> transitioner.transition(chargeId, ChargeStatus.CREDIT_PROCESSING,
+                ChargeStatus.REFUND_PROCESSING, ChargeFailureCode.LEDGER_REJECTED, "ledger rejected"));
 
         boolean transitioned = inTransaction(() -> transitioner.transition(chargeId,
-                ChargeStatus.FAILED, ChargeStatus.MANUAL_REVIEW, null, null));
+                ChargeStatus.REFUND_PROCESSING, ChargeStatus.MANUAL_REVIEW, null, null));
 
         assertTrue(transitioned);
         Map<String, Object> row = chargeRow();
         assertEquals("MANUAL_REVIEW", row.get("status"));
-        assertEquals("BANK_INSUFFICIENT_BALANCE", row.get("failure_code"));
-        assertEquals("bank rejected", row.get("last_error"));
+        assertEquals("LEDGER_REJECTED", row.get("failure_code"));
+        assertEquals("ledger rejected", row.get("last_error"));
         assertNull(history(ChargeStatus.MANUAL_REVIEW).get("reason_code"));
         assertEquals(3, historyCount());
+    }
+
+    @Test
+    void 허용되지_않은_전이는_예외로_막고_바꾸지_않는다() {
+        jdbcTemplate.update("UPDATE charge_requests SET status = 'COMPLETED' WHERE id = ?", chargeId);
+        Map<String, Object> before = chargeRow();
+
+        assertThrows(IllegalChargeTransitionException.class, () -> inTransaction(() -> transitioner.transition(
+                chargeId, ChargeStatus.COMPLETED, ChargeStatus.REFUND_PROCESSING, null, null)));
+
+        Map<String, Object> after = chargeRow();
+        assertEquals("COMPLETED", after.get("status"));
+        assertEquals(before.get("updated_at"), after.get("updated_at"));
+        assertEquals(1, historyCount());
     }
 
     @Test

@@ -29,7 +29,7 @@ class UserSessionPrincipalTest {
     @ParameterizedTest
     @EnumSource(AuthRole.class)
     void restoresTheMemberIdentityAndLoginTimeFromSerializedSecurityContext(AuthRole role) {
-        var principal = new UserSessionPrincipal(USER_ID, role, AUTHENTICATED_AT);
+        var principal = new UserSessionPrincipal(USER_ID, role, AUTHENTICATED_AT, 0L);
         var authentication = UsernamePasswordAuthenticationToken.authenticated(
                 principal, null, List.of(new SimpleGrantedAuthority("ROLE_" + role.name())));
         var context = SecurityContextHolder.createEmptyContext();
@@ -52,7 +52,7 @@ class UserSessionPrincipalTest {
     @ParameterizedTest
     @CsvSource({"PT0S, false", "PT23H59M59S, false", "PT24H, true", "PT24H0M1S, true"})
     void expiresOnceTheAbsoluteTimeoutHasPassedSinceLogin(Duration elapsed, boolean expired) {
-        var principal = new UserSessionPrincipal(USER_ID, AuthRole.USER, AUTHENTICATED_AT);
+        var principal = new UserSessionPrincipal(USER_ID, AuthRole.USER, AUTHENTICATED_AT, 0L);
 
         assertEquals(expired, principal.isExpiredAt(AUTHENTICATED_AT.plus(elapsed), Duration.ofHours(24)));
     }
@@ -60,18 +60,18 @@ class UserSessionPrincipalTest {
     @Test
     void rejectsAMissingMemberId() {
         assertThrows(IllegalArgumentException.class,
-                () -> new UserSessionPrincipal(null, AuthRole.USER, AUTHENTICATED_AT));
+                () -> new UserSessionPrincipal(null, AuthRole.USER, AUTHENTICATED_AT, 0L));
     }
 
     @Test
     void rejectsAMissingRole() {
         assertThrows(IllegalArgumentException.class,
-                () -> new UserSessionPrincipal(USER_ID, null, AUTHENTICATED_AT));
+                () -> new UserSessionPrincipal(USER_ID, null, AUTHENTICATED_AT, 0L));
     }
 
     @Test
     void rejectsAMissingLoginTime() {
         assertThrows(IllegalArgumentException.class,
-                () -> new UserSessionPrincipal(USER_ID, AuthRole.USER, null));
+                () -> new UserSessionPrincipal(USER_ID, AuthRole.USER, null, 0L));
     }
 }

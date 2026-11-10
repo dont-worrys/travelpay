@@ -109,7 +109,7 @@ public class WalletService {
         return new InternalWalletBalancesResult(walletId, rows.status(), balances);
     }
 
-    /** 재시도로 풀리지 않는 원장 응답은 지갑·회원 식별자와 함께 ERROR로 남긴다. 원장 응답 내용은 남기지 않는다 */
+    /** 원장 2xx 응답 내용 이상은 지갑·회원 식별자와 함께 ERROR로 남긴다 (호출 실패 로그는 어댑터가 남김). 원장 응답 내용은 남기지 않는다 */
     private <T> T callLedger(UUID walletId, UUID userId, Supplier<T> call) {
         try {
             return call.get();
