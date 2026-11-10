@@ -273,6 +273,62 @@ class ExchangeReservationPersistenceIntegrationTest {
         });
     }
 
+    /**
+     * 엔화 매매기준율이 830일 때: 엔화를 사는 예약은 목표 830 이상, 파는 예약은 830 이하가 체결 대상이다(같으면 양쪽 다).
+     * 다른 외화(위안화), 대기가 아닌 예약, 만료 시각이 지난 대기 예약은 빠지고, 먼저 예약한 순서로 나온다.
+     */
+    @Test
+    void findsTriggeredWaitingReservationsInReservedOrder() {
+        Instant now = Instant.parse("2026-11-10T03:00:00Z");
+        UUID buyAbove = matchTarget("buy-840", Currency.KRW, Currency.JPY, "840", now, "2026-11-10T01:00:00Z");
+        UUID sellEqual = matchTarget("sell-830", Currency.JPY, Currency.KRW, "830", now, "2026-11-10T01:30:00Z");
+        UUID buyEqual = matchTarget("buy-830", Currency.KRW, Currency.JPY, "830", now, "2026-11-10T02:00:00Z");
+        UUID sellBelow = matchTarget("sell-820", Currency.JPY, Currency.KRW, "820", now, "2026-11-10T02:30:00Z");
+        matchTarget("buy-820", Currency.KRW, Currency.JPY, "820", now, "2026-11-10T01:00:00Z");
+        matchTarget("sell-840", Currency.JPY, Currency.KRW, "840", now, "2026-11-10T01:00:00Z");
+        matchTarget("cny-buy", Currency.KRW, Currency.CNY, "900", now, "2026-11-10T01:00:00Z");
+        UUID canceled = matchTarget("canceled", Currency.KRW, Currency.JPY, "850", now, "2026-11-10T01:00:00Z");
+        repository.cancelIfWaiting(canceled, USER_ID, now);
+        UUID expired = matchTarget("expired", Currency.KRW, Currency.JPY, "850", now, "2026-11-10T01:00:00Z");
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_reservations SET expires_at = ? WHERE reservation_id = ?",
+                Timestamp.from(now), expired);
+
+        List<UUID> triggered = repository.findTriggeredWaitingIds(Currency.JPY, new BigDecimal("830.00"), now);
+
+        assertEquals(List.of(buyAbove, sellEqual, buyEqual, sellBelow), triggered);
+    }
+
+    /** 실제 매칭 SQL(사는 쪽·파는 쪽 UNION ALL)의 두 조회가 모두 대기 예약 부분 인덱스를 쓴다 */
+    @Test
+    void triggeredQueryUsesWaitingMatchIndexForBothSides() {
+        seedWaitingReservations(5000);
+
+        String plan = explainWithoutSeqScan("""
+                SELECT m.reservation_id FROM (
+                    SELECT reservation_id, created_at FROM exchange_service.exchange_reservations
+                     WHERE status = 'WAITING' AND from_currency = 'KRW' AND to_currency = 'JPY'
+                       AND target_rate >= 830 AND expires_at > now()
+                    UNION ALL
+                    SELECT reservation_id, created_at FROM exchange_service.exchange_reservations
+                     WHERE status = 'WAITING' AND from_currency = 'JPY' AND to_currency = 'KRW'
+                       AND target_rate <= 830 AND expires_at > now()
+                ) m ORDER BY m.created_at, m.reservation_id
+                """);
+
+        assertEquals(2, plan.split("ix_exchange_reservations_waiting_match", -1).length - 1, plan);
+    }
+
+    private UUID matchTarget(String key, Currency from, Currency to, String targetRate, Instant now, String createdAt) {
+        long amount = from == Currency.KRW ? 100_000 : 10_000;
+        ExchangeReservation reservation = ExchangeReservation.reserve(USER_ID, WALLET_ID, new IdempotencyKey(key),
+                new QuoteCurrencies(from, to), new Money(from, amount), new BigDecimal(targetRate),
+                now.plus(Duration.ofDays(7)), QuoteFixtures.policy(), POLICY, now);
+        UUID id = repository.save(reservation).getId();
+        jdbcTemplate.update("UPDATE " + SCHEMA + ".exchange_reservations SET created_at = ? WHERE reservation_id = ?",
+                Timestamp.from(Instant.parse(createdAt)), id);
+        return id;
+    }
+
     private static ExchangeReservation reservation(UUID userId, String key) {
         Instant now = Instant.now();
         return ExchangeReservation.reserve(userId, WALLET_ID, new IdempotencyKey(key),

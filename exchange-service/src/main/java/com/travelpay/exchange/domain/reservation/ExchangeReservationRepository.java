@@ -1,9 +1,12 @@
 package com.travelpay.exchange.domain.reservation;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
 
 /**
@@ -35,4 +38,12 @@ public interface ExchangeReservationRepository {
      * 체결과 동시에 일어나도 둘 중 하나만 반영됩니다(같은 행을 WHERE status = 'WAITING'으로 바꾸므로).
      */
     boolean cancelIfWaiting(UUID reservationId, UUID userId, Instant now);
+
+    /**
+     * 외화 환율이 midRate일 때 체결 조건에 닿은 대기 예약 ID입니다. 먼저 예약한 순서로 돌려줍니다.
+     * 원화로 그 외화를 사는 예약은 목표 환율이 midRate 이상일 때, 그 외화를 원화로 파는 예약은 이하일 때입니다.
+     * 만료 시각이 now 이전인 대기 예약은 만료 처리 대상이라 뺍니다.
+     * ID만 돌려주는 것은 체결할 때 행을 잠그고 다시 읽기 때문입니다(그사이 취소됐을 수 있음).
+     */
+    List<UUID> findTriggeredWaitingIds(Currency foreign, BigDecimal midRate, Instant now);
 }

@@ -1,6 +1,8 @@
 package com.travelpay.exchange.infrastructure.persistence.reservation;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -58,4 +60,25 @@ interface ExchangeReservationJpaRepository extends JpaRepository<ExchangeReserva
                and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
             """)
     int cancelIfWaiting(@Param("id") UUID id, @Param("userId") UUID userId, @Param("now") Instant now);
+
+    /**
+     * 체결 조건에 닿은 대기 예약 ID. 사는 쪽·파는 쪽을 따로 조회해 합친다.
+     * 각 조회가 (통화쌍 같음 + 목표 환율 범위)라 ix_exchange_reservations_waiting_match 부분 인덱스를 탄다.
+     * OR 하나로 쓰면 통화쌍이 둘이라 인덱스 범위가 깨질 수 있어 UNION ALL로 나눈다(두 조건은 겹치지 않음).
+     * 부분 인덱스 조건(status = 'WAITING')과 문자 그대로 같아야 플래너가 그 인덱스를 고르므로 네이티브 SQL로 쓴다.
+     */
+    @Query(value = """
+            SELECT m.reservation_id FROM (
+                SELECT reservation_id, created_at FROM exchange_reservations
+                 WHERE status = 'WAITING' AND from_currency = 'KRW' AND to_currency = :foreign
+                   AND target_rate >= :midRate AND expires_at > :now
+                UNION ALL
+                SELECT reservation_id, created_at FROM exchange_reservations
+                 WHERE status = 'WAITING' AND from_currency = :foreign AND to_currency = 'KRW'
+                   AND target_rate <= :midRate AND expires_at > :now
+            ) m
+            ORDER BY m.created_at, m.reservation_id
+            """, nativeQuery = true)
+    List<UUID> findTriggeredWaitingIds(@Param("foreign") String foreign, @Param("midRate") BigDecimal midRate,
+                                       @Param("now") Instant now);
 }

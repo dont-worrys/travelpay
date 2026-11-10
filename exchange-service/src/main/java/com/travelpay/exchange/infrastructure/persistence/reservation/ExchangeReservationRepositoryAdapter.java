@@ -1,10 +1,13 @@
 package com.travelpay.exchange.infrastructure.persistence.reservation;
 
+import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import com.travelpay.exchange.application.reservation.ExchangeReservationQueryRepository;
+import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
 import com.travelpay.exchange.domain.reservation.DuplicateExchangeReservationException;
 import com.travelpay.exchange.domain.reservation.ExchangeReservation;
@@ -62,6 +65,14 @@ class ExchangeReservationRepositoryAdapter implements ExchangeReservationReposit
     @Override
     public boolean cancelIfWaiting(UUID reservationId, UUID userId, Instant now) {
         return jpaRepository.cancelIfWaiting(reservationId, userId, now) == 1;
+    }
+
+    @Override
+    public List<UUID> findTriggeredWaitingIds(Currency foreign, BigDecimal midRate, Instant now) {
+        if (foreign == Currency.KRW) {
+            throw new IllegalArgumentException("외화가 아닙니다: " + foreign);
+        }
+        return jpaRepository.findTriggeredWaitingIds(foreign.name(), midRate, now);
     }
 
     @Override
