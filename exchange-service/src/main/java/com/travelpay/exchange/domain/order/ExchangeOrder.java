@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 import com.travelpay.common.error.BusinessException;
@@ -215,6 +216,14 @@ public class ExchangeOrder extends BaseTimeEntity {
      */
     public List<LedgerLookupResult.Entry> expectedLedgerEntries() {
         return LedgerLookupResult.Entry.fromEntries(toLedgerPosting().entries());
+    }
+
+    /**
+     * 예약 환전 체결로 만든 주문이면 그 예약 ID입니다(#254). 회원이 직접 신청한 주문이면 empty입니다.
+     * 체결 주문은 멱등 키가 "reservation:{예약 ID}"라 따로 컬럼을 두지 않고 키에서 꺼냅니다.
+     */
+    public Optional<UUID> reservationId() {
+        return new IdempotencyKey(idempotencyKey).reservationId();
     }
 
     /** 같은 멱등 키로 다시 온 신청이 처음과 같은 견적·지갑인지 확인합니다. 다르면 키를 다른 신청에 재사용한 것입니다. */
