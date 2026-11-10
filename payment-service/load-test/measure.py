@@ -3,7 +3,9 @@
 로컬 전체 스택(PC)에 k6 컨테이너만 붙여 payment-service를 직접 호출합니다(Gateway 제외). README.md를 먼저 봅니다.
 
 사용:
-  python measure.py <LABEL> <VUS> [--mode spread|hot] [--amount 1]                  # 송금 요청
+  python measure.py <LABEL> <VUS> [--mode spread|hot|sender-hot] [--amount 1]       # 송금 요청
+  python measure.py <LABEL> <VUS> --gateway                                        # Gateway(8080) 경유, 세션 로그인
+  python measure.py <LABEL> <VUS> --extra-service payment2=http://localhost:8086   # 추가 인스턴스 지표도 수집
   python measure.py <LABEL> <VUS> --script transfer-query.js [--query mixed]       # 송금 조회
 결과: results/<LABEL>-vus<VUS>.json(k6) + results/<LABEL>-vus<VUS>-metrics.json(서비스·DB 지표, 대사)
 
@@ -19,11 +21,12 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from lt_common import (HERE, LEDGER_URL, PAYMENT_URL, RESULTS, SERVICES, krw_balance, load_data, member_headers,
-                       request, scrape, summarize_scrape)
+from lt_common import (GATEWAY_METRICS_URL, HERE, LEDGER_URL, PAYMENT_URL, RESULTS, SERVICES, krw_balance, load_data,
+                       member_headers, request, scrape, summarize_scrape)
 
-# 서비스별로 볼 HTTP 경로 (송금 요청 한 건이 지나는 곳)
+# 서비스별로 볼 HTTP 경로 (송금 요청 한 건이 지나는 곳). 추가 인스턴스(payment2 등)는 이름 끝 숫자를 뗀 역할로 찾는다
 WATCHED = {
+    "gateway": ["POST /api/v1/transfers", "POST UNKNOWN"],
     "payment": ["POST /api/v1/transfers", "GET /api/v1/transfers", "GET /api/v1/transfers/{transferId}"],
     "wallet": ["GET /internal/v1/wallets"],
     "user": ["GET /internal/v1/users/{userId}/real-name"],
@@ -32,15 +35,22 @@ WATCHED = {
 PG_CONTAINER = os.environ.get("PG_CONTAINER", "travelpay-local-postgres-1")
 PG_USER = os.environ.get("POSTGRES_USER", "travelpay_admin")
 PG_DB = os.environ.get("POSTGRES_DB", "travelpay")
-# 원장·송금 DB 사용자의 잠금 대기·실행 중 세션, DB 교착 누적 수
+# 원장·송금 DB 사용자의 잠금 대기·실행 중 세션, DB 교착 누적 수,
+# 잠금을 기다리는 원장 세션의 현재 쿼리 경과 시간 합계·최대(ms). 잠금 대기는 FOR UPDATE 쿼리 시작부터이므로
+# query_start 기준 경과 시간을 "지금까지 기다린 시간"으로 본다(표본 시점의 진행 중 대기라 실제 대기 시간보다 짧게 잡힘)
 PG_QUERY = (
-    "SELECT extract(epoch FROM now())::bigint,"
+    "SELECT (extract(epoch FROM now()) * 1000)::bigint,"
     " count(*) FILTER (WHERE usename = 'ledger_app' AND wait_event_type = 'Lock'),"
     " count(*) FILTER (WHERE usename = 'ledger_app' AND state = 'active'),"
     " count(*) FILTER (WHERE usename = 'payment_app' AND state = 'active'),"
-    " (SELECT deadlocks FROM pg_stat_database WHERE datname = current_database())"
+    " (SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()),"
+    " coalesce(sum(extract(epoch FROM now() - query_start) * 1000)"
+    "   FILTER (WHERE usename = 'ledger_app' AND wait_event_type = 'Lock'), 0)::bigint,"
+    " coalesce(max(extract(epoch FROM now() - query_start) * 1000)"
+    "   FILTER (WHERE usename = 'ledger_app' AND wait_event_type = 'Lock'), 0)::bigint"
     " FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
 )
+DB_SAMPLE_SECONDS = 0.5
 MASTER = member_headers("00000000-0000-4000-8000-00000000a0a0", "MASTER")   # 관리자 조회용(측정 전용 ID)
 
 
@@ -50,8 +60,8 @@ def iso(moment):
 
 # ---- 사전 확인 ----
 
-def precheck(script):
-    for name, url in SERVICES.items():
+def precheck(script, services):
+    for name, url in services.items():
         health = request("GET", f"{url}/actuator/health", timeout=5)
         if health.status != 200:
             raise SystemExit(f"{name}({url})이 응답하지 않습니다: {health}")
@@ -72,10 +82,11 @@ def admin_count(**params):
 # ---- 표본 수집 ----
 
 class ServiceSampler(threading.Thread):
-    """1초마다 네 서비스의 /actuator/prometheus를 읽어 (시각, 서비스별 요약)을 쌓습니다."""
+    """1초마다 서비스의 /actuator/prometheus를 읽어 (시각, 서비스별 요약)을 쌓습니다."""
 
-    def __init__(self):
+    def __init__(self, services):
         super().__init__(daemon=True)
+        self.services = services
         self.samples = []
         self.stop = threading.Event()
 
@@ -83,7 +94,7 @@ class ServiceSampler(threading.Thread):
         while not self.stop.is_set():
             started = time.time()
             snapshot = {}
-            for name, url in SERVICES.items():
+            for name, url in self.services.items():
                 samples = scrape(url)
                 snapshot[name] = summarize_scrape(samples) if samples is not None else None
             self.samples.append((started, snapshot))
@@ -91,7 +102,7 @@ class ServiceSampler(threading.Thread):
 
 
 class DbSampler(threading.Thread):
-    """Postgres 컨테이너 안 psql \\watch로 1초마다 잠금 대기·세션·교착 수를 읽습니다. 실패하면 표본 없이 끝납니다."""
+    """Postgres 컨테이너 안 psql \\watch로 0.5초마다 잠금 대기·세션·교착 수를 읽습니다. 실패하면 표본 없이 끝납니다."""
 
     def __init__(self, seconds):
         super().__init__(daemon=True)
@@ -101,7 +112,7 @@ class DbSampler(threading.Thread):
 
     def run(self):
         command = ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB, "-qAt", "-F", "\t"]
-        script = f"{PG_QUERY}\n\\watch i=1 c={self.seconds}\n"
+        script = f"{PG_QUERY}\n\\watch i={DB_SAMPLE_SECONDS} c={int(self.seconds / DB_SAMPLE_SECONDS)}\n"
         try:
             done = subprocess.run(command, input=script, capture_output=True, text=True, timeout=self.seconds + 30)
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -111,8 +122,10 @@ class DbSampler(threading.Thread):
             self.error = done.stderr.strip()[:300]
         for line in done.stdout.splitlines():
             parts = line.split("\t")
-            if len(parts) == 5 and parts[0].isdigit():
-                self.samples.append(tuple(int(part) for part in parts))
+            if len(parts) == 7 and parts[0].isdigit():
+                values = [int(part) for part in parts]
+                values[0] = values[0] / 1000   # 시각은 초 단위로
+                self.samples.append(tuple(values))
 
 
 # ---- 지표 계산 ----
@@ -127,7 +140,9 @@ def service_metrics(samples, start, end):
     if not window:
         return result
     first, last = nearest(samples, start), nearest(samples, end)
-    for name, paths in WATCHED.items():
+    names = sorted({name for _, snapshot in window for name in snapshot})
+    for name in names:
+        paths = WATCHED.get(name.rstrip("0123456789"), [])
         before, after = first[1].get(name), last[1].get(name)
         service = {}
         if before and after:
@@ -144,6 +159,35 @@ def service_metrics(samples, start, end):
             values = [g[gauge] for g in gauges if gauge in g]
             if values:
                 service[label] = {"avg": round(sum(values) / len(values), 2), "max": max(values)}
+        if before and after:
+            for prefix, label in (("hikaricp_connections_acquire_seconds", "hikariAcquireAvgMs"),
+                                  ("hikaricp_connections_usage_seconds", "hikariUsageAvgMs")):
+                calls = after.get(f"{prefix}_count", 0) - before.get(f"{prefix}_count", 0)
+                if calls > 0:
+                    service[label] = round((after.get(f"{prefix}_sum", 0) - before.get(f"{prefix}_sum", 0))
+                                           / calls * 1000, 3)
+            timeouts = after.get("hikaricp_connections_timeout_total", 0) - before.get("hikaricp_connections_timeout_total", 0)
+            service["hikariTimeouts"] = int(timeouts)
+            gc_count = after.get("jvm_gc_pause_seconds_count", 0) - before.get("jvm_gc_pause_seconds_count", 0)
+            gc_sum = after.get("jvm_gc_pause_seconds_sum", 0) - before.get("jvm_gc_pause_seconds_sum", 0)
+            service["gcPauses"] = {"count": int(gc_count), "totalMs": round(gc_sum * 1000, 1)}
+        acquire_max = [g["hikaricp_connections_acquire_seconds_max"] for g in gauges
+                       if "hikaricp_connections_acquire_seconds_max" in g]
+        if acquire_max:
+            service["hikariAcquireMaxMs"] = round(max(acquire_max) * 1000, 1)
+        gc_max = [g["jvm_gc_pause_seconds_max"] for g in gauges if "jvm_gc_pause_seconds_max" in g]
+        if gc_max:
+            service["gcPauseMaxMs"] = round(max(gc_max) * 1000, 1)
+        heap = [g["jvm_heap_used_bytes"] for g in gauges if "jvm_heap_used_bytes" in g]
+        if heap:
+            third = max(1, len(heap) // 3)
+            service["heapMb"] = {"avg": round(sum(heap) / len(heap) / 2**20, 1), "max": round(max(heap) / 2**20, 1),
+                                 # 측정 구간 처음 1/3과 마지막 1/3의 평균. 꾸준히 오르면 누수 후보
+                                 "firstThirdAvg": round(sum(heap[:third]) / third / 2**20, 1),
+                                 "lastThirdAvg": round(sum(heap[-third:]) / third / 2**20, 1)}
+        heap_max = [g["jvm_heap_max_bytes"] for g in gauges if "jvm_heap_max_bytes" in g]
+        if heap_max:
+            service["heapMaxMb"] = round(heap_max[0] / 2**20, 1)
         cpu = [g["process_cpu_usage"] for g in gauges if "process_cpu_usage" in g]
         if cpu:
             service["processCpuPercentAvg"] = round(sum(cpu) / len(cpu) * 100, 1)
@@ -175,6 +219,12 @@ def db_metrics(sampler, start, end):
         "ledgerActiveSessions": stat(2),
         "paymentActiveSessions": stat(3),
         "deadlocksDuringMeasure": window[-1][4] - window[0][4],
+        # 표본 시점에 잠금을 기다리던 원장 세션들의 "지금까지 기다린 시간"(ms)
+        "ledgerLockWaitAgeMs": {
+            "avgPerWaiter": round(sum(sample[5] for sample in window)
+                                  / max(1, sum(sample[1] for sample in window)), 1),
+            "max": max(sample[6] for sample in window),
+        },
     }
 
 
@@ -299,11 +349,15 @@ def main():
     parser.add_argument("label")
     parser.add_argument("vus", type=int)
     parser.add_argument("--script", default="transfer-request.js", choices=["transfer-request.js", "transfer-query.js"])
-    parser.add_argument("--mode", default="spread", choices=["spread", "hot"])
+    parser.add_argument("--mode", default="spread", choices=["spread", "hot", "sender-hot"])
     parser.add_argument("--amount", type=int, default=1)
     parser.add_argument("--query", default="mixed", choices=["list", "detail", "mixed"])
     parser.add_argument("--warmup", type=int, default=15)
     parser.add_argument("--duration", type=int, default=60)
+    parser.add_argument("--gateway", action="store_true",
+                        help="Gateway(8080)를 거쳐 세션 로그인·CSRF로 호출 (data/users.json에 senderEmail 필요)")
+    parser.add_argument("--extra-service", action="append", default=[], metavar="NAME=URL",
+                        help="지표를 함께 읽을 추가 인스턴스 (예: payment2=http://localhost:8086)")
     parser.add_argument("--recovery-timeout", type=int, default=600,
                         help="측정 후 PROCESSING 복구를 기다릴 최대 초 (결과 모름 5회 백오프 합계 약 7분 30초)")
     args = parser.parse_args()
@@ -316,20 +370,30 @@ def main():
     for stale in (k6_result, metrics_result):
         stale.unlink(missing_ok=True)   # 앞 실행 결과를 이번 결과로 오인하지 않게
 
+    services = dict(SERVICES)
+    if args.gateway:
+        services["gateway"] = GATEWAY_METRICS_URL
+    for item in args.extra_service:
+        name, url = item.split("=", 1)
+        services[name] = url
+
     print("[1/4] 사전 확인 (서비스 health, 남은 PROCESSING)")
-    precheck(args.script)
+    precheck(args.script, services)
     participants = {pair["senderId"] for pair in data["pairs"]} | {pair["receiverId"] for pair in data["pairs"]}
     participants.add(data["hotReceiverId"])
     balances_before = {user: krw_balance(user) for user in participants} if is_request else {}
 
     print(f"[2/4] k6 실행 ({args.script}, VUS={args.vus}), 서비스·DB 지표 1초 간격 기록")
-    service_sampler = ServiceSampler()
+    service_sampler = ServiceSampler(services)
     db_sampler = DbSampler(args.warmup + args.duration + 60)
     service_sampler.start()
     db_sampler.start()
     run_started = datetime.now(timezone.utc)
     env = {"VUS": str(args.vus), "LABEL": args.label, "WARMUP": f"{args.warmup}s", "DURATION": f"{args.duration}s",
-           "MODE": args.mode, "AMOUNT": str(args.amount), "QUERY": args.query}
+           "MODE": args.mode, "AMOUNT": str(args.amount), "QUERY": args.query,
+           "GATEWAY": "1" if args.gateway else "0"}
+    if args.gateway:
+        env["BASE_URL"] = "http://host.docker.internal:8080"
     command = ["docker", "compose", "run", "--rm"]
     for key, value in env.items():
         command += ["-e", f"{key}={value}"]
@@ -350,11 +414,19 @@ def main():
     metrics = {
         "label": args.label, "vus": args.vus, "script": args.script,
         "mode": args.mode if is_request else None, "query": None if is_request else args.query,
+        "gateway": args.gateway, "extraServices": args.extra_service,
         "measureWindow": {"from": iso(datetime.fromtimestamp(measure_from, timezone.utc)),
                           "to": iso(datetime.fromtimestamp(measure_to, timezone.utc))},
         "services": service_metrics(service_sampler.samples, measure_from, measure_to),
         "db": db_metrics(db_sampler, measure_from, measure_to),
     }
+    ledger_calls = sum(service.get("POST /internal/v1/ledger/transactions", {}).get("calls", 0)
+                       for name, service in metrics["services"].items()
+                       if isinstance(service, dict) and name.rstrip("0123456789") == "ledger")
+    lock_waits = (metrics["db"].get("ledgerLockWaits") or {}).get("avg")
+    if ledger_calls and lock_waits is not None:
+        # 리틀 법칙 L = λW → 거래 한 건이 잠금을 기다린 평균 시간 W = 평균 대기 세션 수 / 초당 거래 수
+        metrics["db"]["ledgerLockWaitPerTxMsEstimate"] = round(lock_waits / (ledger_calls / args.duration) * 1000, 1)
 
     if is_request:
         print("[4/4] 대사: PROCESSING 복구 대기 → 송금·원장·잔액 대조")
