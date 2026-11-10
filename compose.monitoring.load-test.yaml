@@ -1,0 +1,20 @@
+# 기존 부하 시험 환경을 공용 모니터링에 연결할 때만 함께 사용합니다.
+# 측정 도구가 준비한 네트워크 이름과 수집 대상 파일을 .env 또는 실행 환경으로 전달합니다.
+# docker compose -f compose.monitoring.yaml -f compose.monitoring.load-test.yaml up -d prometheus
+services:
+  prometheus:
+    networks:
+      default: {}
+      load-test: {}
+    volumes:
+      - type: bind
+        source: ${MONITORING_LOAD_TEST_TARGETS_FILE:?Set MONITORING_LOAD_TEST_TARGETS_FILE to an existing targets YAML file}
+        target: /etc/prometheus/targets/load-test.yml
+        read_only: true
+        bind:
+          create_host_path: false
+
+networks:
+  load-test:
+    external: true
+    name: ${MONITORING_LOAD_TEST_NETWORK:?Set MONITORING_LOAD_TEST_NETWORK to an existing measurement network}
