@@ -20,25 +20,26 @@ from datetime import datetime, timezone
 
 from lt_common import DATA_FILE, USER_URL, WALLET_URL, krw_balance, member_headers, request
 
-PASSWORD = "TravelpayLoad-2026!"   # 로컬 측정 전용 회원. 로그인하지 않으므로 다른 곳에 쓰지 않음
+PASSWORD = "TravelpayLoad-2026!"   # 로컬 측정 전용 회원. Gateway 경유 측정(transfer-request.js GATEWAY=1)의 로그인에만 씀
 CONSENTS = [{"termsCode": "SERVICE_TERMS", "termsVersion": "2026-10-01"},
             {"termsCode": "PRIVACY_TERMS", "termsVersion": "2026-10-01"}]
 
 
 def signup(run_id, role, index, real_name):
-    """CSRF 토큰을 받아 회원가입하고 회원 ID를 돌려줍니다. 가입 즉시 ACTIVE입니다."""
+    """CSRF 토큰을 받아 회원가입하고 (회원 ID, 로그인 이메일)을 돌려줍니다. 가입 즉시 ACTIVE입니다."""
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
     csrf = request("GET", f"{USER_URL}/api/v1/auth/csrf", opener=opener)
     if csrf.status != 200:
         raise RuntimeError(f"CSRF 토큰 조회 실패: {csrf}")
     phone = f"010-{random.randint(2000, 9999)}-{random.randint(1000, 9999)}"   # phone은 UNIQUE
-    body = {"loginEmail": f"lt-{run_id}-{role}{index}@example.com", "password": PASSWORD,
+    email = f"lt-{run_id}-{role}{index}@example.com"
+    body = {"loginEmail": email, "password": PASSWORD,
             "realName": real_name, "phone": phone, "consents": CONSENTS}
     result = request("POST", f"{USER_URL}/api/v1/users",
                      {csrf.data["headerName"]: csrf.data["token"]}, body, opener=opener)
     if result.status != 201:
         raise RuntimeError(f"회원가입 실패 {role}{index}: {result} {result.body}")
-    return result.data["userId"]
+    return result.data["userId"], email
 
 
 def open_wallet(user_id):
@@ -90,12 +91,12 @@ def main():
     print(f"[1/3] 회원·지갑 준비: 송금인 {args.pairs}명({args.holder}), 수취인 {args.pairs}명 + 집중 수취인 1명")
     pairs = []
     for index in range(1, args.pairs + 1):
-        sender = signup(run_id, "s", index, args.holder)
-        receiver = signup(run_id, "r", index, "부하수취인")
+        sender, sender_email = signup(run_id, "s", index, args.holder)
+        receiver, _ = signup(run_id, "r", index, "부하수취인")
         open_wallet(sender)
         open_wallet(receiver)
-        pairs.append({"senderId": sender, "receiverId": receiver})
-    hot_receiver = signup(run_id, "h", 0, "집중수취인")
+        pairs.append({"senderId": sender, "senderEmail": sender_email, "receiverId": receiver})
+    hot_receiver, _ = signup(run_id, "h", 0, "집중수취인")
     open_wallet(hot_receiver)
 
     print(f"[2/3] 충전 접수: 송금인마다 {args.charge:,}원 (계좌 {args.bank_code}/{args.account})")

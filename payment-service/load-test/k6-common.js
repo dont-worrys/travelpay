@@ -47,6 +47,9 @@ export const options = {
         'http_reqs{phase:measure}': ['count>=0'],
     },
     summaryTrendStats: ['avg', 'med', 'p(95)', 'p(99)', 'max'],
+    // k6는 기본으로 반복마다 쿠키를 지운다. Gateway 경유 측정은 처음 로그인한 세션 쿠키를 계속 써야 하므로 유지한다
+    // (직접 호출 측정은 쿠키를 받지 않아 영향 없음)
+    noCookiesReset: true,
     // 송금 요청은 201·202·422가 모두 서버가 정상 처리한 응답이라 실패율(http_req_failed)에서 뺀다
     // (422는 잔액 부족 같은 업무 거절, 202는 결과 모름 처리). 실패율은 4xx 기타·429·5xx·응답 없음만 센다
 };
