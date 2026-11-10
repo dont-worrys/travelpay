@@ -1,15 +1,269 @@
-# 충전 부하 측정용 k6 컨테이너입니다. 서비스(wallet·user·ledger·mock-bank 등)는 로컬 전체 스택으로 PC에서 띄워 둔 것을 씁니다.
-# k6는 host.docker.internal로 PC의 wallet-service(8082)를 직접 호출합니다(Gateway 제외, User-Id·User-Role 헤더).
-# 실행은 measure.py가 합니다. 직접 실행: docker compose run --rm -e COUNT=20 -e RATE=5 k6 run --quiet /scripts/charge-request.js
+# 충전 부하 측정 전용 환경입니다. 팀 공용 compose와 별도이며, 측정할 때만 띄웁니다.
+# 앱(user·wallet·ledger·mock-bank)·DB·Kafka·k6를 모두 같은 Docker 네트워크에 둡니다(환전 측정 환경과 같은 방식).
+# 앱을 PC에 띄우면 앱↔DB·Kafka 왕복이 Docker Desktop 포트 전달을 지나 느려집니다(환전 측정 0.05ms → 2.7ms).
+# 실행 방법은 같은 폴더의 README.md를 봅니다. k6는 measure.py가 `docker compose run --rm k6 ...`로 실행합니다.
+# 이 이름으로 네트워크(travelpay-charge-load-test_default)와 컨테이너 이름(travelpay-charge-load-test-measure-postgres-1 등)이 정해집니다.
 name: travelpay-charge-load-test
 
+x-app: &app
+  image: ${APP_IMAGE:-eclipse-temurin:21.0.13_9-jdk}
+  profiles: ["app"]
+
+x-app-healthcheck: &app-healthcheck
+  interval: 2s
+  timeout: 3s
+  retries: 90
+
 services:
+  # 측정 전용 Postgres. 쿼리별 실행 횟수를 보려고 pg_stat_statements를 켭니다(서버 시작 설정이라 공용 DB와 분리).
+  # 데이터를 볼륨에 남기지 않아, down 후 up하면 항상 빈 DB에서 시작합니다(각 앱의 Flyway가 테이블을 만듦).
+  # 서비스 계정·스키마는 공용 init(infra/postgres/init/01-service-schemas.sql)을 그대로 씁니다.
+  # 공용 init이 6개 서비스 계정을 모두 읽으므로 쓰지 않는 payment·exchange 계정도 넣습니다(빠지면 init 실패).
+  # 관리자 계정은 슈퍼유저 travelpay_admin(measure.py·prepare.py의 기본 POSTGRES_USER).
+  # wallet_app·ledger_app 이름은 measure.py의 DB 표본 쿼리가 그대로 씁니다.
+  measure-postgres:
+    image: ${POSTGRES_IMAGE:-postgres:18.6-bookworm}
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+    environment:
+      POSTGRES_DB: travelpay
+      POSTGRES_USER: travelpay_admin
+      POSTGRES_PASSWORD: load-test-only
+      USER_DB_USERNAME: user_app
+      USER_DB_PASSWORD: load-test-only
+      WALLET_DB_USERNAME: wallet_app
+      WALLET_DB_PASSWORD: load-test-only
+      PAYMENT_DB_USERNAME: payment_app
+      PAYMENT_DB_PASSWORD: load-test-only
+      EXCHANGE_DB_USERNAME: exchange_app
+      EXCHANGE_DB_PASSWORD: load-test-only
+      LEDGER_DB_USERNAME: ledger_app
+      LEDGER_DB_PASSWORD: load-test-only
+      MOCK_BANK_DB_USERNAME: mock_bank_app
+      MOCK_BANK_DB_PASSWORD: load-test-only
+    ports:
+      # 공용 DB(5432)·환전 측정 DB(5439)와 겹치지 않는 포트. 측정 도구는 docker exec psql을 쓰므로 손으로 볼 때만 씀
+      - "127.0.0.1:5441:5432"
+    volumes:
+      - ../../infra/postgres/init/01-service-schemas.sql:/docker-entrypoint-initdb.d/01-service-schemas.sql:ro
+      - ./init/02-pg-stat-statements.sql:/docker-entrypoint-initdb.d/02-pg-stat-statements.sql:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "travelpay_admin", "-d", "travelpay"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # 측정 전용 Kafka (KRaft 단일 노드). 컨테이너끼리만 쓰므로 리스너는 measure-kafka:9092 하나이고 PC에 열지 않습니다.
+  # 공용 Kafka와 같이 자동 토픽 생성을 끄고, 토픽은 지갑이 NewTopic(파티션 3)으로 만듭니다.
+  # 볼륨을 두지 않아 down 후 up하면 토픽이 없고, 지갑이 다시 파티션 3으로 만듭니다.
+  measure-kafka:
+    image: ${KAFKA_IMAGE:-apache/kafka:4.2.2}
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-YpPuKnjuGLYUqVLlmxun8Q}
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://measure-kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@measure-kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # 브로커가 1대라 내부 토픽 복제 수를 1로 맞춤 (기본값 3)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # 측정 전용 세션 Redis (user-service 세션·CSRF). 공용 redis-session과 같은 설정(128MB, noeviction, 디스크 저장 안 함).
+  measure-redis:
+    image: ${REDIS_IMAGE:-redis:8.2.11-bookworm}
+    command:
+      - redis-server
+      - --requirepass
+      - load-test-only
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - noeviction
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    environment:
+      # redis-cli가 이 비밀번호를 씀 (명령줄에 비밀번호를 쓰지 않게)
+      REDISCLI_AUTH: load-test-only
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # ---------- 앱 (profile app). 저장소 루트에서 빌드한 jar를 그대로 실행합니다 ----------
+  # 이미지는 환전 측정과 같은 JDK 이미지(healthcheck의 curl 포함). Dockerfile 없이 jar를 마운트합니다.
+  # 업무 포트는 PC 스택과 같은 번호라 measure.py·prepare.py의 기본 주소(localhost:8081 등)를 그대로 씁니다.
+  # PC에서 띄운 같은 서비스가 켜져 있으면 포트가 겹쳐 시작하지 않습니다(먼저 끔).
+  # Actuator(지표)는 별도 포트(190xx). 같은 포트면 지표 요청이 부하 요청 뒤에 줄 섬.
+  # JVM 기본 최대 힙은 Docker 메모리의 25%라 PC마다 달라지므로 APP_JAVA_OPTS로 네 앱을 같은 값으로 둡니다.
+
+  user:
+    <<: *app
+    depends_on:
+      measure-postgres:
+        condition: service_healthy
+      measure-redis:
+        condition: service_healthy
+    command:
+      - java
+      - -jar
+      - /app/user-service.jar
+      - --eureka.client.enabled=false
+      - --server.port=8081
+      - --management.server.port=19081
+    environment:
+      JAVA_TOOL_OPTIONS: ${APP_JAVA_OPTS:--Xmx1g}
+      USER_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=user_service
+      USER_DB_USERNAME: user_app
+      USER_DB_PASSWORD: load-test-only
+      REDIS_SESSION_HOST: measure-redis
+      REDIS_SESSION_PORT: "6379"
+      REDIS_SESSION_PASSWORD: load-test-only
+    ports:
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:19081:19081"
+    volumes:
+      - ${USER_JAR:-../../user-service/build/libs/user-service-0.0.1-SNAPSHOT.jar}:/app/user-service.jar:ro
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "curl", "-fs", "http://localhost:19081/actuator/health"]
+
+  ledger:
+    <<: *app
+    depends_on:
+      measure-postgres:
+        condition: service_healthy
+    command:
+      - java
+      - -jar
+      - /app/ledger-service.jar
+      - --eureka.client.enabled=false
+      - --server.port=8085
+      - --management.server.port=19085
+    environment:
+      JAVA_TOOL_OPTIONS: ${APP_JAVA_OPTS:--Xmx1g}
+      LEDGER_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=ledger_service
+      LEDGER_DB_USERNAME: ledger_app
+      LEDGER_DB_PASSWORD: load-test-only
+    ports:
+      - "127.0.0.1:8085:8085"
+      - "127.0.0.1:19085:19085"
+    volumes:
+      - ${LEDGER_JAR:-../../ledger-service/build/libs/ledger-service-0.0.1-SNAPSHOT.jar}:/app/ledger-service.jar:ro
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "curl", "-fs", "http://localhost:19085/actuator/health"]
+
+  # Mock 은행은 Eureka 의존성이 없어 Eureka 인자가 필요 없습니다.
+  # 장애 주입은 prod가 아닌 프로필(프로필 지정 없음) + MOCK_BANK_FAULT_ENABLED=true일 때만 켜집니다.
+  # 꺼져 있으면 유실 카운터가 등록되지 않아 measure.py가 종료 코드 1이 되므로 기준선 측정에서도 켭니다.
+  # 유실 비율은 기준선 0.0, 장애 측정에서만 MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE=0.1처럼 지정해 이 컨테이너를 다시 만듭니다.
+  mock-bank:
+    <<: *app
+    depends_on:
+      measure-postgres:
+        condition: service_healthy
+    command:
+      - java
+      - -jar
+      - /app/mock-bank.jar
+      - --server.port=8090
+      - --management.server.port=19090
+    environment:
+      JAVA_TOOL_OPTIONS: ${APP_JAVA_OPTS:--Xmx1g}
+      MOCK_BANK_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=mock_bank
+      MOCK_BANK_DB_USERNAME: mock_bank_app
+      MOCK_BANK_DB_PASSWORD: load-test-only
+      MOCK_BANK_FAULT_ENABLED: "true"
+      MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE: ${MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE:-0.0}
+    ports:
+      - "127.0.0.1:8090:8090"
+      - "127.0.0.1:19090:19090"
+    volumes:
+      - ${MOCK_BANK_JAR:-../../mock-bank/build/libs/mock-bank-0.0.1-SNAPSHOT.jar}:/app/mock-bank.jar:ro
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "curl", "-fs", "http://localhost:19090/actuator/health"]
+
+  # 측정 대상 지갑. 다른 서비스는 Eureka 없이 직접 주소로 부릅니다(원장 Feign 두 개는 LEDGER_SERVICE_URL을 같이 씀).
+  # 측정 인자: 대사 스케줄러 끔(수동 대사는 됨), grace 10s(measure.py 대사 기간 끝 = 지금 − 10초), HTTP 히스토그램,
+  # 컨슈머 동시성·Outbox batch-size는 CHARGE_CONCURRENCY·OUTBOX_BATCH_SIZE로 바꿔 이 컨테이너를 다시 만듭니다.
+  # BANK_FAULT_INJECTION_MODE는 넣지 않습니다(값이 있으면 출금 첫 시도마다 장애를 주입해 측정이 무효).
+  wallet:
+    <<: *app
+    depends_on:
+      measure-postgres:
+        condition: service_healthy
+      measure-kafka:
+        condition: service_healthy
+      user:
+        condition: service_healthy
+      ledger:
+        condition: service_healthy
+      mock-bank:
+        condition: service_healthy
+    command:
+      - java
+      - -jar
+      - /app/wallet-service.jar
+      - --eureka.client.enabled=false
+      - --server.port=8082
+      - --management.server.port=19082
+      - --travelpay.wallet.charge.reconciliation.enabled=false
+      - --travelpay.wallet.charge.reconciliation.grace=10s
+      - --management.metrics.distribution.percentiles-histogram.http.server.requests=true
+      - --travelpay.wallet.charge.saga.consumer.concurrency=${CHARGE_CONCURRENCY:-1}
+      - --travelpay.wallet.outbox.publisher.batch-size=${OUTBOX_BATCH_SIZE:-50}
+    environment:
+      JAVA_TOOL_OPTIONS: ${APP_JAVA_OPTS:--Xmx1g}
+      WALLET_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=wallet_service
+      WALLET_DB_USERNAME: wallet_app
+      WALLET_DB_PASSWORD: load-test-only
+      # 측정 전용 고정 키(Base64 32바이트, "load-test-only-wallet-key-32byte"). 다른 곳에 쓰지 않음
+      WALLET_ACCOUNT_NUMBER_KEY: bG9hZC10ZXN0LW9ubHktd2FsbGV0LWtleS0zMmJ5dGU=
+      KAFKA_BOOTSTRAP_SERVERS: measure-kafka:9092
+      MOCK_BANK_URL: http://mock-bank:8090
+      LEDGER_SERVICE_URL: http://ledger:8085
+      USER_SERVICE_URL: http://user:8081
+    ports:
+      - "127.0.0.1:8082:8082"
+      - "127.0.0.1:19082:19082"
+    volumes:
+      - ${WALLET_JAR:-../../wallet-service/build/libs/wallet-service-0.0.1-SNAPSHOT.jar}:/app/wallet-service.jar:ro
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "curl", "-fs", "http://localhost:19082/actuator/health"]
+
+  # 부하 생성기. measure.py가 `docker compose run --rm k6 run /scripts/charge-request.js`로 실행합니다(profile 지정).
+  # 같은 Docker 네트워크의 wallet 서비스로 요청합니다(Gateway 제외, User-Id·User-Role 헤더).
   k6:
-    image: grafana/k6:1.3.0
+    image: ${K6_IMAGE:-grafana/k6:1.3.0}
+    profiles: ["k6"]
+    environment:
+      BASE_URL: ${BASE_URL:-http://wallet:8082}
     volumes:
       - ./:/scripts:ro
+      # 측정 결과 JSON을 남기는 곳 (results/는 커밋하지 않음)
       - ./results:/results
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      BASE_URL: ${BASE_URL:-http://host.docker.internal:8082}
