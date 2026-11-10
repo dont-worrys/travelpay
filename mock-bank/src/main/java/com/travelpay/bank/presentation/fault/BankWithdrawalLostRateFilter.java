@@ -10,6 +10,7 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
@@ -27,10 +28,12 @@ import java.util.concurrent.ThreadLocalRandom;
  * 출금(POST /internal/v1/bank/withdrawals) 정상 응답을 설정 비율만큼 유실시킨다 (Mock-Fault: LOST와 같은 500).
  * 처리·커밋이 끝난 뒤 2xx(신규 성공·업무 실패 FAILED·같은 requestId 재요청)일 때만 판정하고, 400·409 등은 그대로 둔다.
  * Mock-Fault 헤더가 있으면 BankFaultInjectionFilter에 맡기고 판정하지 않는다.
+ * mock-bank.fault.enabled=true이고 prod 프로필이 아닐 때만 빈을 만든다(아니면 카운터도 등록하지 않음).
  */
 @Slf4j
 @Component
 @Profile("!prod")
+@ConditionalOnProperty(prefix = "mock-bank.fault", name = "enabled", havingValue = "true", matchIfMissing = false)
 public class BankWithdrawalLostRateFilter extends OncePerRequestFilter {
 
     static final String WITHDRAWALS_PATH = "/internal/v1/bank/withdrawals";
