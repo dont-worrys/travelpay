@@ -60,7 +60,7 @@ API 문서는 로컬에서 Swagger UI `http://localhost:8084/swagger-ui.html`로
 | `POST /api/v1/exchange-quotes` | 견적 발급 | 필요 | 없음 | 201 |
 | `GET /api/v1/exchange-quotes/{quoteId}` | 본인 견적 조회 | 필요 | 없음 | 200 |
 | `POST /api/v1/exchanges` | 환전 신청 | 필요 | **필수** | 200·202 |
-| `GET /api/v1/exchanges` | 본인 환전 내역 (`status`, `type`, `page`, `size`) | 필요 | 없음 | 200 |
+| `GET /api/v1/exchanges` | 본인 환전 내역 (`status`, `type`, `page`, `size`). 예약 체결 주문은 `reservationId`가 있음 | 필요 | 없음 | 200 |
 | `GET /api/v1/exchanges/{orderId}` | 본인 환전 상세 | 필요 | 없음 | 200 |
 | `POST /api/v1/exchange-reservations` | 예약 환전 등록 | 필요 | **필수** | 201 |
 | `GET /api/v1/exchange-reservations` | 본인 예약 목록 (`status`, `page`, `size`) | 필요 | 없음 | 200 |
@@ -323,6 +323,8 @@ sequenceDiagram
 3. 한 트랜잭션에서 예약을 `FOR UPDATE SKIP LOCKED`로 잠그고 조건·만료를 다시 확인한 뒤, **조건을 충족시킨 그 환율**로 체결용 견적(`QuoteType.RESERVATION`)을 메모리에서 만들어 주문에 복사합니다. 주문과 예약 상태(주문 ID·체결 시각)를 함께 커밋해, 주문만 있거나 체결만 기록되는 일이 없습니다.
    - 주문 멱등 키는 `reservation:{예약 ID}`라 같은 예약으로 주문을 두 번 만들 수 없습니다. 이 접두어는 환전 신청에서 받지 않습니다.
    - 주문 생성 이력은 `SYSTEM`으로 남습니다.
+   - 환전 내역·상세(`GET /api/v1/exchanges`, `/{orderId}`) 응답의 `reservationId`에 그 예약 ID가 나옵니다. 직접 신청한 환전은 `null`이라 둘을 구분할 수 있습니다. 멱등 키에서 꺼내므로 DB 컬럼은 따로 없습니다.
+   - 체결 주문의 `quoteId`는 메모리에서 만든 체결용 견적이라 견적 조회(`GET /api/v1/exchange-quotes/{quoteId}`)로는 찾을 수 없습니다(404). 금액·환율 근거는 주문에 복사돼 있습니다.
 4. 커밋 뒤 원장에 보냅니다. 결과를 모르면 주문은 `PROCESSING`으로 남고 [복구 스케줄러](#복구-스케줄러)가 이어서 처리합니다.
 
 | 체결 중 실패 | 결과 |
@@ -460,7 +462,7 @@ Redis 키
 - 단위 테스트는 DB 없이 돕니다. 원장·지갑은 가짜 객체로 바꿔 응답별 주문 상태, 재요청, 복구 대기 시간, 관리자 처리 규칙을 확인합니다.
 - 통합 테스트(`*IntegrationTest`)는 Testcontainers로 PostgreSQL(`postgres:18.6-bookworm`)과 Redis(`redis:8.2.11-bookworm`)를 띄웁니다. Docker만 실행 중이면 되고, 없으면 건너뜁니다.
   - 견적을 쓰는 테스트는 공용 Redis 컨테이너(`TestRedis`)를 함께 씁니다.
-- 2026-11-10 기준(#240 예약 환전 브랜치) 652건이 모두 통과합니다.
+- 2026-11-10 기준(#254 브랜치) 656건이 모두 통과합니다.
 
 | 확인 대상 | 테스트 |
 |---|---|
