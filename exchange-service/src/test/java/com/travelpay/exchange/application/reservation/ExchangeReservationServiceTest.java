@@ -33,10 +33,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionOperations;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -45,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -66,6 +69,7 @@ class ExchangeReservationServiceTest {
     private final ExchangeWalletChecker walletChecker = mock(ExchangeWalletChecker.class);
     private final ExchangeReservationService service = new ExchangeReservationService(reservationRepository,
             queryRepository, orderRepository, walletChecker, QuoteFixtures.policy(), POLICY,
+            TransactionOperations.withoutTransaction(),
             Clock.fixed(NOW, ZoneOffset.UTC));
 
     @BeforeEach
@@ -128,6 +132,21 @@ class ExchangeReservationServiceTest {
 
         assertError(ExchangeReservationErrorCode.TOO_MANY_WAITING, () -> service.reserve(command("100000", "830")));
         verifyNoInteractions(walletChecker);
+        verify(reservationRepository, never()).save(any());
+    }
+
+    /** 지갑 확인 동안 다른 요청이 마지막 자리를 채웠으면, 회원 잠금 뒤 다시 센 값으로 거절하고 저장하지 않는다 */
+    @Test
+    void recountsUnderUserLockBeforeSaving() {
+        when(reservationRepository.countWaitingByUserId(USER_ID)).thenReturn(9L, 10L);
+
+        assertError(ExchangeReservationErrorCode.TOO_MANY_WAITING, () -> service.reserve(command("100000", "830")));
+
+        InOrder order = inOrder(walletChecker, reservationRepository);
+        order.verify(reservationRepository).countWaitingByUserId(USER_ID);
+        order.verify(walletChecker).check(any(), any(), any(), any());
+        order.verify(reservationRepository).lockUserForReservation(USER_ID);
+        order.verify(reservationRepository).countWaitingByUserId(USER_ID);
         verify(reservationRepository, never()).save(any());
     }
 

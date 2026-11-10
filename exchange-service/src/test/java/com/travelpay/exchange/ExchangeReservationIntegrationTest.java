@@ -17,8 +17,11 @@ import java.util.function.Supplier;
 import java.util.ArrayList;
 
 import com.jayway.jsonpath.JsonPath;
+import com.travelpay.common.error.BusinessException;
 import com.travelpay.exchange.application.rate.ExchangeRateCollector;
 import com.travelpay.exchange.application.reservation.ExchangeReservationExecutor;
+import com.travelpay.exchange.application.reservation.ExchangeReservationService;
+import com.travelpay.exchange.application.reservation.ReserveCommand;
 import com.travelpay.exchange.application.reservation.ReservationExecution;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
@@ -100,6 +103,9 @@ class ExchangeReservationIntegrationTest {
 
     @Autowired
     private ExchangeReservationExecutor executor;
+
+    @Autowired
+    private ExchangeReservationService reservationService;
 
     @Autowired
     private ExchangeOrderIntegrationTest.FakeLedger ledger;
@@ -258,6 +264,49 @@ class ExchangeReservationIntegrationTest {
         assertEquals("WAITING", reservationStatus(waiting));
         assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA + ".exchange_orders", Integer.class));
         assertEquals(0, ledger.calls());
+    }
+
+    /**
+     * 대기 예약이 9건(한도 10)인 회원이 다른 키로 8건을 동시에 등록해도 1건만 성공하고 나머지는 409다.
+     * 회원 단위로 잠근 뒤 세고 저장하므로, 뒤 요청은 앞 요청이 저장한 것까지 세어 한도를 넘지 않는다.
+     */
+    @Test
+    void concurrentReservationsNeverExceedWaitingLimit() throws Exception {
+        for (int i = 1; i <= 9; i++) {
+            reserve(OWNER, "seed-" + i, "830.00").andExpect(status().isCreated());
+        }
+
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<String>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < threads; i++) {
+                String key = "race-" + i;
+                results.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        reservationService.reserve(new ReserveCommand(OWNER, key, WALLET_ID, Currency.KRW, Currency.JPY,
+                                new BigDecimal("100000"), new BigDecimal("830.00"), Instant.parse("2026-11-17T03:00:00Z")));
+                        return "CREATED";
+                    } catch (BusinessException e) {
+                        return e.getErrorCode().getCode();
+                    }
+                }));
+            }
+            start.countDown();
+            List<String> outcomes = new ArrayList<>();
+            for (Future<String> result : results) {
+                outcomes.add(result.get(30, TimeUnit.SECONDS));
+            }
+            assertEquals(1, outcomes.stream().filter("CREATED"::equals).count(), outcomes.toString());
+            assertEquals(threads - 1, outcomes.stream().filter("EXCHANGE_RESERVATION_TOO_MANY_WAITING"::equals).count(),
+                    outcomes.toString());
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(10, jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA
+                + ".exchange_reservations WHERE user_id = ? AND status = 'WAITING'", Integer.class, OWNER));
     }
 
     /** 여러 인스턴스가 같은 예약을 동시에 체결하려 해도 주문은 하나다(먼저 잠근 쪽만 체결, 나머지는 SKIP LOCKED로 건너뜀) */

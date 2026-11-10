@@ -33,6 +33,13 @@ public interface ExchangeReservationRepository {
     long countWaitingByUserId(UUID userId);
 
     /**
+     * 이 회원의 예약 등록을 한 번에 하나씩 하도록 회원 단위로 잠급니다. 트랜잭션이 끝나면(커밋·롤백) 풀립니다.
+     * 잠근 뒤 대기 예약 수를 세고 저장하면, 같은 회원의 동시 등록도 한도를 넘지 못합니다(뒤 요청은 앞 요청의 커밋을 본 뒤 셈).
+     * 다른 회원의 등록과 체결·취소·만료는 막지 않습니다. 트랜잭션 안에서 불러야 합니다.
+     */
+    void lockUserForReservation(UUID userId);
+
+    /**
      * 본인의 대기 예약을 취소합니다(사유 USER_REQUESTED). 대기 중일 때만 바뀌고 true입니다.
      * 이미 체결·취소·만료됐거나, 없거나, 다른 회원의 예약이면 바꾸지 않고 false입니다.
      * 체결과 동시에 일어나도 둘 중 하나만 반영됩니다(같은 행을 WHERE status = 'WAITING'으로 바꾸므로).

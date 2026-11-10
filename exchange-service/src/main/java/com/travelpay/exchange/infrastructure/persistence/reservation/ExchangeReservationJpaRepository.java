@@ -31,6 +31,16 @@ interface ExchangeReservationJpaRepository extends JpaRepository<ExchangeReserva
             """)
     long countWaitingByUserId(@Param("userId") UUID userId);
 
+    /**
+     * 회원 단위 트랜잭션 advisory lock. 행이 아니라 (예약 등록 구분 번호, 회원 ID 해시) 숫자 쌍을 잠그므로 테이블·행 잠금과 겹치지 않는다.
+     * 해시가 같은 다른 회원끼리는 서로 기다릴 수 있지만 잠깐 순서대로 처리될 뿐 결과는 같다.
+     * pg_advisory_xact_lock은 값이 없는(void) 함수라 바깥에서 1을 골라 돌려준다.
+     */
+    @Query(value = """
+            SELECT 1 FROM (SELECT pg_advisory_xact_lock(:namespace, hashtext(CAST(:userId AS text)))) AS locked
+            """, nativeQuery = true)
+    Integer lockUserForReservation(@Param("namespace") int namespace, @Param("userId") UUID userId);
+
     /** 회원 예약 목록. status가 null이면 모든 상태. 정렬·페이지는 pageable을 따른다 */
     @Query(value = """
             select r from ExchangeReservation r

@@ -30,6 +30,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionOperations;
 
 /**
  * 예약 환전을 만들고, 조회하고, 취소합니다. 체결은 조건 매칭·체결 단계(#240 3·4단계)가 맡습니다.
@@ -51,14 +52,16 @@ public class ExchangeReservationService {
     private final ExchangeWalletChecker walletChecker;
     private final QuotePolicy quotePolicy;
     private final ReservationPolicy reservationPolicy;
+    private final TransactionOperations transactionOperations;
     private final Clock clock;
 
     /**
      * 예약을 만듭니다. 같은 멱등 키 재요청은 견적·지갑 확인보다 먼저 찾아, 같은 내용이면 처음 예약을 돌려줍니다.
      * 처음 요청이면 입력을 검사하고(금액·목표 환율·만료), 대기 예약 수와 지갑을 확인한 뒤 저장합니다.
      *
-     * 대기 예약 수는 저장 전에 세므로, 같은 회원의 예약 요청이 동시에 몰리면 한도를 조금 넘을 수 있습니다.
-     * 한도는 매칭·체결 부하의 상한을 잡으려는 것이라 정확한 상한이 필요하지 않아 감수합니다.
+     * 대기 예약 수는 두 번 셉니다. 지갑 확인(원격 호출) 전에 한 번 세어 한도에 찬 요청을 빨리 거절하고,
+     * 저장하는 트랜잭션에서 회원 단위로 잠근 뒤 다시 세어 같은 회원의 동시 요청도 한도를 넘지 못하게 합니다.
+     * 지갑 확인은 잠금 밖에서 해, 원격 호출 동안 DB 커넥션과 잠금을 잡지 않습니다.
      *
      * @throws BusinessException 멱등 키 형식 오류(400), 통화쌍·금액·목표 환율·만료 오류(400), 같은 키로 다른 예약(409),
      *                           대기 예약 수 초과(409), 지갑 없음(404)·사용 불가(409)·확인 실패(503)
@@ -76,13 +79,15 @@ public class ExchangeReservationService {
         ExchangeReservation reservation = ExchangeReservation.reserve(command.userId(), command.walletId(), key,
                 currencies, amount, command.targetRate(), command.expiresAt(), quotePolicy, reservationPolicy,
                 clock.instant());
-        if (reservationRepository.countWaitingByUserId(command.userId()) >= reservationPolicy.maxWaitingPerUser()) {
-            throw new BusinessException(ExchangeReservationErrorCode.TOO_MANY_WAITING);
-        }
+        checkWaitingLimit(command.userId());
         walletChecker.check(command.userId(), command.walletId(), currencies.from(), currencies.to());
 
         try {
-            ExchangeReservation saved = reservationRepository.save(reservation);
+            ExchangeReservation saved = transactionOperations.execute(status -> {
+                reservationRepository.lockUserForReservation(command.userId());
+                checkWaitingLimit(command.userId());
+                return reservationRepository.save(reservation);
+            });
             log.info("환전 예약: reservationId={}, userId={}, {} → {}, targetRate={}, expiresAt={}", saved.getId(),
                     saved.getUserId(), saved.getFromCurrency(), saved.getToCurrency(), saved.getTargetRate(),
                     saved.getExpiresAt());
@@ -135,6 +140,12 @@ public class ExchangeReservationService {
         }
         log.info("환전 예약 취소: reservationId={}, userId={}", reservationId, userId);
         return find(userId, reservationId);
+    }
+
+    private void checkWaitingLimit(UUID userId) {
+        if (reservationRepository.countWaitingByUserId(userId) >= reservationPolicy.maxWaitingPerUser()) {
+            throw new BusinessException(ExchangeReservationErrorCode.TOO_MANY_WAITING);
+        }
     }
 
     private ExchangeReservationView replay(ExchangeReservation existing, ReserveCommand command,

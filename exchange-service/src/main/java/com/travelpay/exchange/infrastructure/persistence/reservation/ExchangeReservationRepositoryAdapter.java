@@ -29,6 +29,9 @@ class ExchangeReservationRepositoryAdapter implements ExchangeReservationReposit
     /** V7__create_exchange_reservations.sql: 같은 회원·멱등 키는 예약 하나 */
     static final String IDEMPOTENCY_UNIQUE = "uk_exchange_reservations_idempotency";
 
+    /** advisory lock의 첫 번째 키. 다른 용도의 advisory lock과 숫자가 겹치지 않게 예약 등록 전용 번호를 둔다 */
+    static final int RESERVATION_LOCK_NAMESPACE = 240_001;
+
     private final ExchangeReservationJpaRepository jpaRepository;
 
     /**
@@ -61,6 +64,11 @@ class ExchangeReservationRepositoryAdapter implements ExchangeReservationReposit
     @Override
     public long countWaitingByUserId(UUID userId) {
         return jpaRepository.countWaitingByUserId(userId);
+    }
+
+    @Override
+    public void lockUserForReservation(UUID userId) {
+        jpaRepository.lockUserForReservation(RESERVATION_LOCK_NAMESPACE, userId);
     }
 
     @Override
