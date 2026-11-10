@@ -23,14 +23,14 @@ import java.time.Duration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * prod 프로필에서는 Mock-Fault 헤더가 와도 장애 주입이 동작하지 않는다.
+ * prod 프로필에서는 mock-bank.fault.enabled=true여도 Mock-Fault 헤더 장애 주입이 동작하지 않는다.
  * 배포와 같게 application-prod.yml만 읽고(SPRING_CONFIG_NAME) prod 프로필을 켠다(SPRING_PROFILES_ACTIVE).
  * Docker가 없으면 건너뛴다.
  */
 @Testcontainers(disabledWithoutDocker = true)
 @ActiveProfiles("prod")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "spring.config.name=application-prod")
+        properties = {"spring.config.name=application-prod", "mock-bank.fault.enabled=true"})
 class BankFaultInjectionProdProfileTest {
 
     @Container
@@ -54,7 +54,7 @@ class BankFaultInjectionProdProfileTest {
     private JdbcTemplate jdbcTemplate;
 
     @Test
-    void prod에서는_Mock_Fault_LOST를_무시하고_원래_응답을_준다() throws Exception {
+    void prod에서는_enabled여도_Mock_Fault_LOST를_무시하고_원래_응답을_준다() throws Exception {
         HttpRequest request = HttpRequest.newBuilder(
                         URI.create("http://localhost:" + port + "/internal/v1/bank/withdrawals"))
                 .timeout(Duration.ofSeconds(30))

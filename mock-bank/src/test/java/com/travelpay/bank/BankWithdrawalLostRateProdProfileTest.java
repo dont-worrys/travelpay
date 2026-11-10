@@ -23,13 +23,14 @@ import java.time.Duration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * prod 프로필에서는 유실 비율을 읽지도 검증하지도 않는다: 범위 밖 값(5)을 줘도 기동하고 출금은 정상 응답이다.
+ * prod 프로필에서는 mock-bank.fault.enabled=true여도 유실 비율을 읽지도 검증하지도 않는다: 범위 밖 값(5)을 줘도 기동하고 출금은 정상 응답이다.
  * 배포와 같게 application-prod.yml만 읽는다. Docker가 없으면 건너뛴다.
  */
 @Testcontainers(disabledWithoutDocker = true)
 @ActiveProfiles("prod")
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"spring.config.name=application-prod", "mock-bank.fault.withdrawal-lost-rate=5"})
+        properties = {"spring.config.name=application-prod", "mock-bank.fault.enabled=true",
+                "mock-bank.fault.withdrawal-lost-rate=5"})
 class BankWithdrawalLostRateProdProfileTest {
 
     @Container
@@ -50,7 +51,7 @@ class BankWithdrawalLostRateProdProfileTest {
     private ApplicationContext context;
 
     @Test
-    void prod에서는_유실_비율을_지정해도_정상_응답을_준다() throws Exception {
+    void prod에서는_enabled여도_유실_비율을_지정해도_정상_응답을_준다() throws Exception {
         HttpRequest request = HttpRequest.newBuilder(
                         URI.create("http://localhost:" + port + "/internal/v1/bank/withdrawals"))
                 .timeout(Duration.ofSeconds(30))
