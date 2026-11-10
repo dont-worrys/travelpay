@@ -1,0 +1,13 @@
+# 실제 AWS 로그인 계정의 12자리 ID로 바꿉니다. 액세스 키·비밀번호는 넣지 않습니다.
+aws_account_id = "123456789012"
+
+# 설명용 AZ입니다. 실제 계정에서 사용 가능한 서로 다른 두 AZ로 바꿉니다.
+availability_zones = {
+  a = "ap-northeast-2a"
+  b = "ap-northeast-2c"
+}
+
+vpc_cidr = "10.20.0.0/16"
+
+# DB 초기화 때만 한시적으로 true를 사용하고 완료 후 false로 되돌립니다.
+enable_database_bootstrap_access = false
