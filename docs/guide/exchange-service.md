@@ -277,7 +277,7 @@ sequenceDiagram
 | `walletId` | 필수. 본인 지갑 (등록할 때 확인) |
 | `fromCurrency`·`toCurrency` | 원화 ↔ 외화 (JPY·CNY) |
 | `amount` | 보내는 금액. 견적과 같은 1회 한도 |
-| `targetRate` | 목표 매매기준율. 환율 조회와 같은 단위(JPY 100엔당, CNY 1위안당), 소수 둘째 자리까지 |
+| `targetRate` | 목표 매매기준율. 환율 조회와 같은 단위(JPY 100엔당, CNY 1위안당), 소수 둘째 자리까지, 최대 9,999,999,999.99 |
 | `expiresAt` | 만료 시각(UTC). 지금 이후, 최대 30일(`exchange.reservation.max-period`) |
 
 ```json
@@ -288,7 +288,7 @@ sequenceDiagram
 - 체결 조건은 통화쌍으로 정해지며 응답의 `condition`으로 보여 줍니다.
   - 원화 → 외화(외화를 삼): 환율이 목표 **이하**가 되면 체결 (`AT_OR_BELOW`)
   - 외화 → 원화(외화를 팖): 환율이 목표 **이상**이 되면 체결 (`AT_OR_ABOVE`)
-- 회원당 대기 예약은 최대 10건(`exchange.reservation.max-waiting-per-user`)입니다. 넘으면 409 `EXCHANGE_RESERVATION_TOO_MANY_WAITING`. 동시에 몰린 요청은 한도를 조금 넘을 수 있습니다(저장 전에 세기 때문).
+- 회원당 대기 예약은 최대 10건(`exchange.reservation.max-waiting-per-user`)입니다. 넘으면 409 `EXCHANGE_RESERVATION_TOO_MANY_WAITING`. 저장할 때 회원 단위 advisory lock을 잡고 다시 세므로, 같은 회원의 동시 요청도 한도를 넘지 않습니다.
 
 ### 상태
 
@@ -378,7 +378,7 @@ sequenceDiagram
 | 400 | `EXCHANGE_UNSUPPORTED_PAIR` | 원화 ↔ 외화가 아닌 통화쌍 |
 | 400 | `EXCHANGE_INVALID_AMOUNT` | 자릿수 초과, 1회 한도 밖, 받는 금액이 0 |
 | 400 | `EXCHANGE_INVALID_IDEMPOTENCY_KEY` | `Idempotency-Key` 없음·형식 오류, 환전 신청에 `reservation:` 키 |
-| 400 | `EXCHANGE_RESERVATION_INVALID_TARGET_RATE` | 목표 환율이 0 이하이거나 소수 셋째 자리 이상 |
+| 400 | `EXCHANGE_RESERVATION_INVALID_TARGET_RATE` | 목표 환율이 0 이하·최대값 초과이거나 소수 셋째 자리 이상 |
 | 400 | `EXCHANGE_RESERVATION_INVALID_EXPIRY` | 만료 시각이 지금 이전이거나 최대 예약 기간 밖 |
 | 401 | `COMMON_UNAUTHORIZED` | 회원 헤더 없음(Gateway 경유 시 세션 없음) |
 | 403 | `COMMON_FORBIDDEN` | 관리자 API를 MASTER가 아닌 회원이 호출 |
@@ -460,7 +460,7 @@ Redis 키
 - 단위 테스트는 DB 없이 돕니다. 원장·지갑은 가짜 객체로 바꿔 응답별 주문 상태, 재요청, 복구 대기 시간, 관리자 처리 규칙을 확인합니다.
 - 통합 테스트(`*IntegrationTest`)는 Testcontainers로 PostgreSQL(`postgres:18.6-bookworm`)과 Redis(`redis:8.2.11-bookworm`)를 띄웁니다. Docker만 실행 중이면 되고, 없으면 건너뜁니다.
   - 견적을 쓰는 테스트는 공용 Redis 컨테이너(`TestRedis`)를 함께 씁니다.
-- 2026-11-10 기준(#240 예약 환전 브랜치) 644건이 모두 통과합니다.
+- 2026-11-10 기준(#240 예약 환전 브랜치) 649건이 모두 통과합니다.
 
 | 확인 대상 | 테스트 |
 |---|---|

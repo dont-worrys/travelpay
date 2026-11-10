@@ -97,10 +97,17 @@ class ExchangeReservationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"0", "-1", "830.001"})
+    @ValueSource(strings = {"0", "-1", "830.001", "10000000000", "99999999999"})
     void rejectsTargetRateThatIsNotPositiveTwoDecimal(String targetRate) {
         assertError(ExchangeReservationErrorCode.INVALID_TARGET_RATE,
                 () -> reserve(Currency.KRW, Currency.JPY, "100000", targetRate));
+    }
+
+    /** 컬럼 NUMERIC(18, 8)의 정수부 10자리에 들어가는 가장 큰 값까지는 받는다 */
+    @Test
+    void acceptsLargestTargetRateThatFitsColumn() {
+        assertEquals(0, new BigDecimal("9999999999.99").compareTo(
+                reserve(Currency.KRW, Currency.JPY, "100000", "9999999999.99").getTargetRate()));
     }
 
     @Test

@@ -51,6 +51,12 @@ public class ExchangeReservation extends BaseTimeEntity {
     /** 목표 환율의 소수 자릿수. 수집하는 환율(매매기준율)이 소수 둘째 자리라 그보다 자세한 값은 의미가 없습니다. */
     static final int TARGET_RATE_SCALE = 2;
 
+    /**
+     * 목표 환율은 이 값보다 작아야 합니다(최대 9,999,999,999.99). 컬럼 target_rate NUMERIC(18, 8)의 정수부가 10자리라,
+     * 넘는 값은 저장할 때 DB 오류(500)가 나므로 입력 단계에서 400으로 거절합니다.
+     */
+    static final BigDecimal TARGET_RATE_LIMIT = BigDecimal.TEN.pow(10);
+
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "reservation_id", updatable = false)
@@ -118,7 +124,8 @@ public class ExchangeReservation extends BaseTimeEntity {
     /**
      * 예약을 만듭니다. 보내는 금액은 견적과 같은 1회 한도로 검사합니다(체결 때 같은 금액으로 견적을 계산하므로).
      *
-     * @param targetRate 목표 매매기준율. 통화 단위(JPY 100엔당, CNY 1위안당) 기준이며 소수 둘째 자리까지
+     * @param targetRate 목표 매매기준율. 통화 단위(JPY 100엔당, CNY 1위안당) 기준이며 소수 둘째 자리까지,
+     *                   최대 9,999,999,999.99
      * @param expiresAt  만료 시각. 지금 이후이고 최대 예약 기간 안이어야 합니다
      * @throws BusinessException 금액이 한도 밖·자릿수 초과(EXCHANGE_INVALID_AMOUNT), 목표 환율 형식 오류
      *                           (EXCHANGE_RESERVATION_INVALID_TARGET_RATE), 만료 시각 범위 밖(EXCHANGE_RESERVATION_INVALID_EXPIRY)
@@ -137,7 +144,8 @@ public class ExchangeReservation extends BaseTimeEntity {
             throw new IllegalArgumentException("amount currency must be " + currencies.from());
         }
         quotePolicy.checkAmount(amount);
-        if (targetRate == null || targetRate.signum() <= 0 || targetRate.stripTrailingZeros().scale() > TARGET_RATE_SCALE) {
+        if (targetRate == null || targetRate.signum() <= 0 || targetRate.compareTo(TARGET_RATE_LIMIT) >= 0
+                || targetRate.stripTrailingZeros().scale() > TARGET_RATE_SCALE) {
             throw new BusinessException(ExchangeReservationErrorCode.INVALID_TARGET_RATE);
         }
         if (expiresAt == null || !expiresAt.isAfter(now) || expiresAt.isAfter(now.plus(policy.maxPeriod()))) {
