@@ -19,7 +19,7 @@ class KoreaEximPolicyTest {
     private static final LocalDate TODAY = LocalDate.of(2026, 10, 28);
 
     private final KoreaEximCollectionPolicy collectionPolicy =
-            new KoreaEximCollectionPolicy("0 */10 11-13 * * MON-FRI", SEOUL);
+            new KoreaEximCollectionPolicy(KoreaEximProperties.DEFAULT_COLLECT_CRON, SEOUL);
     private final KoreaEximFreshnessPolicy freshnessPolicy = new KoreaEximFreshnessPolicy(7, SEOUL);
 
     @Test
@@ -30,11 +30,13 @@ class KoreaEximPolicyTest {
     }
 
     @Test
-    void triggersEveryTenMinutesDuringWeekdayPublishingHours() {
+    void triggersEveryThirtyMinutesDuringWeekdayPublishingHours() {
         assertEquals(seoul(2026, 10, 28, 11, 0), next(seoul(2026, 10, 28, 9, 0)));
-        assertEquals(seoul(2026, 10, 28, 11, 10), next(seoul(2026, 10, 28, 11, 0)));
-        // 수요일 13:50 이후에는 다음 날 11:00
-        assertEquals(seoul(2026, 10, 29, 11, 0), next(seoul(2026, 10, 28, 13, 50)));
+        assertEquals(seoul(2026, 10, 28, 11, 30), next(seoul(2026, 10, 28, 11, 0)));
+        assertEquals(seoul(2026, 10, 28, 12, 0), next(seoul(2026, 10, 28, 11, 30)));
+        // 마지막 시도는 13:30. 수요일 13:30 이후에는 다음 날 11:00 (하루 최대 6번)
+        assertEquals(seoul(2026, 10, 28, 13, 30), next(seoul(2026, 10, 28, 13, 0)));
+        assertEquals(seoul(2026, 10, 29, 11, 0), next(seoul(2026, 10, 28, 13, 30)));
         // 금요일 고시 시간 이후에는 다음 주 월요일
         assertEquals(seoul(2026, 11, 2, 11, 0), next(seoul(2026, 10, 30, 14, 0)));
     }
