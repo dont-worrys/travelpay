@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "mock-bank.fault.delay=1s")
+        properties = {"mock-bank.fault.enabled=true", "mock-bank.fault.delay=1s"})
 class BankTransactionApiIntegrationTest {
 
     private static final String SCHEMA = "mock_bank";

@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  */
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"mock-bank.fault.withdrawal-lost-rate=1.0", "mock-bank.fault.delay=1s"})
+        properties = {"mock-bank.fault.enabled=true", "mock-bank.fault.withdrawal-lost-rate=1.0", "mock-bank.fault.delay=1s"})
 class BankWithdrawalLostRateIntegrationTest {
 
     private static final String SCHEMA = "mock_bank";
