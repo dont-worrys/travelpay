@@ -76,7 +76,7 @@ class ExchangeRateQueryRoundTripIntegrationTest {
     @BeforeEach
     void setUp() {
         jdbcTemplate.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements SCHEMA public");
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         for (ForeignCurrency currency : ForeignCurrency.values()) {
             repository.save(ExchangeRate.collected(new CollectedRate(currency, currency == ForeignCurrency.JPY ? 100 : 1,

@@ -108,7 +108,7 @@ class ExchangeRateCacheOutageIntegrationTest {
     @Test
     @Order(1)
     void readsFromCacheWhileRedisIsUp() {
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(Instant.parse("2026-11-06T02:00:00Z"));
         collectOnce();

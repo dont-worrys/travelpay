@@ -44,6 +44,7 @@ public class ExchangeOrderController {
      * - 그 밖의 지갑 서비스 실패: EXCHANGE_WALLET_SERVICE_UNAVAILABLE
      * 견적 저장소(Redis)에 닿지 못해도 주문을 만들지 않고 503 EXCHANGE_QUOTE_STORE_UNAVAILABLE입니다. 같은 멱등 키 재요청은 견적을 읽지 않으므로 그대로 응답합니다.
      * 헤더가 없으면 형식 오류와 같은 EXCHANGE_INVALID_IDEMPOTENCY_KEY(400)입니다.
+     * "reservation:"으로 시작하는 키는 예약 환전 체결 주문 전용이라 같은 400입니다.
      */
     @PostMapping
     public ResponseEntity<ApiResponse<ExchangeOrderResponse>> place(

@@ -130,7 +130,7 @@ class ExchangeOrderIntegrationTest {
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
         ledger.reset();
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(NOW);
         BigDecimal mid = new BigDecimal("838.30");

@@ -45,9 +45,12 @@ class ExchangeRateCollectorTest {
     private final RateCollectionPolicy policy = mock(RateCollectionPolicy.class);
     private final ExchangeRateStore store = mock(ExchangeRateStore.class);
     private final LatestRateCache cache = mock(LatestRateCache.class);
+    private final NewRatesListener listener = mock(NewRatesListener.class);
+    private final NewRatesListener otherListener = mock(NewRatesListener.class);
     private final ExchangeRateCollector collector =
             new ExchangeRateCollector(provider, policy, store, cache,
-                    new CacheFailureLog(Clock.fixed(NOW, SEOUL)), Clock.fixed(NOW, SEOUL));
+                    new CacheFailureLog(Clock.fixed(NOW, SEOUL)), Clock.fixed(NOW, SEOUL),
+                    List.of(listener, otherListener));
 
     @BeforeEach
     void setUp() {
@@ -276,6 +279,48 @@ class ExchangeRateCollectorTest {
 
         verify(cache, times(1)).putAll(anyList());
         verify(cache).putAll(retried);
+    }
+
+    /** 새로 저장한 환율을 캐시에 넣은 다음 리스너(예약 체결 등)에 알립니다. */
+    @Test
+    void notifiesListenersWithSavedRatesAfterCache() {
+        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        List<CollectedRate> rates = List.of(rate(TODAY));
+        when(provider.fetch(TODAY)).thenReturn(rates);
+        List<ExchangeRate> saved = List.of(ExchangeRate.collected(rate(TODAY), NOW));
+        when(store.saveNew(rates, NOW)).thenReturn(saved);
+
+        collector.collectIfNeeded();
+
+        InOrder order = inOrder(cache, listener);
+        order.verify(cache).putAll(saved);
+        order.verify(listener).onNewRates(saved);
+        verify(otherListener).onNewRates(saved);
+    }
+
+    /** 리스너가 실패해도 수집은 성공이고 다른 리스너는 계속 알림을 받습니다. 새로 저장한 것이 없으면 알리지 않습니다. */
+    @Test
+    void listenerFailureDoesNotFailCollection() {
+        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        List<CollectedRate> rates = List.of(rate(TODAY));
+        when(provider.fetch(TODAY)).thenReturn(rates);
+        when(store.saveNew(rates, NOW)).thenReturn(List.of(ExchangeRate.collected(rate(TODAY), NOW)));
+        doThrow(new IllegalStateException("db down")).when(listener).onNewRates(anyList());
+
+        assertDoesNotThrow(collector::collectIfNeeded);
+        verify(otherListener).onNewRates(anyList());
+    }
+
+    @Test
+    void doesNotNotifyWhenNothingNewIsSaved() {
+        when(store.latestRateDate(RateSource.KOREAEXIM)).thenReturn(Optional.empty());
+        List<CollectedRate> rates = List.of(rate(TODAY));
+        when(provider.fetch(TODAY)).thenReturn(rates);
+        when(store.saveNew(rates, NOW)).thenReturn(List.of());
+
+        collector.collectIfNeeded();
+
+        verify(listener, never()).onNewRates(anyList());
     }
 
     /**
