@@ -1,0 +1,155 @@
+package com.travelpay.exchange.infrastructure.persistence.reservation;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import com.travelpay.exchange.domain.reservation.ExchangeReservation;
+import com.travelpay.exchange.domain.reservation.ReservationCancelReason;
+import com.travelpay.exchange.domain.reservation.ReservationStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
+
+interface ExchangeReservationJpaRepository extends JpaRepository<ExchangeReservation, UUID> {
+
+    Optional<ExchangeReservation> findByIdAndUserId(UUID id, UUID userId);
+
+    Optional<ExchangeReservation> findByUserIdAndIdempotencyKey(UUID userId, String idempotencyKey);
+
+    /** 회원의 대기 예약 수. user_id로 먼저 좁혀 ix_exchange_reservations_user_created 인덱스를 탄다 */
+    @Query("""
+            select count(r) from ExchangeReservation r
+             where r.userId = :userId
+               and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
+            """)
+    long countWaitingByUserId(@Param("userId") UUID userId);
+
+    /**
+     * 회원 단위 트랜잭션 advisory lock. 행이 아니라 (예약 등록 구분 번호, 회원 ID 해시) 숫자 쌍을 잠그므로 테이블·행 잠금과 겹치지 않는다.
+     * 해시가 같은 다른 회원끼리는 서로 기다릴 수 있지만 잠깐 순서대로 처리될 뿐 결과는 같다.
+     * pg_advisory_xact_lock은 값이 없는(void) 함수라 바깥에서 1을 골라 돌려준다.
+     */
+    @Query(value = """
+            SELECT 1 FROM (SELECT pg_advisory_xact_lock(:namespace, hashtext(CAST(:userId AS text)))) AS locked
+            """, nativeQuery = true)
+    Integer lockUserForReservation(@Param("namespace") int namespace, @Param("userId") UUID userId);
+
+    /** 회원 예약 목록. status가 null이면 모든 상태. 정렬·페이지는 pageable을 따른다 */
+    @Query(value = """
+            select r from ExchangeReservation r
+             where r.userId = :userId
+               and (:status is null or r.status = :status)
+            """,
+            countQuery = """
+            select count(r) from ExchangeReservation r
+             where r.userId = :userId
+               and (:status is null or r.status = :status)
+            """)
+    Page<ExchangeReservation> findPage(@Param("userId") UUID userId, @Param("status") ReservationStatus status,
+                                       Pageable pageable);
+
+    /**
+     * 본인의 대기 예약만 취소한다. 이미 체결·취소·만료됐거나 다른 회원의 예약이면 0행.
+     * 같은 행을 동시에 바꾸면 뒤 트랜잭션은 앞이 커밋할 때까지 기다린 뒤 최신 행으로 WHERE를 다시 평가하므로(READ COMMITTED) 하나만 1행이다.
+     * 벌크 UPDATE라 updated_at Auditing이 동작하지 않아 시각을 직접 넣는다.
+     */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ExchangeReservation r
+               set r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.CANCELED,
+                   r.cancelReason = com.travelpay.exchange.domain.reservation.ReservationCancelReason.USER_REQUESTED,
+                   r.updatedAt = :now
+             where r.id = :id
+               and r.userId = :userId
+               and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
+            """)
+    int cancelIfWaiting(@Param("id") UUID id, @Param("userId") UUID userId, @Param("now") Instant now);
+
+    /**
+     * 체결 조건에 닿은 대기 예약 ID. 사는 쪽·파는 쪽을 따로 조회해 합친다.
+     * 각 조회가 (통화쌍 같음 + 목표 환율 범위)라 ix_exchange_reservations_waiting_match 부분 인덱스를 탄다.
+     * OR 하나로 쓰면 통화쌍이 둘이라 인덱스 범위가 깨질 수 있어 UNION ALL로 나눈다(두 조건은 겹치지 않음).
+     * 부분 인덱스 조건(status = 'WAITING')과 문자 그대로 같아야 플래너가 그 인덱스를 고르므로 네이티브 SQL로 쓴다.
+     */
+    @Query(value = """
+            SELECT m.reservation_id FROM (
+                SELECT reservation_id, created_at FROM exchange_reservations
+                 WHERE status = 'WAITING' AND from_currency = 'KRW' AND to_currency = :foreign
+                   AND target_rate >= :midRate AND expires_at > :now
+                UNION ALL
+                SELECT reservation_id, created_at FROM exchange_reservations
+                 WHERE status = 'WAITING' AND from_currency = :foreign AND to_currency = 'KRW'
+                   AND target_rate <= :midRate AND expires_at > :now
+            ) m
+            ORDER BY m.created_at, m.reservation_id
+            """, nativeQuery = true)
+    List<UUID> findTriggeredWaitingIds(@Param("foreign") String foreign, @Param("midRate") BigDecimal midRate,
+                                       @Param("now") Instant now);
+
+    /**
+     * 대기 예약을 잠그고 읽는다. SKIP LOCKED라 다른 트랜잭션이 잠근 행은 기다리지 않고 건너뛴다(빈 결과).
+     * 여러 인스턴스가 같은 환율로 같은 예약을 찾아도 한 곳만 체결하고, 나머지는 바로 다음 예약으로 넘어간다.
+     */
+    @Query(value = """
+            SELECT * FROM exchange_reservations
+             WHERE reservation_id = :id AND status = 'WAITING'
+             FOR UPDATE SKIP LOCKED
+            """, nativeQuery = true)
+    Optional<ExchangeReservation> lockWaiting(@Param("id") UUID id);
+
+    /**
+     * 대기 예약을 체결로 바꾸고 주문 ID·체결 시각을 함께 기록한다(DB CHECK: 체결 ⇔ 주문·체결 시각 있음).
+     * 호출하는 트랜잭션(주문 저장)에 참여한다. 벌크 UPDATE라 updated_at을 직접 넣는다.
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ExchangeReservation r
+               set r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.EXECUTED,
+                   r.orderId = :orderId,
+                   r.executedAt = :now,
+                   r.updatedAt = :now
+             where r.id = :id
+               and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
+            """)
+    int markExecuted(@Param("id") UUID id, @Param("orderId") UUID orderId, @Param("now") Instant now);
+
+    /**
+     * 만료 시각이 지난 대기 예약을 오래된 것부터 limit건 만료로 바꾼다. 안쪽 조회는 ix_exchange_reservations_waiting_expiry
+     * 부분 인덱스를 타고, SKIP LOCKED라 체결·취소 중인 행은 기다리지 않고 다음 주기로 넘긴다.
+     * 바깥 WHERE의 status 조건은 안쪽 조회와 UPDATE 사이에 바뀐 행을 한 번 더 거른다.
+     */
+    @Transactional
+    @Modifying(clearAutomatically = true)
+    @Query(value = """
+            UPDATE exchange_reservations SET status = 'EXPIRED', updated_at = :now
+             WHERE status = 'WAITING'
+               AND reservation_id IN (
+                   SELECT reservation_id FROM exchange_reservations
+                    WHERE status = 'WAITING' AND expires_at <= :now
+                    ORDER BY expires_at
+                    LIMIT :limit
+                    FOR UPDATE SKIP LOCKED)
+            """, nativeQuery = true)
+    int expireWaiting(@Param("now") Instant now, @Param("limit") int limit);
+
+    /** 시스템이 대기 예약을 취소한다(체결 중 지갑 사용 불가 등). 대기 중일 때만 1행. 호출하는 트랜잭션이 있으면 참여한다 */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ExchangeReservation r
+               set r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.CANCELED,
+                   r.cancelReason = :reason,
+                   r.updatedAt = :now
+             where r.id = :id
+               and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
+            """)
+    int cancelBySystem(@Param("id") UUID id, @Param("reason") ReservationCancelReason reason, @Param("now") Instant now);
+}

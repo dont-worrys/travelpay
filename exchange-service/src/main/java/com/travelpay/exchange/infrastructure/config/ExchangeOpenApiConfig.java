@@ -22,7 +22,7 @@ import org.springframework.web.method.HandlerMethod;
  * 환전 서비스 API 문서(Swagger) 설정입니다. 팀 공통 방식(payment-service의 TransferOpenApiConfig)을 따릅니다.
  * 로컬에서만 켜며(application.yml), 운영에서는 끕니다(application-prod.yml).
  *
- * - exchange(환전): 환율·한도·견적·환전 신청/조회 API
+ * - exchange(환전): 환율·한도·견적·환전 신청/조회·예약 환전 API
  * - exchange-admin(환전 관리): MANUAL_REVIEW 처리 등 관리자(MASTER) API
  *
  * 회원 헤더(User-Id·User-Role)는 요청자를 쓰는(@CurrentUser) API에만 붙입니다.
@@ -50,7 +50,8 @@ public class ExchangeOpenApiConfig {
                 .pathsToMatch("/api/v1/exchange-rates", "/api/v1/exchange-rates/**",
                         "/api/v1/exchange-limits", "/api/v1/exchange-limits/**",
                         "/api/v1/exchange-quotes", "/api/v1/exchange-quotes/**",
-                        "/api/v1/exchanges", "/api/v1/exchanges/**")
+                        "/api/v1/exchanges", "/api/v1/exchanges/**",
+                        "/api/v1/exchange-reservations", "/api/v1/exchange-reservations/**")
                 .addOpenApiCustomizer(openApi -> openApi.info(new Info()
                         .title("TravelPay 환전 API")
                         .version("v1")

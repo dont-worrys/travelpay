@@ -198,7 +198,8 @@ class ExchangeOrderControllerTest {
 
         mockMvc.perform(get("/api/v1/exchanges/{orderId}", ORDER_ID))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.orderId").value(ORDER_ID.toString()));
+                .andExpect(jsonPath("$.data.orderId").value(ORDER_ID.toString()))
+                .andExpect(jsonPath("$.data.reservationId").doesNotExist());
     }
 
     @Test
@@ -227,6 +228,7 @@ class ExchangeOrderControllerTest {
                 .andExpect(jsonPath("$.data.items.length()").value(1))
                 .andExpect(jsonPath("$.data.items[0].orderId").value(ORDER_ID.toString()))
                 .andExpect(jsonPath("$.data.items[0].type").value("EXCHANGE"))
+                .andExpect(jsonPath("$.data.items[0].reservationId").doesNotExist())
                 .andExpect(jsonPath("$.data.items[0].status").value("FAILED"))
                 .andExpect(jsonPath("$.data.items[0].failureReason").value("INSUFFICIENT_BALANCE"))
                 .andExpect(jsonPath("$.data.items[0].fromCurrency").value("KRW"))

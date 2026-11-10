@@ -38,7 +38,12 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
 
 5. 테이블은 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)).
 
-결제·가맹점 API는 아직 Swagger 그룹이 없습니다. Swagger UI에는 송금(`transfer`) 그룹만 보입니다
+Swagger UI(`http://localhost:8083/swagger-ui.html`, prod에서는 꺼짐)에서 결제 API는 두 그룹으로 나뉩니다.
+
+- `payment`(결제, `/v3/api-docs/payment`): `/api/v1/payments/**` — 결제·환불, 가맹점, 정산
+- `payment-admin`(결제 관리, `/v3/api-docs/payment-admin`): `/api/v1/admin/payments/**` — MASTER 전용 MANUAL_REVIEW 처리·처리 기록·오래된 환불 신청
+- Gateway 없이 직접 호출할 때는 각 API의 `User-Id`·`User-Role` 헤더 입력칸을 채웁니다. 실제 환경에서는 Gateway가 세션 확인 후 붙입니다.
+- 오류 코드는 Swagger에 적지 않습니다. API별 오류 코드는 이 문서의 각 API 설명을 봅니다.
 
 ## API 목록
 
@@ -856,7 +861,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 
 - 결제의 지갑 확인 단계에서 실패하면 결제는 저장되지 않고 키도 사용되지 않습니다. 같은 키로 다시 요청할 수 있습니다.
 - 가맹점 생성의 주인 확인 단계에서 실패하면 가맹점은 저장되지 않습니다. 원장 계정 생성이 실패하면 오류가 아니라 202 `PENDING`입니다.
-- user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니다. 가맹점 생성은 `MASTER`의 한도를 씁니다([User 가이드](user-service.md#i02-요청자별-호출-제한)).
+- user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니다. 가맹점 생성은 `MASTER`의 한도를 씁니다.
 
 ## 오류 응답
 

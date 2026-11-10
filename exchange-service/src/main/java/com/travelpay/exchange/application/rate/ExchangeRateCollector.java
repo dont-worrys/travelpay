@@ -18,6 +18,7 @@ import org.springframework.stereotype.Component;
  * 외부 환율을 가져와 저장합니다. 모드별 차이는 Provider와 정책이 결정하며, 이 클래스는 모드를 알지 못합니다.
  * 외부 호출 실패는 다음 주기에 다시 시도하도록 로그만 남깁니다.
  * 저장이 커밋되면 새로 저장한 환율을 최신 환율 캐시에 넣습니다. 캐시에 쓰는 곳은 이 수집기 하나입니다.
+ * 그다음 새 환율을 리스너(예약 환전 체결 등)에 알립니다.
  */
 @Slf4j
 @Component
@@ -33,6 +34,7 @@ public class ExchangeRateCollector {
     private final LatestRateCache cache;
     private final CacheFailureLog failureLog;
     private final Clock clock;
+    private final List<NewRatesListener> listeners;
 
     /**
      * 스케줄러가 깨어날 때마다 호출됩니다. 오늘 환율을 가져올지 판단합니다.
@@ -116,6 +118,24 @@ public class ExchangeRateCollector {
         log.info("환율 저장: source={}, date={}, fetched={}, saved={}",
                 provider.source(), date, rates.size(), saved.size());
         putIntoCache(saved);
+        notifyListeners(saved);
+    }
+
+    /**
+     * 캐시 다음에 알립니다. 리스너가 실패해도 환율은 이미 저장됐으므로 수집을 실패로 만들지 않고, 다른 리스너도 계속 부릅니다.
+     * 예약 체결이 실패하면 그 예약은 대기로 남아 다음 새 환율 때 다시 매칭됩니다.
+     */
+    private void notifyListeners(List<ExchangeRate> saved) {
+        if (saved.isEmpty()) {
+            return;
+        }
+        for (NewRatesListener listener : listeners) {
+            try {
+                listener.onNewRates(saved);
+            } catch (RuntimeException e) {
+                log.error("새 환율 알림 처리 실패: listener={}", listener.getClass().getSimpleName(), e);
+            }
+        }
     }
 
     /**

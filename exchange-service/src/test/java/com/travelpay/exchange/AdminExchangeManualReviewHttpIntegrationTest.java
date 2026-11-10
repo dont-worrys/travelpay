@@ -132,7 +132,7 @@ class AdminExchangeManualReviewHttpIntegrationTest {
         registeredRequest = null;
         lastLookupQuery = null;
         lookupReply = null;
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(NOW);
         BigDecimal mid = new BigDecimal("838.30");

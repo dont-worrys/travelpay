@@ -11,6 +11,7 @@ import com.travelpay.exchange.domain.order.ExchangeOrder;
  * 금액은 상세 조회와 같이 통화 단위 문자열입니다.
  *
  * @param type          EXCHANGE(원화 → 외화) 또는 RE_EXCHANGE(외화 → 원화)
+ * @param reservationId 예약 환전 체결로 만든 주문이면 그 예약 ID, 직접 신청한 환전이면 null입니다.
  * @param status        PROCESSING(처리 중), COMPLETED(완료), FAILED(실패), MANUAL_REVIEW(확인 중)
  * @param failureReason FAILED일 때만 값이 있습니다.
  * @param settledAt     완료·실패가 확정된 시각. 처리 중이면 null입니다.
@@ -18,6 +19,7 @@ import com.travelpay.exchange.domain.order.ExchangeOrder;
 public record ExchangeOrderSummaryResponse(
         UUID orderId,
         String type,
+        UUID reservationId,
         String status,
         String failureReason,
         String fromCurrency,
@@ -34,6 +36,7 @@ public record ExchangeOrderSummaryResponse(
         return new ExchangeOrderSummaryResponse(
                 order.getId(),
                 order.type().name(),
+                order.reservationId().orElse(null),
                 order.getStatus().name(),
                 failureReason != null ? failureReason.name() : null,
                 order.getFromCurrency().name(),

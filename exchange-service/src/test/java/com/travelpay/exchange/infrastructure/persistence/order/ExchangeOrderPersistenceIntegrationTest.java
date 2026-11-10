@@ -115,7 +115,7 @@ class ExchangeOrderPersistenceIntegrationTest {
 
     @BeforeEach
     void setUp() {
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         jpyRate = rateRepository.save(ExchangeRate.collected(new CollectedRate(ForeignCurrency.JPY, 100,
                 new BigDecimal("838.30"), new BigDecimal("846.68"), new BigDecimal("829.91"),

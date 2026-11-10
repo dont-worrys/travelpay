@@ -32,8 +32,12 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.UUID;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 
 // MANUAL_REVIEW 결제·환불 운영자 처리, 오래된 환불 신청 확인 API (MASTER 전용). 관리자 API는 /api/v1/admin/** 아래에 둔다
+@Tag(name = "결제 운영자 처리", description = "MASTER의 MANUAL_REVIEW 결제·환불 처리, 처리 기록, 오래된 환불 신청 조회")
 @RestController
 @RequestMapping("/api/v1/admin/payments")
 @RequiredArgsConstructor
@@ -43,6 +47,11 @@ public class AdminPaymentController {
     private final PaymentService paymentService;
 
     // 신청 후 3일 넘게 가맹점이 처리하지 않은 환불 신청
+    @Operation(summary = "3일 넘게 처리되지 않은 환불 신청")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "오래된 순 페이지")
+    })
     @GetMapping("/refund-requests/overdue")
     public ResponseEntity<ApiResponse<PageResponse<OverdueRefundRequestResponse>>> getOverdueRefundRequests(
             @CurrentUser AuthenticatedUser user,
@@ -54,6 +63,11 @@ public class AdminPaymentController {
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 
+    @Operation(summary = "MANUAL_REVIEW 결제 목록")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "오래된 순 페이지. `reviewReason`으로 거름")
+    })
     @GetMapping("/manual-reviews")
     public ResponseEntity<ApiResponse<PageResponse<PaymentManualReviewResponse>>> getPaymentManualReviews(
             @CurrentUser AuthenticatedUser user,
@@ -67,6 +81,11 @@ public class AdminPaymentController {
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 
+    @Operation(summary = "MANUAL_REVIEW 환불 목록")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "오래된 순 페이지. `reviewReason`으로 거름")
+    })
     @GetMapping("/refunds/manual-reviews")
     public ResponseEntity<ApiResponse<PageResponse<RefundManualReviewResponse>>> getRefundManualReviews(
             @CurrentUser AuthenticatedUser user,
@@ -81,6 +100,11 @@ public class AdminPaymentController {
     }
 
     // 운영자 처리 기록 목록(최신순)
+    @Operation(summary = "결제·환불 운영자 처리 기록 목록")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "최신순 페이지. `type`(`PAYMENT`·`REFUND`)·`actorId`·`paymentId`로 거름")
+    })
     @GetMapping("/resolutions")
     public ResponseEntity<ApiResponse<PageResponse<ManualReviewResolutionResponse>>> getResolutions(
             @CurrentUser AuthenticatedUser user,
@@ -96,6 +120,11 @@ public class AdminPaymentController {
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 
+    @Operation(summary = "MANUAL_REVIEW 결제 단건 (원장 조회·예상 결과)")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "원장 조회 결과(`ledger`)와 처리하면 될 결과(`expected`). 원장 조회 실패면 `ledgerLookupFailed: true`")
+    })
     @GetMapping("/{paymentId}")
     public ResponseEntity<ApiResponse<PaymentReviewDetailResponse>> getPaymentReview(
             @CurrentUser AuthenticatedUser user,
@@ -106,6 +135,11 @@ public class AdminPaymentController {
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 
+    @Operation(summary = "MANUAL_REVIEW 환불 단건 (원장 조회·예상 결과)")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "원장 조회 결과(`ledger`)와 처리하면 될 결과(`expected`). 원장 조회 실패면 `ledgerLookupFailed: true`")
+    })
     @GetMapping("/refunds/{refundId}")
     public ResponseEntity<ApiResponse<RefundReviewDetailResponse>> getRefundReview(
             @CurrentUser AuthenticatedUser user,
@@ -116,6 +150,11 @@ public class AdminPaymentController {
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 
+    @Operation(summary = "MANUAL_REVIEW 결제 처리")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "처리 결과(`status`, `paymentStatus`, `ledgerStatus`, `ledgerTransactionId`). 결과는 원장 조회로 서버가 정함")
+    })
     @PostMapping("/{paymentId}/resolve")
     public ResponseEntity<ApiResponse<ManualReviewResolveResponse>> resolvePayment(
             @CurrentUser AuthenticatedUser user,
@@ -127,6 +166,11 @@ public class AdminPaymentController {
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 
+    @Operation(summary = "MANUAL_REVIEW 환불 처리")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "처리 결과(`status`, `paymentStatus`, `ledgerStatus`, `ledgerTransactionId`). 결과는 원장 조회로 서버가 정함")
+    })
     @PostMapping("/refunds/{refundId}/resolve")
     public ResponseEntity<ApiResponse<ManualReviewResolveResponse>> resolveRefund(
             @CurrentUser AuthenticatedUser user,

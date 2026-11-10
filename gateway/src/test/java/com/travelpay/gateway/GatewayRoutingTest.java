@@ -225,6 +225,21 @@ class GatewayRoutingTest {
         assertTrue(arrived.header("Cookie").isEmpty());
     }
 
+    /** 예약 환전 API는 목록·상세 모두 세션 확인을 거쳐, 확인된 회원 헤더를 달고 환전 서비스에 도착합니다. */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/api/v1/exchange-reservations",
+            "/api/v1/exchange-reservations/550e8400-e29b-41d4-a716-446655440001"
+    })
+    void exchangeReservationRequestsReachExchangeServiceWithTheVerifiedMember(String path) {
+        client().get().uri(path).header("Cookie", "SESSION=abc").exchange().expectStatus().isOk();
+
+        var arrived = EXCHANGE.received(path).getFirst();
+        assertEquals(List.of(MEMBER_ID.toString()), arrived.header("User-Id"));
+        assertEquals(List.of("USER"), arrived.header("User-Role"));
+        assertTrue(arrived.header("Cookie").isEmpty());
+    }
+
     /** 처리(POST)도 같은 라우트로 가며, 세션 확인에 메서드를 알립니다. */
     @Test
     void adminExchangeResolveReachesExchangeService() {

@@ -12,6 +12,7 @@ import java.util.UUID;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorCode;
+import com.travelpay.exchange.application.wallet.ExchangeWalletChecker;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.order.ChangedByType;
@@ -73,7 +74,7 @@ class ExchangeOrderServiceTest {
     private final WalletBalanceReader walletBalanceReader = mock(WalletBalanceReader.class);
     private final ExchangeOrderLedgerProcessor ledgerProcessor = mock(ExchangeOrderLedgerProcessor.class);
     private final ExchangeOrderService service = new ExchangeOrderService(orderRepository, queryRepository,
-            historyRepository, quoteRepository, walletBalanceReader, ledgerProcessor,
+            historyRepository, quoteRepository, new ExchangeWalletChecker(walletBalanceReader), ledgerProcessor,
             TransactionOperations.withoutTransaction(), Clock.fixed(NOW, ZoneId.of("Asia/Seoul")));
 
     private ExchangeQuote quote;
@@ -155,6 +156,14 @@ class ExchangeOrderServiceTest {
     void rejectsInvalidKeyBeforeLookup() {
         assertError(ExchangeOrderErrorCode.INVALID_IDEMPOTENCY_KEY,
                 () -> service.place(new PlaceOrderCommand(USER_ID, "key 1", quote.getId(), WALLET_ID)));
+        verifyNoInteractions(orderRepository);
+    }
+
+    /** 예약 체결 주문의 키("reservation:{예약ID}")는 회원 신청에 쓸 수 없다. 쓰면 그 예약이 체결되지 못한다 */
+    @Test
+    void rejectsKeyReservedForReservationOrders() {
+        assertError(ExchangeOrderErrorCode.INVALID_IDEMPOTENCY_KEY, () -> service.place(
+                new PlaceOrderCommand(USER_ID, "reservation:" + UUID.randomUUID(), quote.getId(), WALLET_ID)));
         verifyNoInteractions(orderRepository);
     }
 

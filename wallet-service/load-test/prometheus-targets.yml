@@ -1,0 +1,26 @@
+# 충전 측정 환경(travelpay-charge-load-test_default 네트워크)의 공용 모니터링 수집 대상입니다.
+# compose.monitoring.load-test.yaml의 MONITORING_LOAD_TEST_TARGETS_FILE로 이 파일을 지정합니다(README "공용 모니터링 연결").
+# 주소는 Docker 네트워크 안의 서비스 이름과 지표(management) 포트입니다.
+- targets:
+    - user:19081
+  labels:
+    service: user-service
+    environment: load-test
+
+- targets:
+    - wallet:19082
+  labels:
+    service: wallet-service
+    environment: load-test
+
+- targets:
+    - ledger:19085
+  labels:
+    service: ledger-service
+    environment: load-test
+
+- targets:
+    - mock-bank:19090
+  labels:
+    service: mock-bank
+    environment: load-test
