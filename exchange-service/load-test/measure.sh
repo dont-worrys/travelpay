@@ -77,6 +77,20 @@ psql_q -v hours="${HOURS}" -f /load-test/seed-rate-history.sql >/dev/null
 docker compose exec -T measure-redis redis-cli FLUSHALL >/dev/null
 docker compose exec -T measure-redis redis-cli CONFIG RESETSTAT >/dev/null
 
+# 측정 조건(#250): PC 상태와 측정 앱의 히스토그램·Prometheus 연결 여부. k6 직전·직후에 읽어 결과 파일에 남긴다
+# 히스토그램 값은 실제로 뜬 앱의 실행 명령에서 읽는다(환경 변수를 잘못 넘겨도 실제 상태가 기록되게)
+histogram=$(docker inspect "$(docker compose ps -q app)" --format '{{json .Config.Cmd}}' \
+    | grep -o 'percentiles-histogram.http.server.requests=[a-z]*' | cut -d= -f2 || true)
+histogram=${histogram:-unset}
+# 측정 앱과 같은 Docker 네트워크에 붙은 Prometheus가 있으면 측정 중에 앱 지표를 수집한다(모니터링 켬)
+app_network=$(docker inspect "$(docker compose ps -q app)" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+prometheus=off
+if docker ps --filter "network=${app_network}" --format '{{.Image}}' | grep -q 'prom/prometheus'; then
+    prometheus=on
+fi
+pc_before=$(bash pc-state.sh)
+echo "      측정 조건: 히스토그램 ${histogram}, Prometheus ${prometheus}, PC ${pc_before}"
+
 echo "[3/4] k6 실행 (${SCRIPT}, VUS=${VUS}), DB 지표 1초 간격 기록"
 # 지표는 Docker 네트워크 안에서 읽는다(앱 컨테이너 안에서 curl). PC에서 읽으면 포트 전달을 지나 표본이 빠짐.
 # 수집기는 정해진 시간이 지나면 스스로 끝난다(Windows에서는 백그라운드 docker를 kill로 멈출 수 없음).
@@ -108,6 +122,17 @@ session_pid=$!
 docker compose run --rm -e VUS="${VUS}" -e LABEL="${LABEL}" -e WARMUP="${WARMUP_SECONDS}s" \
     -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet "/scripts/${SCRIPT}"
 k6_ended=$(date +%s)
+pc_after=$(bash pc-state.sh)
+
+# 측정 중에 전원 모드나 충전기 연결이 바뀌면 PC 성능이 달라져 처리량이 흔들린다(README "측정 전 PC 조건"). 무효로 끝낸다
+pc_power() { echo "$1" | grep -o '"powerMode": [^,]*\|"charger": [^,]*' | tr '\n' ' '; }
+if [ "$(pc_power "$pc_before")" != "$(pc_power "$pc_after")" ]; then
+    echo "무효 측정: 측정 중에 전원 모드나 충전기 연결이 바뀌었습니다." >&2
+    echo "  직전 ${pc_before}" >&2
+    echo "  직후 ${pc_after}" >&2
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
 
 # 측정 구간은 k6가 실제로 테스트를 시작한 시각에서 계산한다. 컨테이너 생성·이미지 내려받기에 걸린 시간과 상관없이
 # 예열 표본이 섞이지 않게 하려는 것이다. 시작 시각 = k6가 끝난 시각 - k6가 실제로 돈 시간(results JSON)
@@ -149,7 +174,8 @@ fi
 awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects" \
     -v quoteAll="$quote_all" -v quoteMeasure="$quote_measure" -v quoteDb="$quote_db" -v quoteRedis="$quote_redis" \
     -v redisUsed="$redis_used" -v redisMax="$redis_maxmemory" -v redisPolicy="$redis_policy" \
-    -v label="$LABEL" -v vus="$VUS" '
+    -v label="$LABEL" -v vus="$VUS" \
+    -v pcBefore="$pc_before" -v pcAfter="$pc_after" -v histogram="$histogram" -v prometheus="$prometheus" '
     FNR == 1 { file++ }
     $1 < from || $1 > to || $2 == "" { next }
     # 커넥션 풀 표본은 지표 6개가 모두 있어야 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 더해져
@@ -212,6 +238,8 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         acqAvgMs = (c1 > c0) ? (s1 - s0) / (c1 - c0) * 1000 : 0
         printf "{\n"
         printf "  \"label\": \"%s\",\n  \"vus\": %d,\n", label, vus
+        # 측정 조건: 히스토그램(true면 Grafana p95용 구간을 셈), Prometheus 수집 여부, k6 직전·직후 PC 상태
+        printf "  \"conditions\": {\"histogram\": \"%s\", \"prometheus\": \"%s\", \"pcBefore\": %s, \"pcAfter\": %s},\n", histogram, prometheus, pcBefore, pcAfter
         printf "  \"samples\": {\"hikari\": %d, \"sessions\": %d},\n", n, m
         printf "  \"hikariPending\": {\"avg\": %.2f, \"max\": %d},\n", (n ? pend / n : 0), pendMax
         printf "  \"hikariActive\": {\"avg\": %.2f, \"max\": %d},\n", (n ? act / n : 0), actMax

@@ -85,7 +85,9 @@ services:
       # HTTP 응답 시간을 구간별 개수(히스토그램)로도 내보냄. Grafana(Prometheus)가 이 구간으로 p95·p99를 계산함(#250).
       # 앱 설정에는 0e28139부터 들어 있지만, 비교하는 jar(v0·v0.5·v1·quote-db·quote-redis)는 그 전 커밋이라 없음.
       # jar를 다시 빌드하지 않고 실행 옵션으로 켜, 옛 jar와 새 jar가 같은 조건으로 지표를 내보내게 함
-      - --management.metrics.distribution.percentiles-histogram.http.server.requests=true
+      # 히스토그램은 처리량을 낮춘다(모니터링과 합쳐 v0 환율 조회 약 4%, 2026-11-10). 공식 측정은 MEASURE_HISTOGRAM=false로 끄고,
+      # Grafana 캡처용 측정만 켠다(기본 true). 값을 바꾸면 compose가 앱 컨테이너를 새로 만듦
+      - --management.metrics.distribution.percentiles-histogram.http.server.requests=${MEASURE_HISTOGRAM:-true}
     environment:
       EXCHANGE_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=exchange_service
       EXCHANGE_DB_USERNAME: exchange_app
