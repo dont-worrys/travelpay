@@ -28,7 +28,7 @@ mock-bank는 충전에서 외부 은행 역할을 하는 대역 서비스입니�
 
    - 포트는 `8090`입니다(로컬·배포 설정 같음). `GET http://localhost:8090/actuator/health`로 상태를 확인합니다. actuator는 `health`·`prometheus`만 엽니다.
    - 필요한 환경 변수는 `MOCK_BANK_DB_URL`·`MOCK_BANK_DB_USERNAME`·`MOCK_BANK_DB_PASSWORD`입니다. `MOCK_BANK_DB_URL`은 `currentSchema=mock_bank`를 붙입니다(`.env.example` 참고).
-   - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다. [장애 주입](#장애-재현)은 prod 프로필(`SPRING_PROFILES_ACTIVE=prod`)에서 비활성이므로 배포에서는 이 값도 함께 지정합니다.
+   - 배포 설정(`application-prod.yml`)은 `SPRING_CONFIG_NAME=application-prod`로 선택합니다. [장애 주입](#장애-재현)은 기본 꺼짐이고, 켜더라도 prod 프로필(`SPRING_PROFILES_ACTIVE=prod`)에서는 비활성이므로 배포에서는 이 값도 함께 지정합니다.
    - compose에는 mock-bank 컨테이너가 없습니다. 로컬에서는 `bootRun`으로 실행합니다.
 
 5. 테이블과 시드 계좌는 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)).
@@ -260,7 +260,14 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 
 ## 장애 재현
 
-`Mock-Fault` 요청 헤더로 응답 장애를 흉내 냅니다. prod 프로필(`SPRING_PROFILES_ACTIVE=prod`)에서 비활성입니다. 이때는 헤더가 와도 무시하고 정상 응답합니다.
+`Mock-Fault` 요청 헤더로 응답 장애를 흉내 냅니다. 장애 주입(헤더, [출금 응답 유실 비율](#출금-응답-유실-비율))은 **기본 꺼짐**이고 두 조건을 모두 만족할 때만 동작합니다.
+
+| 조건 | 내용 |
+|---|---|
+| 켜기 | `mock-bank.fault.enabled=true` (실행 인자 `--mock-bank.fault.enabled=true` 또는 환경 변수 `MOCK_BANK_FAULT_ENABLED=true`). `application.yml` 기본 `false`, 키가 없어도 꺼짐 |
+| prod 아님 | prod 프로필(`SPRING_PROFILES_ACTIVE=prod`)이면 `enabled=true`여도 꺼짐 |
+
+꺼져 있으면 장애 주입 필터·유실 비율 설정 빈을 만들지 않습니다. 헤더가 와도 무시하고 정상 응답하며, 유실 비율 값이 있어도 읽지도 검증하지도 않습니다(범위 밖이어도 기동). 유실 카운터도 등록되지 않습니다.
 
 | 헤더 값 | 동작 |
 |---|---|
@@ -275,6 +282,7 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 - 지연 시간 설정: `mock-bank.fault.delay`(기본 `10s`, `application.yml`). `application-prod.yml`에는 키가 없어 기본값 10초를 씁니다.
 
 ```bash
+# Mock 은행을 --mock-bank.fault.enabled=true로 띄운 상태
 curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
   -H 'Content-Type: application/json' -H 'Mock-Fault: LOST' \
   -d '{"requestId":"fault-1","bankCode":"004","accountNumber":"12340101234567","holderName":"유재석","amount":10000}'
@@ -285,11 +293,11 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 
 ### 출금 응답 유실 비율
 
-부하 측정에서 응답 유실을 일정 비율로 섞을 때 씁니다. 헤더 없이, 설정한 비율만큼 출금 응답을 처리·커밋 후 500으로 바꿉니다. 헤더 방식과 마찬가지로 prod 프로필에서는 비활성입니다(필터·설정 빈을 만들지 않으므로 값이 있어도 무시).
+부하 측정에서 응답 유실을 일정 비율로 섞을 때 씁니다. 헤더 없이, 설정한 비율만큼 출금 응답을 처리·커밋 후 500으로 바꿉니다. 헤더 방식과 같은 [이중 조건](#장애-재현)(`mock-bank.fault.enabled=true` + prod 아님)일 때만 동작합니다(아니면 필터·설정 빈을 만들지 않으므로 값이 있어도 무시).
 
 | 설정 | 기본 | 범위 |
 |---|---|---|
-| `mock-bank.fault.withdrawal-lost-rate` (환경 변수 `MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE`) | `0.0` (끔) | `0.0`~`1.0`, 범위 밖이면 기동 실패 |
+| `mock-bank.fault.withdrawal-lost-rate` (환경 변수 `MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE`) | `0.0` (끔) | `0.0`~`1.0`, 범위 밖이면 기동 실패(켜져 있을 때만 검증) |
 
 헤더 방식과 적용 범위가 다릅니다.
 
@@ -307,7 +315,7 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 
 ```bash
 # 측정할 때 Mock 은행 실행 인자에 추가
---mock-bank.fault.withdrawal-lost-rate=0.1
+--mock-bank.fault.enabled=true --mock-bank.fault.withdrawal-lost-rate=0.1
 ```
 
 측정 절차와 비율이 실제로 적용됐는지 확인하는 방법은 [충전 부하 측정 README](../../wallet-service/load-test/README.md#장애-측정-출금-응답-유실)에 있습니다.
@@ -364,12 +372,14 @@ Testcontainers 통합 테스트는 PostgreSQL 컨테이너(`postgres:18.6-bookwo
 
 | 테스트 | 범위 |
 |---|---|
-| `BankTransactionApiIntegrationTest` | 같은 `requestId` 동시 출금 1회 처리, 업무 거절 `FAILED` 기록·재요청 같은 결과, 예금주 공백 정리, `DELAY`·`LOST`(커밋 후 적용, 재요청은 기존 결과. 지연은 `1s`로 줄여 실행), 형식 오류 400, 다른 유형 `requestId` 409, 같은 `requestId` 다른 내용(출금 금액·계좌, 환불 금액·원거래, 계좌 없음·원거래 없음 거절 포함) 409·같은 내용 200, 동시 환불 1건만 성공·나머지 `ALREADY_REFUNDED`, 환불 재요청·업무 거절, 플랫폼 잔액 부족 환불 `INSUFFICIENT_BALANCE`(잔액 그대로), 같은 계좌 출금·환불 동시 처리 교착 없음, 단건 조회 |
-| `BankFaultInjectionProdProfileTest` | `application-prod.yml` + prod 프로필에서 `Mock-Fault: LOST`를 무시하고 201, 장애 주입 필터 빈 없음 |
+| `BankTransactionApiIntegrationTest` | `enabled=true`. 같은 `requestId` 동시 출금 1회 처리, 업무 거절 `FAILED` 기록·재요청 같은 결과, 예금주 공백 정리, `DELAY`·`LOST`(커밋 후 적용, 재요청은 기존 결과. 지연은 `1s`로 줄여 실행), 형식 오류 400, 다른 유형 `requestId` 409, 같은 `requestId` 다른 내용(출금 금액·계좌, 환불 금액·원거래, 계좌 없음·원거래 없음 거절 포함) 409·같은 내용 200, 동시 환불 1건만 성공·나머지 `ALREADY_REFUNDED`, 환불 재요청·업무 거절, 플랫폼 잔액 부족 환불 `INSUFFICIENT_BALANCE`(잔액 그대로), 같은 계좌 출금·환불 동시 처리 교착 없음, 단건 조회 |
+| `BankFaultInjectionProdProfileTest` | `application-prod.yml` + prod 프로필 + `enabled=true`에서 `Mock-Fault: LOST`를 무시하고 201, 장애 주입 필터 빈 없음 |
+| `BankFaultInjectionDisabledByDefaultTest` | `enabled` 지정 없음(`application.yml` 기본 false) + 유실 비율 1.0: `Mock-Fault: LOST`·비율 모두 무시하고 201, 필터·설정 빈 없음 |
+| `BankFaultEnabledConditionTest` | Docker 불필요. `enabled` 키 없음·`false`·그 외 값이면 빈 없음(범위 밖 비율도 기동), `true`면 빈 생성·범위 밖 비율 기동 실패 |
 | `BankTransactionQueryApiIntegrationTest` | 단건 필드·환불 원거래·실패 코드, 404, 반복 조회해도 거래 불변, `[from, to)` 경계, 빈 목록, 같은 시각 ID 정렬, 페이지 이어 받기, 오프셋 시각 UTC 해석, `sort` 무시, 입력 오류 400, `size` 기본 20·최대 100, offset 한도, 마이크로초 올림, 목록 응답에 계좌 정보 없음 |
-| `BankWithdrawalLostRateIntegrationTest` | 비율 1.0: 성공·`FAILED` 모두 500(본문은 헤더 `LOST`와 같음), 단건 조회로 저장 확인, 같은 `requestId` 재요청도 500, 400·409는 원래 응답, 헤더 `DELAY`·`LOST`는 기존 동작이며 카운터 증가 없음, 환불 미적용, 카운터는 유실 건수만큼 증가 |
+| `BankWithdrawalLostRateIntegrationTest` | `enabled=true`, 비율 1.0: 성공·`FAILED` 모두 500(본문은 헤더 `LOST`와 같음), 단건 조회로 저장 확인, 같은 `requestId` 재요청도 500, 400·409는 원래 응답, 헤더 `DELAY`·`LOST`는 기존 동작이며 카운터 증가 없음, 환불 미적용, 카운터는 유실 건수만큼 증가 |
 | `BankWithdrawalLostRatePropertiesTest` | Docker 불필요. -0.1·1.1 기동 실패, 0·1.0 기동 성공, 비율 0이면 필터를 건너뜀, 헤더 요청·환불·조회에는 미적용 |
-| `BankWithdrawalLostRateProdProfileTest` | prod 프로필에서 범위 밖 값(5)이어도 기동, 출금 201, 필터·설정 빈 없음 |
+| `BankWithdrawalLostRateProdProfileTest` | prod 프로필 + `enabled=true`에서 범위 밖 값(5)이어도 기동, 출금 201, 필터·설정 빈 없음 |
 
 ## 고려 중
 

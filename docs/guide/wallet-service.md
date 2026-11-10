@@ -303,6 +303,7 @@ reference가 원장의 멱등 키라 같은 충전을 다시 보내도 한 번�
 | 모드 | 빈 값(끔), `LOST`, `DELAY`. 대소문자·앞뒤 공백 무시. 그 외 값은 기동 실패 |
 | 적용 범위 | 은행 **출금 첫 시도**(`attempt_count = 0`)에만 `Mock-Fault` 헤더를 붙입니다. 재시도에도 붙이면 매번 유실되어 `MANUAL_REVIEW`로 끝나기 때문입니다. 환불에는 붙이지 않습니다 |
 | prod 보호 | `prod` 프로필이 켜져 있을 때 값이 있으면 기동 실패. 배포 설정 파일에는 이 키가 없습니다 |
+| Mock 은행 조건 | 지갑은 헤더만 붙이고, 실제 장애는 Mock 은행이 만듭니다. Mock 은행을 `--mock-bank.fault.enabled=true`(prod 아님)로 띄워야 합니다. 꺼져 있으면 헤더를 무시하고 정상 응답하므로 장애가 재현되지 않습니다([Mock 은행 가이드](mock-bank.md#장애-재현)) |
 
 Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 끝난 뒤 적용):
 
@@ -313,7 +314,7 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 
 ### 재현 방법
 
-1. 지갑을 `BANK_FAULT_INJECTION_MODE=LOST`(또는 `DELAY`)로 실행합니다.
+1. Mock 은행을 `--mock-bank.fault.enabled=true`로 띄우고, 지갑을 `BANK_FAULT_INJECTION_MODE=LOST`(또는 `DELAY`)로 실행합니다.
 
    ```bash
    set -a; source .env; set +a

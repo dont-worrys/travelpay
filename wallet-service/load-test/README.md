@@ -29,7 +29,7 @@
 | user-service | 8081 | 충전 접수마다 I03(`funding-identity`) 1번. 호출 한도 없음 |
 | wallet-service | 8082 | 아래 실행 조건 |
 | ledger-service | 8085 | |
-| mock-bank | 8090 | |
+| mock-bank | 8090 | 아래 실행 조건 |
 
 ### 지갑 실행 조건
 
@@ -48,6 +48,14 @@
 - `reconciliation.enabled=false`: 10분 주기 대사 스케줄러가 측정 중에 돌지 않게 합니다(수동 실행은 그대로 됨).
 - `reconciliation.grace=10s`: `measure.py`가 기간 끝을 `지금 − 10초`로 수동 대사합니다. 기본값(5m)이면 400입니다.
 - 동시성은 앱 재기동으로 바꿉니다. `measure.py --concurrency`는 결과에 남기는 값일 뿐 실제 설정을 바꾸지 않으므로 두 값을 맞춥니다.
+
+### Mock 은행 실행 조건
+
+기준선 측정과 장애 측정 모두 실행 인자 `--mock-bank.fault.enabled=true`로 띄웁니다(`prod` 프로필이 아니어야 함). 장애 주입은 기본 꺼짐이고, 꺼져 있으면 유실 카운터(`mock_bank_fault_withdrawal_lost_rate_total`)가 등록되지 않아 `measure.py`가 종료 코드 1이 됩니다(아래 실패 조건). 유실 비율은 기준선에서 기본값 0 그대로 두고, 장애 측정에서만 지정합니다.
+
+```
+--mock-bank.fault.enabled=true
+```
 
 ### 동시성을 3보다 크게 잴 때
 
@@ -106,7 +114,7 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 
 ### 측정 절차 (비교할 조건마다)
 
-1. 지갑 실행 인자의 동시성을 바꾸고 **재기동**합니다(3 초과면 위의 파티션 먼저).
+1. 지갑 실행 인자의 동시성을 바꾸고 **재기동**합니다(3 초과면 위의 파티션 먼저). Mock 은행은 `--mock-bank.fault.enabled=true`(유실 비율 지정 없음)로 떠 있어야 합니다.
 2. **예열 1회**: `python measure.py warmup --count 100 --rate <측정과 같은 값> --concurrency <값>` — JIT·커넥션 풀·Kafka 할당을 데우는 용도이며 **결과는 버립니다**.
 3. **같은 조건으로 측정 3회** (`c1-1`, `c1-2`, `c1-3`처럼 라벨만 바꿈). 매번 종료 코드 0인지 확인합니다.
 4. 3회의 **중앙값**을 기록합니다(완료 처리량, 완료 지연 P50·P95, 접수 P50·P95, 서비스별 avgMs).
@@ -115,7 +123,7 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 
 Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로 바꿉니다(같은 requestId 재요청에도 적용). 지갑은 결과 모름으로 두고, 복구 스케줄러가 같은 requestId로 다시 보냅니다(10초 주기, 30초부터 두 배 백오프, 5회 후 `MANUAL_REVIEW`).
 
-1. Mock 은행을 실행 인자 `--mock-bank.fault.withdrawal-lost-rate=<비율>`(예: `0.1`)로 **재기동**합니다(`prod` 프로필이 아니어야 함). 지갑은 측정할 조건의 동시성과 Outbox batch-size로 띄웁니다(예: `--travelpay.wallet.charge.saga.consumer.concurrency=3`, `--travelpay.wallet.outbox.publisher.batch-size=200`).
+1. Mock 은행을 실행 인자 `--mock-bank.fault.enabled=true --mock-bank.fault.withdrawal-lost-rate=<비율>`(예: `0.1`)로 **재기동**합니다(`prod` 프로필이 아니어야 함). 지갑은 측정할 조건의 동시성과 Outbox batch-size로 띄웁니다(예: `--travelpay.wallet.charge.saga.consumer.concurrency=3`, `--travelpay.wallet.outbox.publisher.batch-size=200`).
 2. **비율이 적용됐는지 직접 확인합니다.** 출금을 몇 번 보내 500이 섞여 나오면 적용된 것입니다. Git Bash에서는 한글 본문이 깨질 수 있어 UTF-8 파일로 보냅니다(시드 계좌에서 1원씩 출금되며 측정 계좌와는 무관).
 
    ```bash
@@ -131,7 +139,7 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
    - `--fault-rate`는 Mock 은행 실행 인자와 같은 값으로 넣습니다(결과에 남기는 값).
    - `--drain-timeout`은 900 이상을 권장합니다. 응답이 계속 유실되면 30·60·120·240초 백오프 뒤 `MANUAL_REVIEW`가 되므로 종결까지 약 7~8분 걸릴 수 있습니다.
    - **처리 한도보다 느린 속도로 넣습니다.** 큐에서 30초 넘게 기다린 충전(`REQUESTED`)도 복구 스케줄러가 처리해 `recoveredCharges`에 섞이기 때문입니다. 예: 동시성 3, Outbox batch-size 200이면 `--rate 50`.
-4. 장애 측정 뒤에는 Mock 은행의 유실 비율을 **0으로 되돌리고 재기동**합니다. 남아 있으면 다음 기준선 측정이 종료 코드 1이 됩니다(아래 실패 조건).
+4. 장애 측정 뒤에는 Mock 은행의 유실 비율을 **0으로 되돌리고 재기동**합니다(`--mock-bank.fault.enabled=true`는 유지). 남아 있으면 다음 기준선 측정이 종료 코드 1이 됩니다(아래 실패 조건).
 
 장애 측정에서 `charges.completionTps`는 복구 대기 시간이 구간에 포함되어 처리량으로 해석하지 않습니다. 볼 값은 `fault` 블록과 출금 정합성입니다. 예: 출금 호출 26번, 은행 출금 성공 20건이면 재시도 6번이 중복 출금으로 이어지지 않은 것입니다.
 
@@ -202,7 +210,7 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 - DB 표본: 수집 실패(`docker exec` 0이 아닌 종료 코드 포함, `db.error`), 수집이 끝나지 않음, 측정 구간 표본 0개
 - 출금 정합성 위반
 - 대사: 실행 실패(HTTP 200 아님), 응답 필드 누락, 대상 건수 < 측정 접수 건수, status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상
-- 장애 설정: 유실 카운터가 수집되지 않음(`lostResponses` = `null`, `--fault-rate`와 관계없음), `--fault-rate` > 0인데 `lostResponses` = 0(Mock 은행 실행 인자 확인), `--fault-rate` = 0인데 `lostResponses` > 0(Mock 은행 유실 비율이 남아 있음)
+- 장애 설정: 유실 카운터가 수집되지 않음(`lostResponses` = `null`, `--fault-rate`와 관계없음. Mock 은행을 `--mock-bank.fault.enabled=true`로 띄웠는지 확인), `--fault-rate` > 0인데 `lostResponses` = 0(Mock 은행 실행 인자 확인), `--fault-rate` = 0인데 `lostResponses` > 0(Mock 은행 유실 비율이 남아 있음)
 
 k6 결과 파일이 없거나 JSON이 아니거나 필수 필드가 빠지면 지표를 만들지 않고 바로 멈춥니다(종료 코드 1). psql 조회 실패도 같습니다.
 
