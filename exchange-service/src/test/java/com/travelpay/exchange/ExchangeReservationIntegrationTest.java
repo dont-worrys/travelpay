@@ -1,16 +1,29 @@
 package com.travelpay.exchange;
 
+import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
 
 import com.jayway.jsonpath.JsonPath;
+import com.travelpay.exchange.application.reservation.ExchangeReservationExecutor;
+import com.travelpay.exchange.application.reservation.ReservationExecution;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.rate.CollectedRate;
+import com.travelpay.exchange.domain.rate.ExchangeRate;
+import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
+import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
 import com.travelpay.exchange.domain.rate.RateSource;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
@@ -41,8 +54,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * 실제 Postgres에 Flyway를 적용한 앱에서 예약 생성·재요청·조회·목록·취소를 HTTP로 검증합니다(#240).
- * 지갑 서비스는 고정된 지갑을 돌려주는 Reader로 바꿉니다. Docker가 없으면 건너뜁니다.
+ * 실제 Postgres에 Flyway를 적용한 앱에서 예약 생성·재요청·조회·목록·취소(HTTP)와 체결을 검증합니다(#240).
+ * 지갑 서비스는 고정된 지갑을 돌려주는 Reader로, 원장은 가짜 원장으로 바꿉니다. Docker가 없으면 건너뜁니다.
  */
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
@@ -79,6 +92,15 @@ class ExchangeReservationIntegrationTest {
     @Autowired
     private ExchangeQuoteIntegrationTest.MutableClock clock;
 
+    @Autowired
+    private ExchangeRateRepository rateRepository;
+
+    @Autowired
+    private ExchangeReservationExecutor executor;
+
+    @Autowired
+    private ExchangeOrderIntegrationTest.FakeLedger ledger;
+
     private MockMvc mockMvc;
 
     @BeforeEach
@@ -87,6 +109,7 @@ class ExchangeReservationIntegrationTest {
         jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(NOW);
+        ledger.reset();
     }
 
     @Test
@@ -154,6 +177,124 @@ class ExchangeReservationIntegrationTest {
                 + ".exchange_reservations WHERE reservation_id = ?", String.class, UUID.fromString(id)));
     }
 
+    /**
+     * 조건에 닿은 환율(820 ≤ 목표 830)로 체결하면: 주문을 만들고 원장까지 처리하며, 예약은 주문 ID와 함께 EXECUTED가 된다.
+     * 주문 생성 이력은 시스템이 만든 것으로 남고, 예약 상세에서 주문 상태가 보이며, 체결된 예약은 취소할 수 없다.
+     */
+    @Test
+    void executesTriggeredReservationIntoCompletedOrder() throws Exception {
+        String id = reservationId(reserve(OWNER, "key-1", "830.00"));
+        ExchangeRate rate = savedYenRate("820.00");
+        ledger.postsSucceed();
+        clock.set(NOW.plus(Duration.ofHours(1)));
+
+        ReservationExecution execution = executor.execute(UUID.fromString(id), rate);
+
+        assertEquals(ReservationExecution.Outcome.EXECUTED, execution.outcome());
+        UUID orderId = execution.order().orElseThrow().getId();
+        Map<String, Object> reservation = jdbcTemplate.queryForMap(
+                "SELECT * FROM " + SCHEMA + ".exchange_reservations WHERE reservation_id = ?", UUID.fromString(id));
+        assertEquals("EXECUTED", reservation.get("status"));
+        assertEquals(orderId, reservation.get("order_id"));
+        Map<String, Object> order = jdbcTemplate.queryForMap(
+                "SELECT * FROM " + SCHEMA + ".exchange_orders WHERE order_id = ?", orderId);
+        assertEquals("COMPLETED", order.get("status"));
+        assertEquals("reservation:" + id, order.get("idempotency_key"));
+        assertEquals(12_195L, order.get("to_amount"));
+        assertEquals(rate.getId(), order.get("rate_id"));
+        assertEquals(List.of("PROCESSING:SYSTEM", "COMPLETED:SYSTEM"), jdbcTemplate.queryForList(
+                "SELECT to_status || ':' || changed_by_type FROM " + SCHEMA + ".exchange_order_status_histories"
+                        + " WHERE order_id = ? ORDER BY created_at, to_status DESC", String.class, orderId));
+        assertEquals(1, ledger.calls());
+
+        mockMvc.perform(get("/api/v1/exchange-reservations/{id}", id).header("User-Id", OWNER).header("User-Role", "USER"))
+                .andExpect(jsonPath("$.data.status").value("EXECUTED"))
+                .andExpect(jsonPath("$.data.orderId").value(orderId.toString()))
+                .andExpect(jsonPath("$.data.orderStatus").value("COMPLETED"));
+        cancel(OWNER, id).andExpect(status().isConflict());
+    }
+
+    /** 원장 결과를 모르면 주문은 PROCESSING으로 남지만 체결은 된 것이다. 이후는 보통 환전처럼 복구 스케줄러가 처리한다 */
+    @Test
+    void executionStaysExecutedWhenLedgerResultUnknown() throws Exception {
+        String id = reservationId(reserve(OWNER, "key-1", "830.00"));
+
+        ReservationExecution execution = executor.execute(UUID.fromString(id), savedYenRate("830.00"));
+
+        assertEquals(ReservationExecution.Outcome.EXECUTED, execution.outcome());
+        assertEquals("PROCESSING", jdbcTemplate.queryForObject("SELECT status FROM " + SCHEMA + ".exchange_orders",
+                String.class));
+        assertEquals("EXECUTED", reservationStatus(id));
+    }
+
+    /** 조건에서 벗어났거나, 취소됐거나, 만료 시각이 지났으면 아무것도 바꾸지 않는다 */
+    @Test
+    void skipsReservationThatCannotBeExecuted() throws Exception {
+        String waiting = reservationId(reserve(OWNER, "key-1", "830.00"));
+        String canceled = reservationId(reserve(OWNER, "key-2", "830.00"));
+        cancel(OWNER, canceled).andExpect(status().isOk());
+        ExchangeRate rate = savedYenRate("820.00");
+
+        assertEquals(ReservationExecution.Outcome.SKIPPED,
+                executor.execute(UUID.fromString(waiting), savedYenRate("830.01")).outcome());
+        assertEquals(ReservationExecution.Outcome.SKIPPED, executor.execute(UUID.fromString(canceled), rate).outcome());
+        clock.set(Instant.parse("2026-11-17T03:00:00Z"));
+        assertEquals(ReservationExecution.Outcome.SKIPPED, executor.execute(UUID.fromString(waiting), rate).outcome());
+
+        assertEquals("WAITING", reservationStatus(waiting));
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA + ".exchange_orders", Integer.class));
+        assertEquals(0, ledger.calls());
+    }
+
+    /** 여러 인스턴스가 같은 예약을 동시에 체결하려 해도 주문은 하나다(먼저 잠근 쪽만 체결, 나머지는 SKIP LOCKED로 건너뜀) */
+    @Test
+    void concurrentExecutionCreatesSingleOrder() throws Exception {
+        UUID id = UUID.fromString(reservationId(reserve(OWNER, "key-1", "830.00")));
+        ExchangeRate rate = savedYenRate("820.00");
+        ledger.postsSucceed();
+
+        int threads = 8;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<ReservationExecution>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < threads; i++) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    return executor.execute(id, rate);
+                }));
+            }
+            start.countDown();
+            int executed = 0;
+            for (Future<ReservationExecution> result : results) {
+                if (result.get(30, TimeUnit.SECONDS).outcome() == ReservationExecution.Outcome.EXECUTED) {
+                    executed++;
+                }
+            }
+            assertEquals(1, executed);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM " + SCHEMA + ".exchange_orders", Integer.class));
+        assertEquals(1, ledger.calls());
+        assertEquals("EXECUTED", reservationStatus(id.toString()));
+    }
+
+    /** 같은 통화의 환율은 하루 1건이라, 저장할 때마다 고시일을 하루씩 앞당긴다 */
+    private int rateDays;
+
+    private ExchangeRate savedYenRate(String midRate) {
+        BigDecimal mid = new BigDecimal(midRate);
+        return rateRepository.save(ExchangeRate.collected(new CollectedRate(ForeignCurrency.JPY, 100, mid,
+                mid.multiply(new BigDecimal("1.01")), mid.multiply(new BigDecimal("0.99")),
+                LocalDate.of(2026, 11, 10).minusDays(rateDays++), RateSource.KOREAEXIM), clock.instant()));
+    }
+
+    private String reservationStatus(String id) {
+        return jdbcTemplate.queryForObject("SELECT status FROM " + SCHEMA
+                + ".exchange_reservations WHERE reservation_id = ?", String.class, UUID.fromString(id));
+    }
+
     private ResultActions reserve(UUID userId, String idempotencyKey, String targetRate) throws Exception {
         return mockMvc.perform(post("/api/v1/exchange-reservations")
                 .header("User-Id", userId)
@@ -207,6 +348,12 @@ class ExchangeReservationIntegrationTest {
         }
 
         /** 누가 조회하든 WALLET_ID인 ACTIVE 지갑(원화·엔화 계정)을 돌려줍니다. */
+        @Bean
+        @Primary
+        ExchangeOrderIntegrationTest.FakeLedger testLedgerClient() {
+            return new ExchangeOrderIntegrationTest.FakeLedger();
+        }
+
         @Bean
         @Primary
         WalletBalanceReader testWalletBalanceReader() {

@@ -76,6 +76,21 @@ class ExchangeReservationRepositoryAdapter implements ExchangeReservationReposit
     }
 
     @Override
+    public Optional<ExchangeReservation> findById(UUID reservationId) {
+        return jpaRepository.findById(reservationId);
+    }
+
+    @Override
+    public Optional<ExchangeReservation> lockWaiting(UUID reservationId) {
+        return jpaRepository.lockWaiting(reservationId);
+    }
+
+    @Override
+    public boolean markExecuted(UUID reservationId, UUID orderId, Instant now) {
+        return jpaRepository.markExecuted(reservationId, orderId, now) == 1;
+    }
+
+    @Override
     public Page<ExchangeReservation> findPage(UUID userId, ReservationStatus status, Pageable pageable) {
         return jpaRepository.findPage(userId, status, pageable);
     }

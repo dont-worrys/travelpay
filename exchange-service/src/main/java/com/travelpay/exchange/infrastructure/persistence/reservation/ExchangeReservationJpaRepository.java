@@ -81,4 +81,31 @@ interface ExchangeReservationJpaRepository extends JpaRepository<ExchangeReserva
             """, nativeQuery = true)
     List<UUID> findTriggeredWaitingIds(@Param("foreign") String foreign, @Param("midRate") BigDecimal midRate,
                                        @Param("now") Instant now);
+
+    /**
+     * 대기 예약을 잠그고 읽는다. SKIP LOCKED라 다른 트랜잭션이 잠근 행은 기다리지 않고 건너뛴다(빈 결과).
+     * 여러 인스턴스가 같은 환율로 같은 예약을 찾아도 한 곳만 체결하고, 나머지는 바로 다음 예약으로 넘어간다.
+     */
+    @Query(value = """
+            SELECT * FROM exchange_reservations
+             WHERE reservation_id = :id AND status = 'WAITING'
+             FOR UPDATE SKIP LOCKED
+            """, nativeQuery = true)
+    Optional<ExchangeReservation> lockWaiting(@Param("id") UUID id);
+
+    /**
+     * 대기 예약을 체결로 바꾸고 주문 ID·체결 시각을 함께 기록한다(DB CHECK: 체결 ⇔ 주문·체결 시각 있음).
+     * 호출하는 트랜잭션(주문 저장)에 참여한다. 벌크 UPDATE라 updated_at을 직접 넣는다.
+     */
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ExchangeReservation r
+               set r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.EXECUTED,
+                   r.orderId = :orderId,
+                   r.executedAt = :now,
+                   r.updatedAt = :now
+             where r.id = :id
+               and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
+            """)
+    int markExecuted(@Param("id") UUID id, @Param("orderId") UUID orderId, @Param("now") Instant now);
 }

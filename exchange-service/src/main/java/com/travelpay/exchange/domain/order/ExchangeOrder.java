@@ -177,8 +177,12 @@ public class ExchangeOrder extends BaseTimeEntity {
 
     /** 주문 생성 이력(없음 → PROCESSING, 회원)입니다. 주문이 저장돼 ID가 생긴 뒤에 만듭니다. */
     public ExchangeOrderStatusHistory placedHistory() {
-        return ExchangeOrderStatusHistory.of(requireId(), null, ExchangeOrderStatus.PROCESSING, null,
-                ChangedByType.USER);
+        return placedHistory(ChangedByType.USER);
+    }
+
+    /** 주문 생성 이력을 만든 주체와 함께 남깁니다. 예약 환전 체결로 만든 주문은 시스템(SYSTEM)이 만든 것입니다. */
+    public ExchangeOrderStatusHistory placedHistory(ChangedByType changedBy) {
+        return ExchangeOrderStatusHistory.of(requireId(), null, ExchangeOrderStatus.PROCESSING, null, changedBy);
     }
 
     /**

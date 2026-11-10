@@ -8,9 +8,12 @@ import java.util.UUID;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
+import com.travelpay.exchange.domain.order.ExchangeOrder;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
+import com.travelpay.exchange.domain.quote.ExchangeQuote;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuotePolicy;
+import com.travelpay.exchange.domain.quote.QuoteType;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.shared.BaseTimeEntity;
 import jakarta.persistence.Column;
@@ -47,6 +50,9 @@ public class ExchangeReservation extends BaseTimeEntity {
 
     /** 목표 환율의 소수 자릿수. 수집하는 환율(매매기준율)이 소수 둘째 자리라 그보다 자세한 값은 의미가 없습니다. */
     static final int TARGET_RATE_SCALE = 2;
+
+    /** 체결로 만드는 주문의 멱등 키 앞부분 */
+    static final String ORDER_KEY_PREFIX = "reservation:";
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
@@ -171,6 +177,35 @@ public class ExchangeReservation extends BaseTimeEntity {
     }
 
     /** 만료 시각과 같은 순간부터 만료입니다. */
+    /**
+     * 조건에 닿은 환율로 주문을 만듭니다. 사용자 견적 대신 이 환율로 체결용 견적(RESERVATION)을 메모리에서 만들고,
+     * 보통 환전과 같은 방법으로 견적 값을 주문에 복사합니다. 그래서 주문 테이블과 원장 처리는 보통 환전과 같습니다.
+     * 체결용 견적은 저장하지 않습니다. 주문에 견적 값이 그대로 남기 때문입니다.
+     * 주문 멱등 키는 "reservation:{예약 ID}"라 같은 예약으로 주문을 두 번 만들 수 없습니다.
+     * 예약 상태는 바꾸지 않습니다. 저장소의 조건부 UPDATE(markExecuted)가 주문 ID와 함께 바꿉니다.
+     *
+     * @throws IllegalStateException 대기 중이 아니거나, 이 환율로 조건에 닿지 않았거나, 만료됨 (부르는 쪽이 먼저 확인할 일)
+     * @throws BusinessException     체결 시점 한도로 금액이 범위 밖(EXCHANGE_INVALID_AMOUNT)
+     */
+    public ExchangeOrder placeOrder(ExchangeRate rate, QuotePolicy quotePolicy, Instant now) {
+        requireId();
+        if (!isTriggeredBy(rate) || isExpired(now)) {
+            throw new IllegalStateException("체결할 수 없는 예약입니다: reservationId=" + id + ", status=" + status);
+        }
+        ExchangeQuote quote = ExchangeQuote.issue(userId, QuoteType.RESERVATION, new QuoteCurrencies(fromCurrency, toCurrency),
+                fromMoney(), rate, quotePolicy, now);
+        return ExchangeOrder.place(quote, walletId, orderIdempotencyKey(), now);
+    }
+
+    /** 이 예약으로 만드는 주문의 멱등 키입니다. */
+    public IdempotencyKey orderIdempotencyKey() {
+        return new IdempotencyKey(ORDER_KEY_PREFIX + requireId());
+    }
+
+    private UUID requireId() {
+        return Objects.requireNonNull(id, "reservation must be saved");
+    }
+
     public boolean isExpired(Instant now) {
         return !now.isBefore(expiresAt);
     }

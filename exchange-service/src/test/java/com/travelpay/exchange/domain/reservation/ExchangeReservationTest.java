@@ -10,6 +10,8 @@ import com.travelpay.common.error.ErrorCode;
 import com.travelpay.exchange.domain.money.Currency;
 import com.travelpay.exchange.domain.money.Money;
 import com.travelpay.exchange.domain.money.MoneyErrorCode;
+import com.travelpay.exchange.domain.order.ExchangeOrder;
+import com.travelpay.exchange.domain.order.ExchangeOrderStatus;
 import com.travelpay.exchange.domain.order.IdempotencyKey;
 import com.travelpay.exchange.domain.quote.QuoteCurrencies;
 import com.travelpay.exchange.domain.quote.QuoteFixtures;
@@ -142,6 +144,52 @@ class ExchangeReservationTest {
 
         assertFalse(reservation.isExpired(reservation.getExpiresAt().minusMillis(1)));
         assertTrue(reservation.isExpired(reservation.getExpiresAt()));
+    }
+
+    /**
+     * 체결은 조건에 닿은 환율로 견적을 계산해 주문에 복사한다. 엔화 830 목표, 환율 820:
+     * 100,000원 → 100,000 × 100 / 820 = 12,195.12 → 12,195엔(내림), 수수료 1,000원, 총 101,000원
+     */
+    @Test
+    void placesOrderAtTriggeringRateWithReservationKey() {
+        ExchangeReservation reservation = saved(reserve(Currency.KRW, Currency.JPY, "100000", "830"));
+        ExchangeRate rate = QuoteFixtures.savedRate(ForeignCurrency.JPY, "820.00");
+        Instant executedAt = NOW.plus(Duration.ofDays(1));
+
+        ExchangeOrder order = reservation.placeOrder(rate, QuoteFixtures.policy(), executedAt);
+
+        assertEquals(USER_ID, order.getUserId());
+        assertEquals(WALLET_ID, order.getWalletId());
+        assertEquals("reservation:" + reservation.getId(), order.getIdempotencyKey());
+        assertEquals(rate.getId(), order.getRateId());
+        assertEquals(0, new BigDecimal("820").compareTo(order.getAppliedRate()));
+        assertEquals(100_000L, order.getFromAmount());
+        assertEquals(12_195L, order.getToAmount());
+        assertEquals(1_000L, order.getFeeAmount());
+        assertEquals(101_000L, order.getTotalDebitAmount());
+        assertEquals(ExchangeOrderStatus.PROCESSING, order.getStatus());
+        assertEquals(executedAt, order.getRequestedAt());
+        // 예약 상태는 저장소의 조건부 UPDATE가 바꾼다
+        assertEquals(ReservationStatus.WAITING, reservation.getStatus());
+    }
+
+    /** 조건에 닿지 않았거나, 만료됐거나, 대기가 아니면 주문을 만들지 않는다(부르는 쪽 버그) */
+    @Test
+    void refusesToPlaceOrderWhenNotExecutable() {
+        ExchangeReservation reservation = saved(reserve(Currency.KRW, Currency.JPY, "100000", "830"));
+        ExchangeRate above = QuoteFixtures.savedRate(ForeignCurrency.JPY, "830.01");
+        ExchangeRate below = QuoteFixtures.savedRate(ForeignCurrency.JPY, "820.00");
+
+        assertThrows(IllegalStateException.class, () -> reservation.placeOrder(above, QuoteFixtures.policy(), NOW));
+        assertThrows(IllegalStateException.class,
+                () -> reservation.placeOrder(below, QuoteFixtures.policy(), reservation.getExpiresAt()));
+        ReflectionTestUtils.setField(reservation, "status", ReservationStatus.CANCELED);
+        assertThrows(IllegalStateException.class, () -> reservation.placeOrder(below, QuoteFixtures.policy(), NOW));
+    }
+
+    private static ExchangeReservation saved(ExchangeReservation reservation) {
+        ReflectionTestUtils.setField(reservation, "id", UUID.randomUUID());
+        return reservation;
     }
 
     private static ExchangeReservation reserve(Currency from, Currency to, String amount, String targetRate) {

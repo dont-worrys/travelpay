@@ -46,4 +46,20 @@ public interface ExchangeReservationRepository {
      * ID만 돌려주는 것은 체결할 때 행을 잠그고 다시 읽기 때문입니다(그사이 취소됐을 수 있음).
      */
     List<UUID> findTriggeredWaitingIds(Currency foreign, BigDecimal midRate, Instant now);
+
+    /** 회원 확인 없이 예약을 찾습니다. 체결처럼 시스템이 처리할 때만 씁니다. */
+    Optional<ExchangeReservation> findById(UUID reservationId);
+
+    /**
+     * 대기 예약을 잠그고 읽습니다(SELECT ... FOR UPDATE SKIP LOCKED). 트랜잭션 안에서 불러야 합니다.
+     * 다른 트랜잭션이 이미 잠근 행(다른 인스턴스의 체결, 사용자 취소 진행 중)이면 기다리지 않고 empty입니다.
+     * 대기 중이 아니어도 empty입니다.
+     */
+    Optional<ExchangeReservation> lockWaiting(UUID reservationId);
+
+    /**
+     * 대기 예약을 체결로 바꾸고 주문 ID·체결 시각을 함께 기록합니다. 대기 중일 때만 바뀌고 true입니다.
+     * 주문 저장과 같은 트랜잭션에서 불러, 주문은 있는데 예약이 대기로 남거나 그 반대가 되는 일이 없게 합니다.
+     */
+    boolean markExecuted(UUID reservationId, UUID orderId, Instant now);
 }
