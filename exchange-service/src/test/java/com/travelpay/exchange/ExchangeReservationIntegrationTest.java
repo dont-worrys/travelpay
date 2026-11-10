@@ -17,6 +17,7 @@ import java.util.function.Supplier;
 import java.util.ArrayList;
 
 import com.jayway.jsonpath.JsonPath;
+import com.travelpay.exchange.application.rate.ExchangeRateCollector;
 import com.travelpay.exchange.application.reservation.ExchangeReservationExecutor;
 import com.travelpay.exchange.application.reservation.ReservationExecution;
 import com.travelpay.exchange.domain.money.Currency;
@@ -106,6 +107,12 @@ class ExchangeReservationIntegrationTest {
     @Autowired
     private FakeWallet wallet;
 
+    @Autowired
+    private FakeRateProvider rateProvider;
+
+    @Autowired
+    private ExchangeRateCollector collector;
+
     private MockMvc mockMvc;
 
     @BeforeEach
@@ -116,6 +123,7 @@ class ExchangeReservationIntegrationTest {
         clock.set(NOW);
         ledger.reset();
         wallet.reset();
+        rateProvider.publishYen(null);
     }
 
     @Test
@@ -289,6 +297,34 @@ class ExchangeReservationIntegrationTest {
     /** 같은 통화의 환율은 하루 1건이라, 저장할 때마다 고시일을 하루씩 앞당긴다 */
     private int rateDays;
 
+    /**
+     * 전체 흐름: 환율을 수집해 저장하면 그 환율로 조건에 닿은 예약만 체결된다.
+     * 엔화 820 수집 → 엔화 사기(목표 830, 820 ≤ 830) 체결, 엔화 팔기(목표 840, 820 < 840) 대기 유지.
+     */
+    @Test
+    void collectingRateExecutesOnlyTriggeredReservations() throws Exception {
+        String buy = reservationId(reserve(OWNER, "key-1", "830.00"));
+        String sell = reservationId(mockMvc.perform(post("/api/v1/exchange-reservations")
+                .header("User-Id", OWNER).header("User-Role", "USER").header("Idempotency-Key", "key-2")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"walletId":"%s","fromCurrency":"JPY","toCurrency":"KRW","amount":"10000",
+                         "targetRate":"840.00","expiresAt":"2026-11-17T03:00:00Z"}
+                        """.formatted(WALLET_ID)))
+                .andExpect(status().isCreated()));
+        ledger.postsSucceed();
+        rateProvider.publishYen("820.00");
+
+        collector.collectLatestIfEmpty();
+
+        assertEquals("EXECUTED", reservationStatus(buy));
+        assertEquals("WAITING", reservationStatus(sell));
+        assertEquals("COMPLETED", jdbcTemplate.queryForObject("SELECT o.status FROM " + SCHEMA + ".exchange_orders o JOIN "
+                + SCHEMA + ".exchange_reservations r ON r.order_id = o.order_id WHERE r.reservation_id = ?",
+                String.class, UUID.fromString(buy)));
+        assertEquals(1, ledger.calls());
+    }
+
     /** 지갑이 해지돼 없으면 다시 해도 같으므로 사유를 남기고 취소한다. 사용자는 상세에서 사유를 본다 */
     @Test
     void cancelsReservationWhenWalletIsGone() throws Exception {
@@ -366,21 +402,11 @@ class ExchangeReservationIntegrationTest {
             return new ExchangeQuoteIntegrationTest.MutableClock();
         }
 
-        /** 외부 API 대신 빈 목록을 돌려줍니다. 기동 시 수집이 아무것도 저장하지 않게 합니다. */
+        /** 외부 API 대신 씁니다. 기본은 빈 목록이라 기동 시 수집이 아무것도 저장하지 않습니다. */
         @Bean
         @Primary
-        ExchangeRateProvider testRateProvider() {
-            return new ExchangeRateProvider() {
-                @Override
-                public RateSource source() {
-                    return RateSource.KOREAEXIM;
-                }
-
-                @Override
-                public List<CollectedRate> fetch(LocalDate date) {
-                    return List.of();
-                }
-            };
+        FakeRateProvider testRateProvider() {
+            return new FakeRateProvider();
         }
 
         /** 누가 조회하든 WALLET_ID인 ACTIVE 지갑(원화·엔화 계정)을 돌려줍니다. */
@@ -394,6 +420,32 @@ class ExchangeReservationIntegrationTest {
         @Primary
         FakeWallet testWalletBalanceReader() {
             return new FakeWallet();
+        }
+    }
+
+    /** 수집할 환율을 테스트가 정합니다. 고시일은 수집기가 요청한 날짜입니다. */
+    static final class FakeRateProvider implements ExchangeRateProvider {
+
+        private volatile String yenMidRate;
+
+        @Override
+        public RateSource source() {
+            return RateSource.KOREAEXIM;
+        }
+
+        @Override
+        public List<CollectedRate> fetch(LocalDate date) {
+            String mid = yenMidRate;
+            if (mid == null) {
+                return List.of();
+            }
+            BigDecimal rate = new BigDecimal(mid);
+            return List.of(new CollectedRate(ForeignCurrency.JPY, 100, rate, rate.multiply(new BigDecimal("1.01")),
+                    rate.multiply(new BigDecimal("0.99")), date, RateSource.KOREAEXIM));
+        }
+
+        void publishYen(String midRate) {
+            this.yenMidRate = midRate;
         }
     }
 
