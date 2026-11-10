@@ -1,0 +1,10 @@
+# targets.local.yml로 복사해 측정할 앱의 주소·서비스 이름으로 변경합니다.
+# 아래는 기존 Exchange 측정 환경의 예시입니다. 기본 모니터링에는 자동 등록되지 않습니다.
+# 선택한 Docker 네트워크에서 해석할 수 있는 컨테이너 이름과 메트릭 포트를 사용합니다.
+- targets:
+    - app:18085
+  labels:
+    service: exchange-service
+    environment: load-test
+# 같은 네트워크의 다른 서비스는 위 형식의 대상 그룹을 추가합니다.
+# service는 실제 앱 이름, environment는 load-test로 지정합니다.

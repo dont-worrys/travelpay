@@ -42,3 +42,6 @@ out/
 # TRAVELPAY 로컬 모니터링 로그
 **/.local-logs/**
 !/infra/monitoring/.local-logs/.gitkeep
+
+# 개인·측정 도구가 생성한 부하 시험 수집 대상
+/infra/monitoring/prometheus/load-test/*.local.yml

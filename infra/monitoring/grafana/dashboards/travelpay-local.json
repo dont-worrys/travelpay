@@ -11,7 +11,7 @@
   "editable": false,
   "graphTooltip": 1,
   "schemaVersion": 41,
-  "version": 3,
+  "version": 20,
   "refresh": "15s",
   "time": {
     "from": "now-30m",
@@ -25,6 +25,29 @@
   "templating": {
     "list": [
       {
+        "name": "environment",
+        "label": "메트릭 환경",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus-local"
+        },
+        "query": "label_values(up{job=\"spring-jvm\",environment=~\"local|load-test\"}, environment)",
+        "definition": "label_values(up{job=\"spring-jvm\",environment=~\"local|load-test\"}, environment)",
+        "includeAll": false,
+        "multi": false,
+        "current": {
+          "text": "local",
+          "value": "local"
+        },
+        "options": [],
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "hide": 0,
+        "description": "local=로컬 개발 앱, load-test=전용 부하 시험 앱. 한 환경씩 선택합니다. 이 필터는 메트릭에만 적용되며 로그에는 적용하지 않습니다."
+      },
+      {
         "name": "service",
         "label": "서비스",
         "type": "query",
@@ -32,8 +55,8 @@
           "type": "prometheus",
           "uid": "prometheus-local"
         },
-        "query": "label_values(up{job=\"spring-jvm\"}, service)",
-        "definition": "label_values(up{job=\"spring-jvm\"}, service)",
+        "query": "label_values(up{job=\"spring-jvm\",environment=~\"${environment:regex}\"}, service)",
+        "definition": "label_values(up{job=\"spring-jvm\",environment=~\"${environment:regex}\"}, service)",
         "allValue": ".*",
         "includeAll": true,
         "multi": true,
@@ -42,7 +65,7 @@
           "value": "$__all"
         },
         "options": [],
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "sort": 1,
         "hide": 0
@@ -55,8 +78,8 @@
           "type": "prometheus",
           "uid": "prometheus-local"
         },
-        "query": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\"}, uri)",
-        "definition": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\"}, uri)",
+        "query": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\"}, uri)",
+        "definition": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\"}, uri)",
         "allValue": ".*",
         "includeAll": true,
         "multi": true,
@@ -79,8 +102,8 @@
           "type": "prometheus",
           "uid": "prometheus-local"
         },
-        "query": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri=~\"${api}\",uri!~\"/actuator(/.*)?\"}, status)",
-        "definition": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri=~\"${api}\",uri!~\"/actuator(/.*)?\"}, status)",
+        "query": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri=~\"${api}\",uri!~\"/actuator(/.*)?\"}, status)",
+        "definition": "label_values(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri=~\"${api}\",uri!~\"/actuator(/.*)?\"}, status)",
         "allValue": ".*",
         "includeAll": true,
         "multi": true,
@@ -97,7 +120,7 @@
       },
       {
         "name": "traceId",
-        "label": "Trace ID · 로그 검색",
+        "label": "Trace ID",
         "type": "textbox",
         "query": "",
         "current": {
@@ -114,7 +137,7 @@
     {
       "id": 101,
       "type": "row",
-      "title": "1. 수집 연결 확인",
+      "title": "서비스",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -126,7 +149,7 @@
     },
     {
       "id": 1,
-      "title": "서비스 연결 상태 · UP / DOWN",
+      "title": "연결 상태",
       "type": "stat",
       "gridPos": {
         "x": 0,
@@ -141,7 +164,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "up{job=\"spring-jvm\",service=~\"${service:regex}\"}",
+          "expr": "up{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}",
           "legendFormat": "{{service}}",
           "instant": true,
           "range": false
@@ -156,11 +179,11 @@
               "type": "value",
               "options": {
                 "0": {
-                  "text": "DOWN",
+                  "text": "연결 중단",
                   "color": "red"
                 },
                 "1": {
-                  "text": "UP",
+                  "text": "정상",
                   "color": "green"
                 }
               }
@@ -191,17 +214,21 @@
           "fields": ""
         },
         "orientation": "auto",
-        "textMode": "value_and_name",
+        "textMode": "name",
         "colorMode": "background",
         "graphMode": "none",
-        "justifyMode": "auto"
+        "justifyMode": "center",
+        "text": {
+          "titleSize": 18,
+          "valueSize": 18
+        }
       },
-      "description": "UP=정상 수집, DOWN=수집 실패. Prometheus가 등록한 대상만 나타납니다."
+      "description": "초록은 정상, 빨강은 메트릭 연결 중단입니다. 앱 종료뿐 아니라 네트워크·수집 오류도 포함합니다."
     },
     {
       "id": 102,
       "type": "row",
-      "title": "2. API 성능 · API와 HTTP 상태로 좁혀 보기",
+      "title": "API 성능",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -213,7 +240,7 @@
     },
     {
       "id": 2,
-      "title": "초당 HTTP 요청 수 (RPS)",
+      "title": "HTTP 요청 처리량 (RPS)",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -228,7 +255,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (environment, service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{service}}"
         }
       ],
@@ -256,7 +283,7 @@
     },
     {
       "id": 3,
-      "title": "서버 오류 비율 (5xx)",
+      "title": "서버 장애율 (5xx)",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
@@ -271,7 +298,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum by (service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\",status=~\"5..\"}[$__rate_interval])) or on(service) (sum by (service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])) * 0)) / sum by (service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval]))",
+          "expr": "(sum by (environment, service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\",status=~\"5..\"}[$__rate_interval])) or on(environment, service) (sum by (environment, service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])) * 0)) / sum by (environment, service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{service}}"
         }
       ],
@@ -297,11 +324,11 @@
           "sort": "desc"
         }
       },
-      "description": "Actuator 요청을 제외한 HTTP 요청입니다. 요청이 없으면 값이 없을 수 있습니다. 상단 API·HTTP 상태 선택이 적용됩니다. All은 여러 API·상태를 합산합니다."
+      "description": "선택한 HTTP 요청 중 5xx 응답 비율입니다. 서버 전체 가용성을 뜻하지 않습니다. Actuator 요청은 제외하며 API·HTTP 상태 필터를 적용합니다. 요청이 없는 구간은 비어 있을 수 있습니다."
     },
     {
       "id": 4,
-      "title": "평균 응답 시간",
+      "title": "HTTP 평균 응답 시간",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -316,7 +343,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service) (rate(http_server_requests_seconds_sum{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])) / sum by (service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (environment, service) (rate(http_server_requests_seconds_sum{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])) / sum by (environment, service) (rate(http_server_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{service}}"
         }
       ],
@@ -344,7 +371,7 @@
     },
     {
       "id": 5,
-      "title": "응답 시간 · p95 (95% 기준)",
+      "title": "p95",
       "type": "timeseries",
       "gridPos": {
         "x": 8,
@@ -359,7 +386,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (service, le) (rate(http_server_requests_seconds_bucket{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (environment, service, le) (rate(http_server_requests_seconds_bucket{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])))",
           "legendFormat": "{{service}}"
         }
       ],
@@ -387,7 +414,7 @@
     },
     {
       "id": 6,
-      "title": "응답 시간 · p99 (99% 기준)",
+      "title": "p99",
       "type": "timeseries",
       "gridPos": {
         "x": 16,
@@ -402,7 +429,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum by (service, le) (rate(http_server_requests_seconds_bucket{job=\"spring-jvm\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.99, sum by (environment, service, le) (rate(http_server_requests_seconds_bucket{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",uri!~\"/actuator(/.*)?\",uri=~\"${api}\",status=~\"${status:regex}\"}[$__rate_interval])))",
           "legendFormat": "{{service}}"
         }
       ],
@@ -431,7 +458,7 @@
     {
       "id": 103,
       "type": "row",
-      "title": "3. JVM 상태 · 메모리, CPU, GC 정지",
+      "title": "JVM 리소스",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -443,7 +470,7 @@
     },
     {
       "id": 7,
-      "title": "자바 메모리 사용량 (Heap)",
+      "title": "메모리 사용량 (Heap)",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -458,7 +485,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service) (jvm_memory_used_bytes{job=\"spring-jvm\",service=~\"${service:regex}\",area=\"heap\"})",
+          "expr": "sum by (environment, service) (jvm_memory_used_bytes{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",area=\"heap\"})",
           "legendFormat": "{{service}}"
         }
       ],
@@ -482,11 +509,11 @@
           "sort": "desc"
         }
       },
-      "description": "JVM Heap에 사용 중인 메모리입니다. 증가만으로 메모리 누수를 판단하지 않으며, GC 정지 시간과 회수 이후 추이를 함께 봅니다."
+      "description": "JVM의 Heap 영역에서 사용하는 메모리입니다. Metaspace·Direct Memory 등을 포함한 전체 프로세스 메모리(RSS)와는 다릅니다. GC 회수 이후의 추이와 함께 확인합니다."
     },
     {
       "id": 8,
-      "title": "앱 CPU 사용률",
+      "title": "프로세스 CPU 사용률",
       "type": "timeseries",
       "gridPos": {
         "x": 8,
@@ -501,7 +528,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "process_cpu_usage{job=\"spring-jvm\",service=~\"${service:regex}\"}",
+          "expr": "process_cpu_usage{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}",
           "legendFormat": "{{service}}"
         }
       ],
@@ -529,7 +556,7 @@
     },
     {
       "id": 14,
-      "title": "GC로 앱이 멈춘 시간 · 최근 최대",
+      "title": "GC 최대 정지 시간",
       "description": "GC(가비지 컬렉션)는 더 이상 사용하지 않는 자바 객체의 메모리를 정리하는 작업입니다. 일부 단계에서 앱 실행이 잠시 멈춥니다. 이 값은 Micrometer 최근 관측 창의 최대 정지 시간이며 화면 전체 기간의 최댓값은 아닙니다. Heap·응답 시간 추이와 함께 봅니다.",
       "type": "timeseries",
       "gridPos": {
@@ -545,7 +572,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (service) (jvm_gc_pause_seconds_max{job=\"spring-jvm\",service=~\"${service:regex}\"})",
+          "expr": "max by (environment, service) (jvm_gc_pause_seconds_max{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"})",
           "legendFormat": "{{service}}"
         }
       ],
@@ -574,7 +601,7 @@
     {
       "id": 104,
       "type": "row",
-      "title": "4. DB 연결 · 기다리는 요청과 연결 확보 시간",
+      "title": "DB 커넥션 풀",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -586,7 +613,7 @@
     },
     {
       "id": 9,
-      "title": "DB 연결을 기다리는 요청 수",
+      "title": "HikariCP 대기 스레드 수",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -601,7 +628,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service) (hikaricp_connections_pending{job=\"spring-jvm\",service=~\"${service:regex}\"})",
+          "expr": "sum by (environment, service) (hikaricp_connections_pending{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"})",
           "legendFormat": "{{service}}"
         }
       ],
@@ -625,12 +652,12 @@
           "sort": "desc"
         }
       },
-      "description": "HikariCP 풀이 있는 서비스에만 데이터가 나타납니다. 0보다 큰 값이 지속되면 DB 커넥션 대기를 확인하세요."
+      "description": "HikariCP에서 연결을 기다리는 스레드 수입니다. HTTP 요청과 백그라운드 작업을 포함하며, 계속 증가하면 연결 사용 수·점유 시간을 확인합니다."
     },
     {
       "id": 11,
-      "title": "DB 연결 사용 수 / 최대 수",
-      "description": "풀별 사용 수와 설정 상한을 비교합니다. 대기 증가만으로 풀 크기 부족이나 느린 SQL을 단정하지 않습니다. Service 선택이 적용되며 API·HTTP 상태 필터는 적용되지 않습니다.",
+      "title": "HikariCP 연결 수 (사용/최대)",
+      "description": "HikariCP 풀의 사용 중 연결 수와 최대 연결 수입니다. 풀 개수를 뜻하지 않습니다. 풀별 사용·최대 선을 비교하고 대기 스레드·획득 시간을 함께 확인합니다. 메트릭 환경·서비스 필터를 적용합니다.",
       "type": "timeseries",
       "gridPos": {
         "x": 8,
@@ -645,13 +672,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "hikaricp_connections_active{job=\"spring-jvm\",service=~\"${service:regex}\"}",
+          "expr": "hikaricp_connections_active{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}",
           "legendFormat": "{{service}} / {{pool}} 사용"
         },
         {
           "refId": "B",
-          "expr": "hikaricp_connections_max{job=\"spring-jvm\",service=~\"${service:regex}\"}",
-          "legendFormat": "{{service}} / {{pool}} 상한"
+          "expr": "hikaricp_connections_max{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}",
+          "legendFormat": "{{service}} / {{pool}} 최대"
         }
       ],
       "fieldConfig": {
@@ -678,8 +705,8 @@
     },
     {
       "id": 12,
-      "title": "DB 연결을 얻기까지 걸린 시간 · 평균",
-      "description": "연결을 빌릴 때 기다린 시간입니다. SQL 실행 시간과 구분합니다. 획득 표본이 없는 구간은 비어 있습니다. Service 선택이 적용되며 API·HTTP 상태 필터는 적용되지 않습니다.",
+      "title": "HikariCP 평균 연결 획득 시간",
+      "description": "HikariCP에서 DB 연결을 빌리는 데 걸린 평균 시간입니다. 연결 획득 표본이 없는 구간은 비어 있습니다. 메트릭 환경·서비스 필터를 적용하며 API·HTTP 상태 필터는 적용하지 않습니다.",
       "type": "timeseries",
       "gridPos": {
         "x": 16,
@@ -694,7 +721,51 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service, pool) (rate(hikaricp_connections_acquire_seconds_sum{job=\"spring-jvm\",service=~\"${service:regex}\"}[$__rate_interval])) / (sum by (service, pool) (rate(hikaricp_connections_acquire_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\"}[$__rate_interval])) > 0)",
+          "expr": "sum by (environment, service, pool) (rate(hikaricp_connections_acquire_seconds_sum{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}[$__rate_interval])) / (sum by (environment, service, pool) (rate(hikaricp_connections_acquire_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}[$__rate_interval])) > 0)",
+          "legendFormat": "{{service}} / {{pool}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "title": "HikariCP 평균 연결 점유 시간",
+      "description": "HikariCP에서 DB 연결을 빌린 뒤 반환할 때까지의 평균 점유 시간입니다. SQL·커밋 외에 연결을 보유한 작업도 포함하며 반환된 연결만 집계합니다. 메트릭 환경·서비스 필터를 적용합니다.",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-local"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (environment, service, pool) (rate(hikaricp_connections_usage_seconds_sum{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}[$__rate_interval])) / (sum by (environment, service, pool) (rate(hikaricp_connections_usage_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}[$__rate_interval])) > 0)",
           "legendFormat": "{{service}} / {{pool}}"
         }
       ],
@@ -722,14 +793,14 @@
     },
     {
       "id": 13,
-      "title": "DB 연결 시간 초과 · 초당 발생 수",
-      "description": "풀에서 연결을 얻지 못한 시간 초과 횟수의 초당 증가율입니다. Counter에 rate를 적용해 재시작을 처리합니다. Service 선택이 적용되며 API·HTTP 상태 필터는 적용되지 않습니다.",
+      "title": "HikariCP 타임아웃 (회/초)",
+      "description": "HikariCP에서 연결 획득이 시간 초과된 횟수의 초당 증가율입니다. 설정된 타임아웃 시간(초)이나 실패 비율(%)이 아닙니다. 메트릭 환경·서비스 필터를 적용하며 API·HTTP 상태 필터는 적용하지 않습니다.",
       "type": "timeseries",
       "gridPos": {
-        "x": 0,
+        "x": 12,
         "y": 37,
-        "w": 24,
-        "h": 6
+        "w": 12,
+        "h": 7
       },
       "datasource": {
         "type": "prometheus",
@@ -738,7 +809,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service, pool) (rate(hikaricp_connections_timeout_total{job=\"spring-jvm\",service=~\"${service:regex}\"}[$__rate_interval]))",
+          "expr": "sum by (environment, service, pool) (rate(hikaricp_connections_timeout_total{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}[$__rate_interval]))",
           "legendFormat": "{{service}} / {{pool}}"
         }
       ],
@@ -765,13 +836,117 @@
       }
     },
     {
+      "id": 108,
+      "type": "row",
+      "title": "환율 캐시 (Exchange)",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 20,
+          "title": "환율 캐시 조회 결과",
+          "description": "Exchange 전용 지표입니다. Service에 exchange-service가 포함되거나 All일 때 조회됩니다. 다른 서비스만 선택하면 데이터가 없습니다. 통화 키별 초당 조회수이며 hit=유효 캐시 반환, miss=없거나 해석할 수 없는 값, error=Redis 읽기 실패입니다. User의 Redis Session이나 견적 저장 성공 횟수와 다릅니다. 계측·수집이 없는 빈 값은 0이 아닙니다. API·HTTP 상태 필터는 적용하지 않습니다.",
+          "type": "timeseries",
+          "gridPos": {
+            "x": 0,
+            "y": 45,
+            "w": 24,
+            "h": 8
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-local"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (environment, service, result) (rate(exchange_rate_cache_lookups_total{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=\"exchange-service\",service=~\"${service:regex}\"}[$__rate_interval]))",
+              "legendFormat": "{{service}} / {{result}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".* / hit$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".* / miss$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "yellow"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byRegexp",
+                  "options": ".* / error$"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true,
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": 105,
       "type": "row",
-      "title": "5. 서비스 연결 · Gateway가 기다리는 시간",
+      "title": "서비스 연동 (Gateway)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 43,
+        "y": 45,
         "w": 24,
         "h": 1
       },
@@ -779,12 +954,12 @@
     },
     {
       "id": 15,
-      "title": "Gateway → User 인증 확인 시간 · 평균",
-      "description": "현재 Gateway의 전용 WebClient가 User I01 세션 확인을 기다린 평균 시간입니다. Gateway가 선택되어야 표시됩니다. 호출 표본이 없으면 비어 있습니다. Service 선택이 적용되며 API·HTTP 상태 필터는 적용되지 않습니다.",
+      "title": "User 세션 호출 시간",
+      "description": "검증은 User 서비스가 Redis 세션과 회원 DB를 확인해 수행합니다. 이 패널은 Gateway의 WebClient가 기록한 세션 확인 API(I01)의 평균 HTTP 호출 시간입니다. 네트워크·User 응답 대기를 포함하며 User 내부 검증 시간이나 Redis 명령 시간만을 측정한 값은 아닙니다. Service에 gateway를 포함해야 표시됩니다.",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 46,
         "w": 12,
         "h": 7
       },
@@ -795,7 +970,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service) (rate(http_client_requests_seconds_sum{job=\"spring-jvm\",service=~\"${service:regex}\",service=\"gateway\",client_name=\"user-service\"}[$__rate_interval])) / (sum by (service) (rate(http_client_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",service=\"gateway\",client_name=\"user-service\"}[$__rate_interval])) > 0)",
+          "expr": "sum by (environment, service) (rate(http_client_requests_seconds_sum{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",service=\"gateway\",client_name=\"user-service\"}[$__rate_interval])) / (sum by (environment, service) (rate(http_client_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",service=\"gateway\",client_name=\"user-service\"}[$__rate_interval])) > 0)",
           "legendFormat": "{{service}} → User I01"
         }
       ],
@@ -823,12 +998,12 @@
     },
     {
       "id": 16,
-      "title": "Gateway 목적 서비스별 처리 시간 · 평균",
-      "description": "Gateway 기본 라우트 계측값입니다. 인증 단계에서 거절되어 라우트 계측까지 진행하지 않은 요청은 나타나지 않을 수 있습니다. I01 시간과 단순 합산·차감해 구간을 단정하지 않습니다. Service 선택이 적용되며 API·HTTP 상태 필터는 적용되지 않습니다.",
+      "title": "라우트 평균 처리 시간",
+      "description": "Gateway가 기록한 라우트별 평균 처리 시간입니다. 목적 서비스 호출과 라우트 필터 처리를 포함하며 User뿐 아니라 Wallet·Payment 등 등록된 업무 서비스 라우트도 대상입니다. routeId·HTTP 메서드·응답 코드로 구분합니다. 인증에서 거절된 요청은 없을 수 있고 세션 API 호출 시간과 단순 차감하지 않습니다. Service에 gateway를 포함해야 표시됩니다.",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 44,
+        "y": 46,
         "w": 12,
         "h": 7
       },
@@ -839,7 +1014,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (service, routeId, httpMethod, httpStatusCode) (rate(spring_cloud_gateway_requests_seconds_sum{job=\"spring-jvm\",service=~\"${service:regex}\",service=\"gateway\"}[$__rate_interval])) / (sum by (service, routeId, httpMethod, httpStatusCode) (rate(spring_cloud_gateway_requests_seconds_count{job=\"spring-jvm\",service=~\"${service:regex}\",service=\"gateway\"}[$__rate_interval])) > 0)",
+          "expr": "sum by (environment, service, routeId, httpMethod, httpStatusCode) (rate(spring_cloud_gateway_requests_seconds_sum{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",service=\"gateway\"}[$__rate_interval])) / (sum by (environment, service, routeId, httpMethod, httpStatusCode) (rate(spring_cloud_gateway_requests_seconds_count{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\",service=\"gateway\"}[$__rate_interval])) > 0)",
           "legendFormat": "{{routeId}} {{httpMethod}} {{httpStatusCode}}"
         }
       ],
@@ -868,11 +1043,11 @@
     {
       "id": 106,
       "type": "row",
-      "title": "6. 비동기 업무 · Kafka 지연과 관리자 확인 현황",
+      "title": "비동기 처리",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 53,
         "w": 24,
         "h": 1
       },
@@ -880,12 +1055,12 @@
     },
     {
       "id": 17,
-      "title": "Kafka 소비 지연 · 최근 최대 (건)",
+      "title": "Kafka 소비 지연 (건)",
       "description": "소비자가 발행하는 records_lag_max의 토픽별 최대값입니다. NaN·미측정을 0으로 채우지 않습니다. 브로커의 전체 소비 그룹 적체나 업무 완료 지연을 보장하는 값이 아닙니다. Service 선택이 적용되며 API·HTTP 상태 필터는 적용되지 않습니다.",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 54,
         "w": 12,
         "h": 10
       },
@@ -896,7 +1071,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (service, topic) (kafka_consumer_fetch_manager_records_lag_max{job=\"spring-jvm\",service=~\"${service:regex}\"})",
+          "expr": "max by (environment, service, topic) (kafka_consumer_fetch_manager_records_lag_max{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"})",
           "legendFormat": "{{service}} / {{topic}}"
         }
       ],
@@ -924,12 +1099,12 @@
     },
     {
       "id": 18,
-      "title": "늦어진 처리 / 관리자 확인 현황",
+      "title": "서비스 처리 지연 현황",
       "description": "선택 서비스의 현재 건수입니다. 30분 초과는 생성 후 30분 넘게 확정되지 않은 처리, 관리자 확인 대기는 자동 처리가 멈춰 담당자 판단을 기다리는 상태입니다. 0건과 데이터 없음을 구분합니다. 기존 스케줄러가 갱신하는 수치이며 전체 업무 완료 시간을 측정하지 않습니다.",
       "type": "table",
       "gridPos": {
         "x": 12,
-        "y": 52,
+        "y": 54,
         "w": 12,
         "h": 10
       },
@@ -940,7 +1115,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (service, flow, state) (label_replace(label_replace(transfer_processing_stuck{job=\"spring-jvm\",service=~\"${service:regex}\"}, \"flow\", \"송금\", \"__name__\", \".*\"), \"state\", \"30분 초과\", \"__name__\", \".*\") or label_replace(label_replace(transfer_manual_review{job=\"spring-jvm\",service=~\"${service:regex}\"}, \"flow\", \"송금\", \"__name__\", \".*\"), \"state\", \"관리자 확인 대기\", \"__name__\", \".*\") or label_replace(label_replace(exchange_order_processing_stuck{job=\"spring-jvm\",service=~\"${service:regex}\"}, \"flow\", \"환전\", \"__name__\", \".*\"), \"state\", \"30분 초과\", \"__name__\", \".*\") or label_replace(label_replace(exchange_order_manual_review{job=\"spring-jvm\",service=~\"${service:regex}\"}, \"flow\", \"환전\", \"__name__\", \".*\"), \"state\", \"관리자 확인 대기\", \"__name__\", \".*\") or label_replace(label_replace(label_replace(label_replace(label_replace(payment_settlement_stuck{job=\"spring-jvm\",service=~\"${service:regex}\"}, \"flow\", \"$1\", \"type\", \"(.+)\"), \"flow\", \"결제\", \"flow\", \"payment\"), \"flow\", \"환불\", \"flow\", \"refund\"), \"flow\", \"정산\", \"flow\", \"settlement\"), \"state\", \"30분 초과\", \"__name__\", \".*\") or label_replace(label_replace(label_replace(label_replace(label_replace(payment_settlement_manual_review{job=\"spring-jvm\",service=~\"${service:regex}\"}, \"flow\", \"$1\", \"type\", \"(.+)\"), \"flow\", \"결제\", \"flow\", \"payment\"), \"flow\", \"환불\", \"flow\", \"refund\"), \"flow\", \"정산\", \"flow\", \"settlement\"), \"state\", \"관리자 확인 대기\", \"__name__\", \".*\"))",
+          "expr": "max by (environment, service, flow, state) (label_replace(label_replace(transfer_processing_stuck{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}, \"flow\", \"송금\", \"__name__\", \".*\"), \"state\", \"30분 초과\", \"__name__\", \".*\") or label_replace(label_replace(transfer_manual_review{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}, \"flow\", \"송금\", \"__name__\", \".*\"), \"state\", \"관리자 확인 대기\", \"__name__\", \".*\") or label_replace(label_replace(exchange_order_processing_stuck{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}, \"flow\", \"환전\", \"__name__\", \".*\"), \"state\", \"30분 초과\", \"__name__\", \".*\") or label_replace(label_replace(exchange_order_manual_review{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}, \"flow\", \"환전\", \"__name__\", \".*\"), \"state\", \"관리자 확인 대기\", \"__name__\", \".*\") or label_replace(label_replace(label_replace(label_replace(label_replace(payment_settlement_stuck{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}, \"flow\", \"$1\", \"type\", \"(.+)\"), \"flow\", \"결제\", \"flow\", \"payment\"), \"flow\", \"환불\", \"flow\", \"refund\"), \"flow\", \"정산\", \"flow\", \"settlement\"), \"state\", \"30분 초과\", \"__name__\", \".*\") or label_replace(label_replace(label_replace(label_replace(label_replace(payment_settlement_manual_review{job=\"spring-jvm\",environment=~\"${environment:regex}\",service=~\"${service:regex}\"}, \"flow\", \"$1\", \"type\", \"(.+)\"), \"flow\", \"결제\", \"flow\", \"payment\"), \"flow\", \"환불\", \"flow\", \"refund\"), \"flow\", \"정산\", \"flow\", \"settlement\"), \"state\", \"관리자 확인 대기\", \"__name__\", \".*\"))",
           "instant": true,
           "range": false,
           "format": "table"
@@ -950,7 +1125,7 @@
         "defaults": {
           "unit": "short",
           "decimals": 0,
-          "noValue": "집계 없음"
+          "noValue": "No data"
         },
         "overrides": []
       },
@@ -972,7 +1147,8 @@
           "id": "organize",
           "options": {
             "excludeByName": {
-              "Time": true
+              "Time": true,
+              "environment": true
             },
             "renameByName": {
               "service": "서비스",
@@ -994,11 +1170,11 @@
     {
       "id": 107,
       "type": "row",
-      "title": "7. 로그 · 내용 검색과 Trace ID로 요청 찾기",
+      "title": "로그",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 62,
+        "y": 64,
         "w": 24,
         "h": 1
       },
@@ -1006,11 +1182,11 @@
     },
     {
       "id": 10,
-      "title": "앱·Docker 로그 검색",
+      "title": "통합 로그",
       "type": "logs",
       "gridPos": {
         "x": 0,
-        "y": 63,
+        "y": 65,
         "w": 24,
         "h": 12
       },
@@ -1034,8 +1210,8 @@
         "showControls": true,
         "prettifyLogMessage": true
       },
-      "description": "패널의 검색 버튼은 현재 불러온 로그 안에서 문자를 찾습니다. 등급 필터와 JSON 펼쳐보기를 지원합니다. 상단 Trace ID는 Loki 쿼리에서 관련 기록을 검색합니다. 로그 행을 펼친 뒤 같은 요청 로그 보기 링크를 누르면 ID가 자동 입력됩니다. 전체 시간 범위의 내용 검색은 Explore에서 줄 필터를 사용합니다."
+      "description": "수집된 로컬 앱·개발 인프라 로그입니다. Service=All이면 전체, 개별 서비스 선택 시 해당 서비스만 표시합니다. Trace ID는 로그 원문을 검색하며 메트릭 환경 필터는 로그에 적용되지 않습니다."
     }
   ],
-  "description": "수집 연결 → API → JVM → DB → 서비스 연결 → 비동기 업무 → 로그 순서로 확인합니다. API·HTTP 상태는 API 패널에, Trace ID는 로그에만 적용됩니다."
+  "description": "메트릭 환경(local/load-test)을 한 번에 하나씩 선택해 서비스 상태·HTTP·JVM·HikariCP·Gateway·처리 지연을 확인합니다. 통합 로그에는 서비스·Trace ID 필터를 적용합니다."
 }
