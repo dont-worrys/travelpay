@@ -30,14 +30,23 @@ check_run() {
         echo "무효 측정: 실패한 요청 ${failed}건(4xx/5xx/응답 없음), 불완전 응답 ${incomplete:-0}건: ${run}. 원인을 확인한 뒤 다시 측정합니다." >&2
         return 1
     fi
-    # 견적 발급 검산: 성공 응답(예열 포함) 수만큼 정확히 견적이 저장됐는지. 다르면 응답과 저장이 어긋난 것이라 멈춘다
+    # 견적 발급 검산(예열 포함): 성공 응답 ≤ 저장된 견적 ≤ 보낸 요청이어야 한다.
+    #   저장 < 성공: 성공이라고 답한 견적이 저장되지 않음(유실) → 멈춘다
+    #   저장 > 보낸 요청: 보내지 않은 요청이 저장됨(앞 측정 키가 남음 등) → 멈춘다
+    #   성공 < 저장 ≤ 보낸 요청: 실패로 답했는데 저장된 견적. 유실이 아니라 기록만 한다.
+    #     Redis 견적 jar는 명령을 200ms(spring.data.redis.timeout)까지만 기다려 503으로 답하지만, Redis는 늦게라도 저장한다.
+    #     앱을 막 띄운 직후 동시 300이 몰린 예열 첫 1~2초에 생겼다(2026-11-10, #250). 측정 구간의 실패는 위 검사가 따로 막는다
     if [ "${SCRIPT:-rate-query.js}" = quote-issue.js ]; then
-        local ok_all saved
+        local ok_all requests_all saved
         ok_all=$(value "$run" okAll)
+        requests_all=$(value "$run" requestsAll)
         saved=$(nested "results/$1-vus$2-db.json" quoteRows all)
-        if [ "$ok_all" != "$saved" ]; then
-            echo "견적 검산 실패: 성공 응답 ${ok_all}건, 저장된 견적 ${saved}건 (${run})" >&2
+        if [ "$saved" -lt "$ok_all" ] || [ "$saved" -gt "$requests_all" ]; then
+            echo "견적 검산 실패: 성공 응답 ${ok_all}건 ≤ 저장된 견적 ${saved}건 ≤ 보낸 요청 ${requests_all}건이 아닙니다 (${run})" >&2
             return 1
+        fi
+        if [ "$saved" -gt "$ok_all" ]; then
+            echo "    참고: 실패로 답했지만 저장된 견적 $((saved - ok_all))건 (예열 포함, 보낸 요청 ${requests_all} / 성공 ${ok_all} / 저장 ${saved})"
         fi
     fi
 }
