@@ -33,11 +33,17 @@ public interface ExchangeReservationRepository {
     long countWaitingByUserId(UUID userId);
 
     /**
-     * 본인의 대기 예약을 취소합니다. 대기 중일 때만 바뀌고 true입니다.
+     * 본인의 대기 예약을 취소합니다(사유 USER_REQUESTED). 대기 중일 때만 바뀌고 true입니다.
      * 이미 체결·취소·만료됐거나, 없거나, 다른 회원의 예약이면 바꾸지 않고 false입니다.
      * 체결과 동시에 일어나도 둘 중 하나만 반영됩니다(같은 행을 WHERE status = 'WAITING'으로 바꾸므로).
      */
     boolean cancelIfWaiting(UUID reservationId, UUID userId, Instant now);
+
+    /**
+     * 시스템이 대기 예약을 취소하고 사유를 남깁니다(체결하려 했는데 지갑을 쓸 수 없거나 주문을 만들 수 없음).
+     * 대기 중일 때만 바뀌고 true입니다. 사용자 취소(USER_REQUESTED)는 cancelIfWaiting으로 합니다.
+     */
+    boolean cancelBySystem(UUID reservationId, ReservationCancelReason reason, Instant now);
 
     /**
      * 외화 환율이 midRate일 때 체결 조건에 닿은 대기 예약 ID입니다. 먼저 예약한 순서로 돌려줍니다.

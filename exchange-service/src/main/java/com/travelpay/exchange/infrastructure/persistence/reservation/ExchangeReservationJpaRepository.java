@@ -7,6 +7,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import com.travelpay.exchange.domain.reservation.ExchangeReservation;
+import com.travelpay.exchange.domain.reservation.ReservationCancelReason;
 import com.travelpay.exchange.domain.reservation.ReservationStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -54,6 +55,7 @@ interface ExchangeReservationJpaRepository extends JpaRepository<ExchangeReserva
     @Query("""
             update ExchangeReservation r
                set r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.CANCELED,
+                   r.cancelReason = com.travelpay.exchange.domain.reservation.ReservationCancelReason.USER_REQUESTED,
                    r.updatedAt = :now
              where r.id = :id
                and r.userId = :userId
@@ -108,4 +110,17 @@ interface ExchangeReservationJpaRepository extends JpaRepository<ExchangeReserva
                and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
             """)
     int markExecuted(@Param("id") UUID id, @Param("orderId") UUID orderId, @Param("now") Instant now);
+
+    /** 시스템이 대기 예약을 취소한다(체결 중 지갑 사용 불가 등). 대기 중일 때만 1행. 호출하는 트랜잭션이 있으면 참여한다 */
+    @Transactional
+    @Modifying(flushAutomatically = true, clearAutomatically = true)
+    @Query("""
+            update ExchangeReservation r
+               set r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.CANCELED,
+                   r.cancelReason = :reason,
+                   r.updatedAt = :now
+             where r.id = :id
+               and r.status = com.travelpay.exchange.domain.reservation.ReservationStatus.WAITING
+            """)
+    int cancelBySystem(@Param("id") UUID id, @Param("reason") ReservationCancelReason reason, @Param("now") Instant now);
 }

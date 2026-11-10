@@ -70,6 +70,10 @@ public class ExchangeOrderService {
      */
     public ExchangeOrder place(PlaceOrderCommand command) {
         IdempotencyKey key = new IdempotencyKey(command.idempotencyKey());
+        if (key.isReservedForReservation()) {
+            // 예약 체결 주문의 키와 겹치면 그 예약이 체결되지 못하므로, 형식 오류와 같게 거절한다
+            throw new BusinessException(ExchangeOrderErrorCode.INVALID_IDEMPOTENCY_KEY);
+        }
         Optional<ExchangeOrder> existing = orderRepository.findByUserIdAndIdempotencyKey(command.userId(), key);
         if (existing.isPresent()) {
             return replay(existing.get(), command);

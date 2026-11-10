@@ -27,6 +27,7 @@ import com.travelpay.exchange.application.reservation.ExchangeReservationQueryRe
 import com.travelpay.exchange.domain.reservation.DuplicateExchangeReservationException;
 import com.travelpay.exchange.domain.reservation.ExchangeReservation;
 import com.travelpay.exchange.domain.reservation.ExchangeReservationRepository;
+import com.travelpay.exchange.domain.reservation.ReservationCancelReason;
 import com.travelpay.exchange.domain.reservation.ReservationPolicy;
 import com.travelpay.exchange.domain.reservation.ReservationStatus;
 import org.junit.jupiter.api.BeforeEach;
@@ -151,6 +152,7 @@ class ExchangeReservationPersistenceIntegrationTest {
 
         assertFalse(repository.cancelIfWaiting(id, OTHER_USER_ID, canceledAt), "다른 회원은 취소 못 함");
         assertTrue(repository.cancelIfWaiting(id, USER_ID, canceledAt));
+        assertEquals(ReservationCancelReason.USER_REQUESTED, repository.findById(id).orElseThrow().getCancelReason());
         assertFalse(repository.cancelIfWaiting(id, USER_ID, canceledAt), "이미 취소됨");
         assertFalse(repository.cancelIfWaiting(expired, USER_ID, canceledAt), "만료된 예약");
 
@@ -271,6 +273,22 @@ class ExchangeReservationPersistenceIntegrationTest {
             jdbcTemplate.execute("SET LOCAL enable_seqscan = off");
             return String.join("\n", jdbcTemplate.queryForList("EXPLAIN " + query, String.class));
         });
+    }
+
+    /** 시스템 취소는 사유를 남기고, 대기 중일 때만 한 번 바뀐다. 사유와 상태는 DB CHECK로 함께 다닌다 */
+    @Test
+    void systemCancelKeepsReasonOnlyForCanceled() {
+        UUID id = repository.save(reservation(USER_ID, "key-1")).getId();
+
+        assertTrue(repository.cancelBySystem(id, ReservationCancelReason.WALLET_UNAVAILABLE, Instant.now()));
+        assertFalse(repository.cancelBySystem(id, ReservationCancelReason.EXECUTION_REJECTED, Instant.now()), "이미 취소됨");
+        assertEquals(ReservationCancelReason.WALLET_UNAVAILABLE, repository.findById(id).orElseThrow().getCancelReason());
+
+        UUID waiting = repository.save(reservation(USER_ID, "key-2")).getId();
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update("UPDATE " + SCHEMA
+                + ".exchange_reservations SET cancel_reason = 'USER_REQUESTED' WHERE reservation_id = ?", waiting));
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update("UPDATE " + SCHEMA
+                + ".exchange_reservations SET status = 'CANCELED' WHERE reservation_id = ?", waiting));
     }
 
     /**

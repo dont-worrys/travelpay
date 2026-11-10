@@ -159,6 +159,14 @@ class ExchangeOrderServiceTest {
         verifyNoInteractions(orderRepository);
     }
 
+    /** 예약 체결 주문의 키("reservation:{예약ID}")는 회원 신청에 쓸 수 없다. 쓰면 그 예약이 체결되지 못한다 */
+    @Test
+    void rejectsKeyReservedForReservationOrders() {
+        assertError(ExchangeOrderErrorCode.INVALID_IDEMPOTENCY_KEY, () -> service.place(
+                new PlaceOrderCommand(USER_ID, "reservation:" + UUID.randomUUID(), quote.getId(), WALLET_ID)));
+        verifyNoInteractions(orderRepository);
+    }
+
     @Test
     void rejectsQuoteNotFoundOrOfAnotherUser() {
         assertError(ExchangeQuoteErrorCode.QUOTE_NOT_FOUND,

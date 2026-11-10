@@ -51,9 +51,6 @@ public class ExchangeReservation extends BaseTimeEntity {
     /** 목표 환율의 소수 자릿수. 수집하는 환율(매매기준율)이 소수 둘째 자리라 그보다 자세한 값은 의미가 없습니다. */
     static final int TARGET_RATE_SCALE = 2;
 
-    /** 체결로 만드는 주문의 멱등 키 앞부분 */
-    static final String ORDER_KEY_PREFIX = "reservation:";
-
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "reservation_id", updatable = false)
@@ -99,6 +96,10 @@ public class ExchangeReservation extends BaseTimeEntity {
 
     @Column(name = "executed_at", updatable = false)
     private Instant executedAt;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "cancel_reason", length = 30, updatable = false)
+    private ReservationCancelReason cancelReason;
 
     private ExchangeReservation(UUID userId, UUID walletId, IdempotencyKey idempotencyKey, Money amount,
                                 Currency toCurrency, BigDecimal targetRate, int rateUnit, Instant expiresAt) {
@@ -199,7 +200,7 @@ public class ExchangeReservation extends BaseTimeEntity {
 
     /** 이 예약으로 만드는 주문의 멱등 키입니다. */
     public IdempotencyKey orderIdempotencyKey() {
-        return new IdempotencyKey(ORDER_KEY_PREFIX + requireId());
+        return IdempotencyKey.forReservation(requireId());
     }
 
     private UUID requireId() {

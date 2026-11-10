@@ -12,6 +12,7 @@ import com.travelpay.exchange.domain.order.IdempotencyKey;
 import com.travelpay.exchange.domain.reservation.DuplicateExchangeReservationException;
 import com.travelpay.exchange.domain.reservation.ExchangeReservation;
 import com.travelpay.exchange.domain.reservation.ExchangeReservationRepository;
+import com.travelpay.exchange.domain.reservation.ReservationCancelReason;
 import com.travelpay.exchange.domain.reservation.ReservationStatus;
 import com.travelpay.exchange.infrastructure.persistence.ConstraintViolations;
 import lombok.RequiredArgsConstructor;
@@ -73,6 +74,14 @@ class ExchangeReservationRepositoryAdapter implements ExchangeReservationReposit
             throw new IllegalArgumentException("외화가 아닙니다: " + foreign);
         }
         return jpaRepository.findTriggeredWaitingIds(foreign.name(), midRate, now);
+    }
+
+    @Override
+    public boolean cancelBySystem(UUID reservationId, ReservationCancelReason reason, Instant now) {
+        if (reason == ReservationCancelReason.USER_REQUESTED) {
+            throw new IllegalArgumentException("사용자 취소는 cancelIfWaiting으로 합니다");
+        }
+        return jpaRepository.cancelBySystem(reservationId, reason, now) == 1;
     }
 
     @Override

@@ -13,6 +13,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.ArrayList;
 
 import com.jayway.jsonpath.JsonPath;
@@ -26,6 +27,7 @@ import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
 import com.travelpay.exchange.domain.rate.RateSource;
+import com.travelpay.exchange.domain.wallet.WalletBalanceFetchException;
 import com.travelpay.exchange.domain.wallet.WalletBalanceReader;
 import com.travelpay.exchange.domain.wallet.WalletBalances;
 import org.junit.jupiter.api.BeforeEach;
@@ -101,6 +103,9 @@ class ExchangeReservationIntegrationTest {
     @Autowired
     private ExchangeOrderIntegrationTest.FakeLedger ledger;
 
+    @Autowired
+    private FakeWallet wallet;
+
     private MockMvc mockMvc;
 
     @BeforeEach
@@ -110,6 +115,7 @@ class ExchangeReservationIntegrationTest {
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(NOW);
         ledger.reset();
+        wallet.reset();
     }
 
     @Test
@@ -283,6 +289,36 @@ class ExchangeReservationIntegrationTest {
     /** 같은 통화의 환율은 하루 1건이라, 저장할 때마다 고시일을 하루씩 앞당긴다 */
     private int rateDays;
 
+    /** 지갑이 해지돼 없으면 다시 해도 같으므로 사유를 남기고 취소한다. 사용자는 상세에서 사유를 본다 */
+    @Test
+    void cancelsReservationWhenWalletIsGone() throws Exception {
+        String id = reservationId(reserve(OWNER, "key-1", "830.00"));
+        wallet.answer(Optional::empty);
+
+        assertEquals(ReservationExecution.Outcome.CANCELED,
+                executor.execute(UUID.fromString(id), savedYenRate("820.00")).outcome());
+
+        mockMvc.perform(get("/api/v1/exchange-reservations/{id}", id).header("User-Id", OWNER).header("User-Role", "USER"))
+                .andExpect(jsonPath("$.data.status").value("CANCELED"))
+                .andExpect(jsonPath("$.data.cancelReason").value("WALLET_UNAVAILABLE"));
+        assertEquals(0, ledger.calls());
+    }
+
+    /** 지갑 서비스 장애는 잠깐일 수 있어 대기로 남긴다. 복구된 뒤 다음 환율로 다시 체결된다 */
+    @Test
+    void keepsWaitingOnWalletOutageAndExecutesLater() throws Exception {
+        UUID id = UUID.fromString(reservationId(reserve(OWNER, "key-1", "830.00")));
+        wallet.answer(() -> {
+            throw new WalletBalanceFetchException("wallet down");
+        });
+
+        assertEquals(ReservationExecution.Outcome.RETRY_LATER, executor.execute(id, savedYenRate("820.00")).outcome());
+        assertEquals("WAITING", reservationStatus(id.toString()));
+
+        wallet.reset();
+        assertEquals(ReservationExecution.Outcome.EXECUTED, executor.execute(id, savedYenRate("825.00")).outcome());
+    }
+
     private ExchangeRate savedYenRate(String midRate) {
         BigDecimal mid = new BigDecimal(midRate);
         return rateRepository.save(ExchangeRate.collected(new CollectedRate(ForeignCurrency.JPY, 100, mid,
@@ -356,8 +392,31 @@ class ExchangeReservationIntegrationTest {
 
         @Bean
         @Primary
-        WalletBalanceReader testWalletBalanceReader() {
-            return userId -> Optional.of(new WalletBalances(WALLET_ID, true, Map.of(
+        FakeWallet testWalletBalanceReader() {
+            return new FakeWallet();
+        }
+    }
+
+    /** 기본은 누가 조회하든 WALLET_ID인 ACTIVE 지갑(원화·엔화 계정)입니다. 테스트마다 응답을 바꿉니다. */
+    static final class FakeWallet implements WalletBalanceReader {
+
+        private volatile Supplier<Optional<WalletBalances>> answer = FakeWallet::active;
+
+        @Override
+        public Optional<WalletBalances> read(UUID userId) {
+            return answer.get();
+        }
+
+        void answer(Supplier<Optional<WalletBalances>> answer) {
+            this.answer = answer;
+        }
+
+        void reset() {
+            answer = FakeWallet::active;
+        }
+
+        private static Optional<WalletBalances> active() {
+            return Optional.of(new WalletBalances(WALLET_ID, true, Map.of(
                     Currency.KRW, new WalletBalances.Account(new Money(Currency.KRW, 500_000), true),
                     Currency.JPY, new WalletBalances.Account(new Money(Currency.JPY, 0), true))));
         }
