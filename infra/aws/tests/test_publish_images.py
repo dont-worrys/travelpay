@@ -63,6 +63,8 @@ class PublishImagesTest(unittest.TestCase):
         result = publish.publish(images, lambda command, capture=True: commands.append(command), aws, lambda registry: None)
         build, push = commands
         self.assertEqual(build[:4], ["docker", "build", "--platform", "linux/amd64"])
+        # 증명을 붙이면 ECR에 index·이미지·증명 3개가 생겨 보관 개수와 스캔 대상이 어긋납니다.
+        self.assertIn("--provenance=false", build)
         self.assertIn("SERVICE=mock-bank", build)
         self.assertEqual(push, ["docker", "push", f"{REGISTRY}/travelpay/mock-bank:0123456789ab"])
         self.assertEqual(result["mock_bank"], f"{REGISTRY}/travelpay/mock-bank@{DIGEST}")

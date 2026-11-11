@@ -63,6 +63,20 @@ output "api_certificate" {
   } : null
 }
 
+output "application_runtime" {
+  description = "Task 정의와 공개 진입점입니다. ECS Service는 아직 없으며 Cloudflare API 레코드는 PR4에서 ALB로 바꿉니다."
+  value = var.enable_app_runtime ? {
+    task_definitions   = { for key, task in aws_ecs_task_definition.application : key => task.arn }
+    load_balancer_dns  = aws_lb.api[0].dns_name
+    gateway_target_arn = aws_lb_target_group.gateway[0].arn
+  } : null
+}
+
+output "alerts_topic_arn" {
+  description = "CloudWatch 경보를 보내는 SNS 주제입니다. 이메일 구독은 받는 사람이 확인해야 활성화됩니다."
+  value       = one(aws_sns_topic.alerts[*].arn)
+}
+
 output "data_runtime" {
   description = "Data 접속·초기화용 비밀값 없는 실행 계약입니다. 관리자 암호 대신 Secret ARN만 제공합니다."
   value = var.enable_data_foundation ? {

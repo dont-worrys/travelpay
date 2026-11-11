@@ -16,7 +16,8 @@ resource "aws_ecr_repository" "application" {
 }
 
 # 배포마다 이미지가 쌓이므로 서비스별 최근 10개만 남깁니다. 지워진 이미지는 Task 재시작·롤백에 쓸 수 없으므로
-# 7일 운영 중 서비스별 배포 횟수보다 넉넉한 값으로 둡니다.
+# 7일 운영 중 서비스별 배포 횟수보다 넉넉한 값으로 둡니다. 개수는 ECR 항목 기준이므로 푸시 1번이 항목 1개가 되도록
+# 이미지를 증명(provenance) 없이 만듭니다. 증명을 붙인 index는 하위 항목 2개가 함께 생겨 보관 배포 수가 줄어듭니다.
 resource "aws_ecr_lifecycle_policy" "application" {
   for_each = aws_ecr_repository.application
 

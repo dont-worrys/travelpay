@@ -248,7 +248,10 @@ python3 infra/aws/scripts/check-runtime-plan.py infra/aws/stage-4.tfplan --profi
 python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profile travelpay --account 123456789012
 ```
 
-비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가해 DB 6개·Redis 2개의 SecureString을 준비합니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. 외부 API 키와 Wallet 암호화 키는 대상이 아니며 앱 배포 전에 별도로 준비합니다.
+비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가하면 DB 6개·Redis 2개 암호를 SecureString으로 만듭니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. AWS CLI 기록(`cli_history`)이 켜져 있으면 요청 내용이 로컬 기록에 남으므로 쓰기를 거절합니다.
+
+- Wallet 계좌번호 키(무작위 32바이트의 Base64)는 `--apply --create-wallet-key`를 줄 때만 만듭니다. 데이터가 생긴 뒤 바꾸거나, 지워진 뒤 새로 만들면 저장된 계좌번호를 풀 수 없으므로 Wallet 데이터가 생기기 전 처음 한 번만 씁니다.
+- 수출입은행에서 발급받은 환율 API 키는 `--apply --external`을 줄 때만 입력받습니다. 입력을 숨길 수 있는 터미널에서 직접 실행해야 하며, 파이프 입력처럼 입력이 화면에 보일 수 있으면 거절합니다. 키를 명령 인자·파일·채팅에 남기지 않습니다.
 
 ```bash
 terraform -chdir=infra/aws apply stage-4.tfplan
@@ -278,7 +281,7 @@ Data 호스트의 스크립트·Compose·CloudWatch Agent 설정은 user data가
 
 ## 앱 이미지와 공개 인증서 준비
 
-앱 기반을 켜면 서비스별 ECR 저장소 8개, 앱 로그 그룹 8개(7일 보관), Eureka·Mock Bank의 Cloud Map 이름, `api.travelpay.store` 공개 인증서를 만듭니다. 저장소·로그 그룹 이름은 실행 역할과 배포 역할의 권한 ARN과 같습니다. ECR은 태그를 덮어쓸 수 없고(Git SHA 태그), 푸시할 때 이미지를 스캔하며, 서비스별 최근 10개만 남깁니다. 지워진 이미지는 Task 재시작·롤백에 쓸 수 없으므로 보관 개수는 7일 동안의 배포 횟수보다 넉넉하게 둡니다.
+앱 기반을 켜면 서비스별 ECR 저장소 8개, 앱 로그 그룹 8개(7일 보관), Eureka·Mock Bank의 Cloud Map 이름, `api.travelpay.store` 공개 인증서를 만듭니다. 저장소·로그 그룹 이름은 실행 역할과 배포 역할의 권한 ARN과 같습니다. ECR은 태그를 덮어쓸 수 없고(Git SHA 태그), 푸시할 때 이미지를 스캔하며, 서비스별 최근 10개만 남깁니다. 지워진 이미지는 Task 재시작·롤백에 쓸 수 없으므로 보관 개수는 7일 동안의 배포 횟수보다 넉넉하게 둡니다. 보관 개수는 ECR 항목 수로 세므로 이미지는 빌드 증명(provenance) 없이 만듭니다. BuildKit 기본값처럼 증명을 붙이면 푸시 1번에 index·이미지·증명 3개 항목이 생겨 실제로는 배포 3~4번분만 남고, 스캔 결과도 태그가 아닌 하위 이미지 digest에 붙습니다(2026-11-11 첫 게시에서 확인).
 
 Cloud Map 이름에는 ECS가 관리하는 custom 헬스 체크를 씁니다. AWS ECS 문서는 사설 namespace에 이 방식을 권장하며, 컨테이너 헬스 체크를 통과한 Task만 DNS에 남깁니다. Provider가 대체로 안내하는 `health_check_config`는 Route 53 헬스 체크라 공개 namespace에만 맞습니다.
 
@@ -286,7 +289,7 @@ Cloud Map 이름에는 ECS가 관리하는 custom 헬스 체크를 씁니다. AW
 
 시작 스크립트(`deploy/docker/entrypoint.sh`)는 Eureka에 등록하는 서비스에서 종료 신호를 받으면 먼저 Eureka의 상태를 `OUT_OF_SERVICE`로 바꾸고 기다린 뒤 Java를 종료합니다. Spring은 웹 서버를 먼저 닫고 Eureka 등록 해제를 맨 나중에 하므로(종료 순서 값 2147482623과 0), 이 순서를 앞당기지 않으면 다른 서비스가 캐시된 주소로 종료 중인 Task에 요청을 보냅니다. Task IP는 ECS 메타데이터에서 읽어 Eureka 인스턴스 ID로 고정합니다. 인자를 주면 앱 대신 그 명령을 실행하므로 시험 실행에 씁니다.
 
-이미지는 커밋된 소스로만 게시합니다. 기본 실행은 미리보기이고 `--push`를 주면 빌드·푸시합니다. 같은 Git SHA 태그가 이미 있으면 다시 빌드하지 않고 그 digest를 씁니다. 결과는 Git에서 제외한 `infra/aws/application-images.auto.tfvars.json`에 기록합니다.
+이미지는 커밋된 소스로만 게시합니다. 기본 실행은 미리보기이고 `--push`를 주면 증명 없이 빌드해 푸시합니다. 같은 Git SHA 태그가 이미 있으면 다시 빌드하지 않고 그 digest를 씁니다. 결과는 Git에서 제외한 `infra/aws/application-images.auto.tfvars.json`에 기록합니다.
 
 ```bash
 python3 infra/aws/scripts/publish-images.py --profile <프로필>
@@ -294,6 +297,46 @@ python3 infra/aws/scripts/publish-images.py --profile <프로필> --push
 ```
 
 공개 인증서는 DNS로 검증합니다. `terraform -chdir=infra/aws output api_certificate`의 검증 레코드를 Cloudflare DNS에 CNAME으로 추가하고 Proxy status는 **DNS only**로 둡니다. 프록시를 켜면 ACM이 레코드를 확인하지 못합니다. 발급(ISSUED) 뒤에도 자동 갱신에 쓰이므로 레코드를 지우지 않습니다. 발급 전 인증서로는 HTTPS 리스너를 만들 수 없으므로 ALB는 발급을 확인한 뒤 적용합니다.
+
+## 앱 실행 정의·공개 진입점·경보
+
+이미지 게시와 인증서 발급을 확인한 뒤 `enable_app_runtime=true`로 Task 정의 8개, ALB, 경보를 만듭니다. 이 옵션은 앱·데이터 기반이 켜져 있고 `application_images`에 8개 서비스의 digest가 모두 있어야 통과합니다. 태그 주소나 다른 저장소의 이미지는 입력 검증에서 거절합니다. ECS Service와 배포는 PR4에서 만들며 이 단계에서는 Task를 계속 실행하지 않습니다.
+
+Task 정의의 설정은 두 곳에서 옵니다. 비밀이 아닌 값(DB 주소·계정 이름, Redis·Kafka·Eureka·Mock Bank 주소)은 `task-definitions.tf`의 환경 변수입니다. Redis·Kafka·Eureka·Mock Bank 주소는 사설 DNS 이름과 SG가 허용한 포트에서 만들고, DB는 인증서 이름과 맞아야 `verify-full`이 통과하므로 RDS 엔드포인트 이름을 그대로 씁니다. 서비스 이름·포트는 각 서비스의 `application-prod.yml`과 테스트로 대조합니다. 비밀값은 Task 정의에 Parameter Store ARN만 적고, Task 시작 때 서비스별 실행 역할이 꺼내 주입합니다. 각 서비스는 자기 비밀값만 받습니다. 이미지에는 설정·비밀값이 들어가지 않습니다.
+
+| 설정 | 값 | 이유 |
+|---|---|---|
+| 설정 파일 | `SPRING_CONFIG_NAME=application-prod`, `SPRING_PROFILES_ACTIVE=prod` | 로컬 전용 파일 로그를 읽지 않고, `@Profile("!prod")`인 Mock Bank 장애 주입을 끕니다 |
+| CPU | 컨테이너 단위 예약(256·512), Task 단위 상한 없음 | Task 단위 CPU는 넘을 수 없는 상한이라 0.25 vCPU에서 user-service 기동이 114초 걸렸습니다(2 vCPU 13초). 컨테이너 단위 값은 같은 크기로 배치를 예약하고 경합 때 비율을 보장하며 남는 CPU는 더 씁니다 |
+| 메모리·힙 | Task 메모리는 상한, 힙은 그 절반, OOM 시 종료 | 메타스페이스·스레드·직접 버퍼 몫을 남기고, 메모리 부족 상태로 남지 않고 ECS가 다시 띄우게 합니다 |
+| health 확인 | 관리 포트의 liveness, 시작 후 180초 유예 | 여러 Task가 한꺼번에 시작해 예약 몫만 받는 최악의 기동 시간(114초)보다 길게 둡니다. liveness는 DB·Redis 상태를 보지 않습니다 |
+| DB | `sslmode=verify-full`, 이미지의 RDS CA, Hikari 최대 5·최소 1 | DB 서비스 6개가 롤링 중 2배가 되어도 60개로 `max_connections=100` 안에 둡니다 |
+| Eureka | 목록 조회 5초, LoadBalancer 캐시 5초, 서버 응답 캐시 5초 | 세 캐시의 합(15초)이 시작 스크립트의 종료 전 대기 20초보다 짧고, 대기·종료 처리 합(최대 55초)이 `stopTimeout` 60초 안에 끝납니다(테스트로 확인) |
+| 지표 | `SPRING_APPLICATION_JSON`의 HTTP histogram | `application.yml`에만 있는 설정이며 점이 든 지표 이름은 환경 변수 이름으로 쓸 수 없습니다 |
+| 파일시스템 | 루트 읽기 전용, `/tmp`만 Task 볼륨 | 앱 파일 변조를 막습니다. Tomcat·Netty 임시 파일은 Task와 함께 지워집니다 |
+
+ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합니다. 리스너는 HTTPS만 열고 TLS 1.2·1.3 정책(`ELBSecurityPolicy-TLS13-1-2-2021-06`)과 발급 확인을 거친 인증서를 씁니다. Host가 `api.travelpay.store`인 요청만 Gateway Target Group(IP, 8080)으로 보내고 나머지는 404입니다. Target 상태는 관리 포트 18080의 readiness로 판단하며 등록 해제 대기는 30초입니다. Cloudflare는 마지막 요청 뒤 최대 900초 동안 원본 연결을 다시 쓰므로(Proxy Idle Timeout) ALB 유휴 제한은 1000초로 길게 두어 ALB가 먼저 끊는 순간의 520 오류를 피합니다. Cloudflare의 API 레코드를 ALB로 바꾸는 작업은 Gateway Service가 생기는 PR4에서 합니다.
+
+경보는 SNS 주제 하나로 보내며 이메일 구독은 받은 메일의 확인 링크를 눌러야 활성화됩니다. 경보 이메일은 Git에서 제외한 개인 입력 파일의 `alert_email`에 둡니다.
+
+상태 값은 일시적으로 튀는 값이나 새 지표의 첫 공백에 울리지 않도록 15분(5분 3번) 연속을 봅니다.
+
+| 대상 | 경보 조건 | 지표가 없을 때 |
+|---|---|---|
+| RDS | CPU 80% 초과, 여유 메모리 512MiB 미만, 여유 저장 공간 4GiB 미만, 연결 80개 초과가 각각 15분 | 판단 보류 |
+| Data 호스트 | 메모리 80% 초과, `/`·Kafka·모니터링 디스크 75% 초과가 각각 15분 | 경보(호스트·Agent 중단) |
+| 앱 호스트 | ASG 전체 중 최대 메모리 80% 초과, 루트 디스크 75% 초과가 각각 15분 | 경보 |
+| ALB | ALB 5xx 또는 Gateway 5xx가 5분에 5건 이상 | 정상(요청 없음) |
+
+앱 호스트는 ASG가 교체해 인스턴스 ID가 바뀌므로 CloudWatch Agent가 ASG 이름 차원으로 합친 지표를 경보에 씁니다. 이 설정은 앱 호스트 user data에 있으므로 적용하면 ASG instance refresh로 두 대가 한 대씩 교체됩니다. Data 호스트 Agent 설정은 바꾸지 않아 설정 묶음이 다시 적용되지 않습니다.
+
+이 단계에서 확인한 앱 설정 사실과 남은 일입니다.
+
+- Ledger의 Hikari `connection-timeout`·`validation-timeout`은 `application.yml`에만 있어 운영에서는 기본값(30초·5초)이 적용됩니다. 의도인지 서비스 담당자에게 확인합니다.
+- Exchange는 환율 API 키(`KOREAEXIM_API_KEY`)가 없으면 시작하지 않습니다. 배포 전 비밀값 준비 도구의 `--external`로 저장합니다.
+- ALB 접근 로그는 켜지 않았습니다. Cloudflare만 접근할 수 있고 요청 기록은 Gateway 로그와 ALB 지표로 확인합니다.
+- SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. Cloudflare가 붙이는 비밀 헤더 확인이나 Authenticated Origin Pulls(mTLS)를 Cloudflare 전환과 함께 PR4에서 정합니다.
+- PR4의 CD가 Task 정의를 복사해 이미지만 바꾼 새 리비전을 등록하면, 이후 Terraform이 설정을 바꿀 때 `application_images`가 배포 중인 digest와 같아야 이전 이미지로 되돌아가지 않습니다. 이 규칙은 PR4에서 정합니다.
 
 ## AWS에 접속하지 않는 코드 검증
 
@@ -311,6 +354,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s infra/aws/tests -p 'te
 `-backend=false`는 이 검증에서 S3 Backend 초기화를 생략하는 옵션입니다. 실제 운영 명령에 계속 붙이는 설정이 아닙니다. `test`는 AWS Provider 경계를 mock으로 바꾸고 Terraform이 평가한 리소스 설정·정책을 검사합니다. 모의 입력과 식별자는 실제 AWS 리소스가 아닙니다.
 
 Terraform test의 run은 기본적으로 apply입니다. 기본 구성 테스트는 `mock_provider "aws"`와 `command = plan`을 명시합니다. SG 규칙 ID 참조와 OIDC 역할 신뢰 등 적용 후 계산값이 필요한 일부 검사는 AWS 동작 전체를 mock 처리한 `command = apply`를 명시합니다. 이 경우에도 실제 AWS 리소스는 생성하지 않습니다. 새 Provider나 실제 AWS 시험을 추가할 때는 모의 처리 범위와 실행·정리 대상을 별도로 검토합니다.
+
+`terraform test`도 모듈 폴더의 `terraform.tfvars`·`*.auto.tfvars.json`을 읽습니다. 저장소에는 실제 운영 입력 파일이 있으므로 테스트 파일은 모든 입력 변수를 직접 정해 실제 값이 섞이지 않게 합니다. 변수를 추가하면 모든 테스트 파일의 `variables`에도 값을 넣습니다(2026-11-11 실제 입력 파일이 섞여 8개 파일이 실패한 것을 확인하고 고정).
 
 DB 초기화 SQL은 별도 경계 검사로도 확인합니다. 로컬에 `postgres:18.6-bookworm` 이미지가 준비된 경우 `TRAVELPAY_TEST_POSTGRES=1`을 위 Python 검사 명령 앞에 추가합니다. 포트·호스트 볼륨·외부 네트워크 없는 임시 컨테이너에서 비슈퍼유저 초기화·재실행·스키마 격리를 검사하고 제거합니다. TCP 접속에 암호 인증을 강제해 SCRAM 값으로 로그인되는지, `pg_stat_statements`에 평문 암호가 남지 않는지도 확인합니다. 실제 RDS의 확장 권한 동작과 접속 검증은 적용 후 확인합니다.
 
@@ -374,6 +419,20 @@ NAT Gateway 1개와 공인 IPv4 1개가 실제로 실행 중입니다. 서울 �
 | 제자리 반영 | association 재실행 8초 성공. 인스턴스·컨테이너 ID 3개·서비스 시작 시각·Redis 시험 키가 그대로임 |
 | 적용 후 재검사 | 본 root plan `No changes`. 시험 토픽·시험 키 삭제 |
 
-EC2·RDS·Data 기반은 실행 중이며 ECS의 애플리케이션 Task는 아직 0개입니다. 외부 환율 API 키와 Wallet 암호화 키는 앱 배포 전 별도로 준비합니다. 앱 Task의 실제 업무 통신·전체 업무 흐름과 Prometheus·Alloy·Loki·Grafana 배치는 후속 단계에서 검증합니다.
+2026-11-11 앱 실행 정의·공개 진입점·경보 단계는 다음 순서로 확인했습니다. 적용 전에 사본 코드에 결함 14개를 일부러 넣어 테스트가 모두 잡는지 보고, 독립 리뷰의 지적 11건을 근거로 확인해 반영했습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 54개·bootstrap 3개, Python 검사 61개 통과. 저장소에서 잠금을 건 plan이 검토한 잠금 없는 plan과 동작·값까지 같음 |
+| 적용 | 저장한 plan 적용: 추가 27·변경 2·삭제 0, 오류 없음(ALB 생성 2분 22초) |
+| Task 정의 | 8개 ACTIVE(리비전 1): 게시한 digest, Task 단위 CPU 없음·컨테이너 CPU와 Task 메모리가 설계표와 같음, 읽기 전용 루트, 비특권, 서비스별 비밀값·역할 |
+| ALB | HTTPS 443·TLS 1.2/1.3 정책·발급된 인증서, `api.travelpay.store`만 Gateway로·나머지 404, 유휴 1000초. Cloudflare가 아닌 주소(작업 PC)에서는 연결 시간 초과 |
+| 앱 호스트 교체 | instance refresh 약 5분 성공, 새 호스트 2대(2a·2c) ECS ACTIVE·Agent 연결·등록 메모리 6759MiB·Trunk ENI 부착 |
+| 경보 | 12개 생성, ASG 이름으로 합친 메모리·디스크 지표가 경보 차원과 같게 수집됨. 이메일 구독은 수신자 확인 대기 |
+| 시험 실행 | 앱 명령을 바꾼 Task를 실제 호스트에서 실행: 8개 서비스 모두 게시 digest로 실행, uid 10001·루트 읽기 전용·`/tmp` 쓰기, Parameter Store 비밀값 주입(값은 출력하지 않음), CPU 상한 없음(`cpu.max=max`), 시작 스크립트의 Task IP 추출, Task ENI에서 Redis 두 개·Kafka·RDS TCP 연결, 로그가 서비스 로그 그룹에 기록 |
+| 비밀값 | 키 준비 전에는 Exchange Task가 `TaskFailedToStart`(파라미터 없음)로 시작 전에 멈춤. 준비 후 Wallet 키는 32바이트로 풀리고, 환율 API 키는 공백·끝 `;` 없이 실제 API 1회 호출이 HTTP 200·23개 통화·`result=1` |
+| 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task·사용 중 Task ENI 0개, Data 설정 묶음은 다시 적용되지 않음 |
+
+ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱의 실제 기동(RDS 인증서 검증 접속·Flyway)과 업무 통신은 ECS Service를 만드는 PR4에서 검증합니다. Prometheus·Alloy·Loki·Grafana 배치는 다음 단계에서 검증합니다.
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).

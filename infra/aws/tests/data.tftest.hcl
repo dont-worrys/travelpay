@@ -28,9 +28,12 @@ variables {
   enable_database_bootstrap_access = false
   enable_github_deployment         = false
   aws_account_id                   = "123456789012"
+  alert_email                      = "ops@example.com"
   availability_zones               = { a = "ap-northeast-2a", b = "ap-northeast-2c" }
   enable_app_foundation            = true
   enable_data_foundation           = true
+  enable_app_runtime               = false
+  application_images               = null
   ecs_ami_id                       = "ami-0123456789abcdef0"
   data_ami_id                      = "ami-0123456789abcdef1"
 }

@@ -128,3 +128,48 @@ variable "data_ami_id" {
     error_message = "서버 생성 전 고정할 Data AMI ID를 입력해야 합니다."
   }
 }
+
+variable "enable_app_runtime" {
+  description = "이미지 게시와 공개 인증서 발급(ISSUED)을 확인한 뒤 Task 정의·ALB를 만듭니다. ECS Service는 만들지 않습니다."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.enable_app_runtime || (var.enable_app_foundation && var.enable_data_foundation)
+    error_message = "Task 정의는 ECR·로그 그룹(앱 기반)과 DB·사설 DNS(데이터 기반)를 쓰므로 두 기반을 먼저 켜야 합니다."
+  }
+}
+
+variable "application_images" {
+  description = "서비스별 배포 이미지입니다. publish-images.py가 기록한 application-images.auto.tfvars.json의 digest 주소입니다."
+  type        = map(string)
+  default     = null
+
+  validation {
+    condition = var.application_images == null ? !var.enable_app_runtime : (
+      sort(keys(var.application_images)) == sort(keys(local.application_services)) &&
+      alltrue([
+        for key, image in var.application_images : can(regex(
+          "^${var.aws_account_id}\\.dkr\\.ecr\\.${local.runtime_region}\\.amazonaws\\.com/travelpay/${local.application_services[key].name}@sha256:[0-9a-f]{64}$",
+          image,
+        ))
+      ])
+    )
+    error_message = "8개 서비스 모두 이 계정 ECR의 같은 이름 저장소 이미지를 태그가 아닌 digest(@sha256:)로 지정해야 합니다."
+  }
+}
+
+variable "alert_email" {
+  description = "CloudWatch 경보를 받을 이메일입니다. AWS가 보내는 구독 확인 메일의 링크를 눌러야 알림이 전달됩니다."
+  type        = string
+  default     = null
+  sensitive   = true
+
+  validation {
+    condition = var.alert_email == null ? !(var.enable_app_foundation || var.enable_data_foundation) : can(regex(
+      "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.alert_email,
+    ))
+    error_message = "앱·데이터 기반을 켜면 경보를 받을 올바른 이메일 주소가 필요합니다."
+  }
+}

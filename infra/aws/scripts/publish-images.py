@@ -71,7 +71,10 @@ def publish(images, run, aws, login):
         digest = existing_digest(aws, image)
         if digest is None:
             reference = f"{image['url']}:{image['tag']}"
-            run(["docker", "build", "--platform", "linux/amd64", "-f", str(ROOT / "deploy" / "docker" / "Dockerfile"),
+            # 기본 provenance 증명을 붙이면 푸시 1번이 ECR 항목 3개(index·이미지·증명)가 되어
+            # 수명 주기의 "최근 10개"가 배포 3~4번분으로 줄고, 스캔 결과도 태그가 아닌 하위 이미지에 붙습니다.
+            run(["docker", "build", "--platform", "linux/amd64", "--provenance=false",
+                 "-f", str(ROOT / "deploy" / "docker" / "Dockerfile"),
                  "--build-arg", f"SERVICE={image['module']}", "-t", reference, str(ROOT)], capture=False)
             run(["docker", "push", reference], capture=False)
             digest = existing_digest(aws, image)
