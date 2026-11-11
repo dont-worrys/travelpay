@@ -2,11 +2,19 @@ package com.travelpay.exchange.application.rate;
 
 import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import com.travelpay.exchange.domain.rate.CollectedRate;
 import com.travelpay.exchange.domain.rate.ExchangeRate;
@@ -109,6 +117,66 @@ class PreviousRateCacheTest {
         when(clock.instant()).thenReturn(NOW.plus(PreviousRateCache.RETRY_AFTER));
         assertEquals(Optional.of(previous), cache.find(jpy("838.30", DAY_2)));
         verify(repository, times(2)).findLatestBefore(RateSource.MOCK, ForeignCurrency.JPY, DAY_2);
+    }
+
+    /**
+     * DB가 느리면 요청은 기다리는 시간(여기서는 50ms)만 기다리고 전일 대비 없이 응답합니다(#272 리뷰).
+     * DB 읽기는 뒤에서 이어져, 끝나면 다음 요청부터 값이 나오고 DB는 다시 읽지 않습니다.
+     */
+    @Test
+    void doesNotWaitForSlowDbBeyondWaitTime() throws Exception {
+        ExchangeRate previous = jpy("836.20", DAY_1);
+        CountDownLatch dbReleased = new CountDownLatch(1);
+        when(repository.findLatestBefore(RateSource.MOCK, ForeignCurrency.JPY, DAY_2)).thenAnswer(invocation -> {
+            dbReleased.await(5, TimeUnit.SECONDS);
+            return Optional.of(previous);
+        });
+        PreviousRateCache slowDbCache = new PreviousRateCache(repository, clock, Duration.ofMillis(50));
+
+        long started = System.nanoTime();
+        assertTrue(slowDbCache.find(jpy("838.30", DAY_2)).isEmpty());
+        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(1)) < 0, "DB를 기다리지 않음");
+
+        dbReleased.countDown();
+        assertEquals(Optional.of(previous), awaitPresent(slowDbCache, jpy("838.30", DAY_2)));
+        verify(repository, times(1)).findLatestBefore(RateSource.MOCK, ForeignCurrency.JPY, DAY_2);
+    }
+
+    /** 같은 칸에 요청이 몰려도 DB는 한 번만 읽고, DB가 느린 동안 요청들은 모두 제한 시간 안에 돌아옵니다. */
+    @Test
+    void concurrentRequestsShareOneDbReadWithoutBlocking() throws Exception {
+        CountDownLatch dbReleased = new CountDownLatch(1);
+        when(repository.findLatestBefore(RateSource.MOCK, ForeignCurrency.JPY, DAY_2)).thenAnswer(invocation -> {
+            dbReleased.await(5, TimeUnit.SECONDS);
+            return Optional.of(jpy("836.20", DAY_1));
+        });
+        PreviousRateCache slowDbCache = new PreviousRateCache(repository, clock, Duration.ofMillis(50));
+
+        try (ExecutorService requests = Executors.newFixedThreadPool(20)) {
+            List<Future<Optional<ExchangeRate>>> results = new ArrayList<>();
+            for (int i = 0; i < 20; i++) {
+                results.add(requests.submit(() -> slowDbCache.find(jpy("838.30", DAY_2))));
+            }
+            for (Future<Optional<ExchangeRate>> result : results) {
+                assertTrue(result.get(1, TimeUnit.SECONDS).isEmpty(), "DB가 느린 동안은 전일 대비 없이 바로 응답");
+            }
+        } finally {
+            dbReleased.countDown();
+        }
+        verify(repository, times(1)).findLatestBefore(RateSource.MOCK, ForeignCurrency.JPY, DAY_2);
+    }
+
+    /** 뒤에서 이어지는 DB 읽기가 끝날 때까지(최대 2초) 다시 조회합니다. */
+    private static Optional<ExchangeRate> awaitPresent(PreviousRateCache cache, ExchangeRate latest)
+            throws InterruptedException {
+        for (int i = 0; i < 40; i++) {
+            Optional<ExchangeRate> found = cache.find(latest);
+            if (found.isPresent()) {
+                return found;
+            }
+            Thread.sleep(50);
+        }
+        return Optional.empty();
     }
 
     private static ExchangeRate jpy(String mid, LocalDate rateDate) {

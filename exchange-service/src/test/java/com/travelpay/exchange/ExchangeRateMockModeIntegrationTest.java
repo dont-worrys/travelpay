@@ -156,6 +156,11 @@ class ExchangeRateMockModeIntegrationTest {
                 yesterday, LocalDate.of(2026, 11, 11), RateSource.MOCK), Instant.parse("2026-11-11T14:59:55Z")));
         collectTimes(1);
         BigDecimal latest = latestMid(RateSource.MOCK, ForeignCurrency.JPY);
+        // 전일 환율은 뒤에서 읽고 요청은 200ms까지만 기다리므로, 첫 DB 읽기가 늦으면 첫 응답에는 없을 수 있다. 나올 때까지 다시 조회
+        for (int i = 0; i < 30 && !mockMvc.perform(get("/api/v1/exchange-rates")).andReturn().getResponse()
+                .getContentAsString().contains("\"previousMidRate\":\"840\""); i++) {
+            Thread.sleep(100);
+        }
 
         String body = mockMvc.perform(get("/api/v1/exchange-rates"))
                 .andExpect(status().isOk())
