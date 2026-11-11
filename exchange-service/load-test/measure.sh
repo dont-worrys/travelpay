@@ -140,6 +140,10 @@ printf "SELECT extract(epoch FROM now())::bigint, (SELECT count(*) FROM pg_stat_
 session_pid=$!
 
 k6_started=$(date +%s)
+# k6가 결과 JSON을 쓴 뒤 어디서든 실패로 끝나면(set -e로 멈추는 명령 포함: PowerShell·psql·redis-cli·지표 정리)
+# k6 결과만 남고 지표 요약(-db.json)은 없는 반쪽 결과가 된다. 그러면 SUMMARY_ONLY 요약이 그 회차에서 막히므로,
+# 끝날 때 k6 결과와 만들던 요약을 지우도록 걸어 두고, 결과 파일을 다 만든 뒤에만 푼다
+trap 'rm -f "results/${LABEL}-vus${VUS}.json" "$summary.tmp"' EXIT
 docker compose run --rm -e VUS="${VUS}" -e LABEL="${LABEL}" -e WARMUP="${WARMUP_SECONDS}s" \
     -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet "/scripts/${SCRIPT}"
 k6_ended=$(date +%s)
@@ -301,5 +305,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
     }
 # 검사를 모두 통과했을 때만 결과 파일을 만든다 (실패하면 빈 결과 파일도 남기지 않음)
 mv "$summary.tmp" "$summary"
+# k6 결과와 지표 요약이 모두 갖춰졌으니 실패 시 지우기를 푼다
+trap - EXIT
 
 cat "$summary"
