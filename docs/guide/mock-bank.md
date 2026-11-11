@@ -332,17 +332,18 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 | 대상 | `POST /internal/v1/bank/withdrawals` 중 본문 `bankCode`가 붙잡기 켜진 은행인 요청. **환불·조회는 대상 아님** |
 | 붙잡는 방식 | **처리 전에** 대기 시간만큼 기다린 뒤 원래대로 처리·응답. 호출 쪽이 읽기 시간 초과로 먼저 끊으면 결과를 받지 못하지만 거래는 그 뒤에 처리·커밋됨(`docker compose pause` 후 재개와 같음). 같은 `requestId`로 다시 보내면 기존 결과 |
 | 대기 시간 | API로 받음(`delaySeconds` 1~600초). 결과 모름을 만들려면 지갑 읽기 시간 초과(5초)보다 길게 씀 |
-| 끄기 | 그 은행의 새 출금은 바로 처리. **기다리던 출금도 바로 풀려** 처리됨 |
+| 끄기 | 그 은행의 새 출금은 바로 처리. **기다리던 출금도 바로 풀려** 처리됨(대기 시간을 바꾸기 전부터 기다리던 출금 포함) |
 | 보관 | 메모리. Mock 은행을 다시 띄우면 모두 꺼짐. 인스턴스가 여러 개면 인스턴스마다 따로 켬 |
 | 다른 장애 주입과 함께 | 붙잡은 뒤 처리할 때 `Mock-Fault` 헤더·유실 비율이 그대로 적용됨 |
 | 본문 이상 | 본문이 JSON이 아니거나 `bankCode`가 없으면 붙잡지 않고 원래 처리(검증 오류 400) |
+| 본문 크기 | 붙잡기가 하나라도 켜져 있으면 출금 본문을 읽어 담으므로 8KiB를 넘으면 413(`Content-Length`가 없는 chunked도 읽으면서 끊음). 검증을 통과하는 가장 큰 출금 본문은 약 1.3KB |
 
 API(세 API 모두 현재 붙잡기 목록을 은행 코드 순으로 돌려줌):
 
 | API | 요청 | 비고 |
 |---|---|---|
 | `GET /internal/v1/bank/faults/withdrawal-holds` | | 켜진 은행이 없으면 `data: []` |
-| `PUT /internal/v1/bank/faults/withdrawal-holds/{bankCode}` | `{"delaySeconds": 30}` | 이미 켜져 있으면 대기 시간만 바꿈(이미 기다리던 출금은 이전 대기 시간 그대로) |
+| `PUT /internal/v1/bank/faults/withdrawal-holds/{bankCode}` | `{"delaySeconds": 30}` | 이미 켜져 있으면 대기 시간만 바꿈(이후 출금부터 적용, 이미 기다리던 출금은 이전 대기 시간 그대로이며 끄면 함께 풀림) |
 | `DELETE /internal/v1/bank/faults/withdrawal-holds/{bankCode}` | | 켜져 있지 않은 은행이어도 200 |
 
 목록 항목:
@@ -377,6 +378,7 @@ curl -s -X DELETE localhost:8090/internal/v1/bank/faults/withdrawal-holds/004
 | 404 | `BANK_TRANSACTION_NOT_FOUND` | 단건 조회에서 `requestId` 기록 없음 |
 | 404 | `COMMON_NOT_FOUND` | 없는 경로 |
 | 409 | `BANK_REQUEST_ID_CONFLICT` | 같은 `requestId`로 다른 유형 또는 다른 내용의 거래가 이미 있음 |
+| 413 | `COMMON_PAYLOAD_TOO_LARGE` | 출금 붙잡기가 켜져 있을 때 출금 본문이 8KiB 초과 |
 | 500 | `COMMON_INTERNAL_SERVER_ERROR` | 예상하지 못한 오류, `Mock-Fault: LOST`, 출금 응답 유실 비율 |
 
 업무 거절은 이 표에 없습니다. 200 + `FAILED` + [실패 코드](#실패-코드)입니다.
@@ -425,7 +427,7 @@ Testcontainers 통합 테스트는 PostgreSQL 컨테이너(`postgres:18.6-bookwo
 | `BankFaultInjectionProdProfileTest` | `application-prod.yml` + prod 프로필 + `enabled=true`에서 `Mock-Fault: LOST`를 무시하고 201, 장애 주입 필터 빈 없음, 출금 붙잡기 빈 없음·API 404 |
 | `BankFaultInjectionDisabledByDefaultTest` | `enabled` 지정 없음(`application.yml` 기본 false) + 유실 비율 1.0: `Mock-Fault: LOST`·비율 모두 무시하고 201, 필터·설정·출금 붙잡기 빈 없음, 붙잡기 API 404 |
 | `BankFaultEnabledConditionTest` | Docker 불필요. `enabled` 키 없음·`false`·그 외 값이면 빈 없음(범위 밖 비율도 기동), `true`면 빈 생성(출금 붙잡기 포함)·범위 밖 비율 기동 실패 |
-| `BankWithdrawalHoldIntegrationTest` | `enabled=true`. 켠 은행 출금은 대기 중 응답 없음(클라이언트 1초 시간 초과)·기록 없음 → 대기 뒤 처리·커밋, 대기보다 오래 기다리면 원래 201, 다른 은행 출금·환불은 바로 201, 끄면 기다리던 출금이 풀리고 새 출금은 바로 201, 목록(은행 코드 순·대기 시간 변경·`heldCount`·끄지 않은 은행 끄기 200), 잘못된 은행 코드·대기 시간 400(상태 불변), 붙잡은 뒤에도 본문을 다시 읽어 검증 오류 400 |
+| `BankWithdrawalHoldIntegrationTest` | `enabled=true`. 켠 은행 출금은 대기 중 응답 없음(클라이언트 1초 시간 초과)·기록 없음 → 대기 뒤 처리·커밋, 대기보다 오래 기다리면 원래 201, 다른 은행 출금·환불은 바로 201, 끄면 기다리던 출금이 풀리고 새 출금은 바로 201, 대기 시간을 바꾼 뒤 끄면 바꾸기 전부터 기다리던 출금도 풀림(바꾼 뒤 출금은 새 대기 시간), 8KiB 넘는 출금 본문(Content-Length·chunked) 413·정상 chunked 출금 201, 목록(은행 코드 순·대기 시간 변경·`heldCount`·끄지 않은 은행 끄기 200), 잘못된 은행 코드·대기 시간 400(상태 불변), 붙잡은 뒤에도 본문을 다시 읽어 검증 오류 400 |
 | `BankTransactionQueryApiIntegrationTest` | 단건 필드·환불 원거래·실패 코드, 404, 반복 조회해도 거래 불변, `[from, to)` 경계, 빈 목록, 같은 시각 ID 정렬, 페이지 이어 받기, 오프셋 시각 UTC 해석, `sort` 무시, 입력 오류 400, `size` 기본 20·최대 100, offset 한도, 마이크로초 올림, 목록 응답에 계좌 정보 없음 |
 | `BankWithdrawalLostRateIntegrationTest` | `enabled=true`, 비율 1.0: 성공·`FAILED` 모두 500(본문은 헤더 `LOST`와 같음), 단건 조회로 저장 확인, 같은 `requestId` 재요청도 500, 400·409는 원래 응답, 헤더 `DELAY`·`LOST`는 기존 동작이며 카운터 증가 없음, 환불 미적용, 카운터는 유실 건수만큼 증가 |
 | `BankWithdrawalLostRatePropertiesTest` | Docker 불필요. -0.1·1.1 기동 실패, 0·1.0 기동 성공, 비율 0이면 필터를 건너뜀, 헤더 요청·환불·조회에는 미적용 |
