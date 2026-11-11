@@ -78,12 +78,19 @@ docker compose exec -T measure-redis redis-cli FLUSHALL >/dev/null
 docker compose exec -T measure-redis redis-cli CONFIG RESETSTAT >/dev/null
 
 # 측정 조건(#250): PC 상태와 측정 앱의 히스토그램·Prometheus 연결 여부. k6 직전·직후에 읽어 결과 파일에 남긴다
-# 히스토그램 값은 실제로 뜬 앱의 실행 명령에서 읽는다(환경 변수를 잘못 넘겨도 실제 상태가 기록되게)
-histogram=$(docker inspect "$(docker compose ps -q app)" --format '{{json .Config.Cmd}}' \
-    | grep -o 'percentiles-histogram.http.server.requests=[a-z]*' | cut -d= -f2 || true)
+# 히스토그램 값은 실제로 뜬 앱의 실행 명령에서 읽는다(환경 변수를 잘못 넘겨도 실제 상태가 기록되게).
+# 앱 컨테이너를 찾지 못하거나 inspect가 실패하면 조건을 모르는 채 결과를 남기지 않도록 멈춘다(set -e).
+# grep만 "없음"을 허용해 unset으로 둔다: 옵션이 빠진 compose로 띄운 경우라 그대로 기록한다
+app_id=$(docker compose ps -q app)
+if [ -z "$app_id" ]; then
+    echo "측정 앱 컨테이너를 찾지 못했습니다 (docker compose ps -q app이 비어 있음)." >&2
+    exit 1
+fi
+app_cmd=$(docker inspect "$app_id" --format '{{json .Config.Cmd}}')
+histogram=$(echo "$app_cmd" | grep -o 'percentiles-histogram.http.server.requests=[a-z]*' | cut -d= -f2 || true)
 histogram=${histogram:-unset}
 # 측정 앱과 같은 Docker 네트워크에 붙은 Prometheus가 있으면 측정 중에 앱 지표를 수집한다(모니터링 켬)
-app_network=$(docker inspect "$(docker compose ps -q app)" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+app_network=$(docker inspect "$app_id" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
 prometheus=off
 if docker ps --filter "network=${app_network}" --format '{{.Image}}' | grep -q 'prom/prometheus'; then
     prometheus=on

@@ -330,7 +330,15 @@ MEASURE_HISTOGRAM=false SCRIPT=quote-issue.js ./measure-compare.sh quote250 quot
 - 그래서 `연결 얻은 횟수`는 0이 아니라, 캐시 miss 몫과 수집기(5초마다)·복구 스케줄러·지표 갱신(30초마다)이 쓴 만큼 남습니다(환율 조회 v1과 비슷한 수준).
 - 견적 발급 요약 표에는 저장된 견적 수 / 성공 응답 수와 측정 Redis 사용 메모리(회차 중 최대)가 붙습니다.
 - 환율 조회를 다시 잴 때는 `unset MEASURE_REDIS_MAXMEMORY MEASURE_REDIS_POLICY` 후 `docker compose up -d --force-recreate --wait measure-redis`로 기본값(128MB·allkeys-lru)으로 돌립니다.
-- 결과(2026-11-10, #250)는 결과 파일 `results/quote250-*`와 [견적 저장소 Redis 전환 설계·측정 기록](https://claude.ai/artifact/A85umbeqG876f37rKvfidz)에 있습니다. 동시 300에서 TPS 3,051 → 14,525(4.8배), P95 226 → 33.9ms, 견적 발급의 DB 연결 사용 0. Redis 견적 jar는 순간 멈칫(200ms 넘는 Redis 명령)에 503을 내 측정 구간 실패로 무효가 되는 회차가 가끔 생깁니다. 규칙대로 그 회차만 다시 잽니다(`APP_JAR=… ./measure.sh quote250-quote-redis-r5 100` 후 `SUMMARY_ONLY=1 ./measure-compare.sh …`).
+- 결과(2026-11-10, #250)는 결과 파일 `results/quote250-*`와 [견적 저장소 Redis 전환 설계·측정 기록](https://claude.ai/artifact/A85umbeqG876f37rKvfidz)에 있습니다. 동시 300에서 TPS 3,051 → 14,525(4.8배), P95 226 → 33.9ms, 견적 발급의 DB 연결 사용 0. Redis 견적 jar는 순간 멈칫(200ms 넘는 Redis 명령)에 503을 내 측정 구간 실패로 무효가 되는 회차가 가끔 생깁니다. 규칙대로 그 회차만 다시 잽니다. 환경 변수는 명령마다 사라지므로 **공식 측정과 같은 값을 다시 모두 붙입니다.** 빠지면 히스토그램이 켜지거나(기본 true) 환율 조회 스크립트로 재고 견적 검산을 건너뜁니다.
+
+```bash
+export MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction   # 같은 셸에서 이어 잼
+MEASURE_HISTOGRAM=false SCRIPT=quote-issue.js APP_JAR=../../../travelpay-quote-redis/$J ./measure.sh quote250-quote-redis-r5 100
+SUMMARY_ONLY=1 SCRIPT=quote-issue.js ./measure-compare.sh quote250 quote-db=../../../travelpay-quote-db/$J quote-redis=../../../travelpay-quote-redis/$J
+```
+
+다시 잰 회차의 `-db.json`에서 `conditions.histogram`이 `"false"`, `conditions.prometheus`가 `"off"`인지 확인합니다.
 
 ## 모니터링 연결 (Grafana 캡처)
 
@@ -349,11 +357,13 @@ MEASURE_HISTOGRAM=false SCRIPT=quote-issue.js ./measure-compare.sh quote250 quot
 cp infra/monitoring/prometheus/load-test/targets.example.yml infra/monitoring/prometheus/load-test/targets.local.yml   # 처음 한 번 (Git 제외 파일)
 MONITORING_LOAD_TEST_NETWORK=travelpay-load-test_default \
 MONITORING_LOAD_TEST_TARGETS_FILE=./infra/monitoring/prometheus/load-test/targets.local.yml \
-docker compose -f compose.monitoring.yaml -f compose.monitoring.load-test.yaml up -d
+docker compose -f compose.monitoring.yaml -f compose.monitoring.load-test.yaml up -d --no-deps prometheus grafana
 ```
 
+- **Prometheus와 Grafana만 띄웁니다**(`--no-deps`). Loki·Alloy는 측정 앱 로그를 모으지 않아 측정에 쓰지 않고, 띄우면 측정 중 메모리·CPU만 씁니다(위 "측정 전 PC 조건" 5번). 이미 떠 있다면 `docker stop travelpay-monitoring-loki-1 travelpay-monitoring-alloy-1`로 멈춥니다. Grafana의 로그 패널만 비고 지표 패널은 그대로입니다.
+
 - Grafana(`http://localhost:3000`)에서 **메트릭 환경 = `load-test`**를 고릅니다. Prometheus 대상(`localhost:9090/targets`)에서 `app:18085`가 UP인지 확인합니다.
-- 공식 측정 동안은 `docker stop travelpay-monitoring-prometheus-1 travelpay-monitoring-grafana-1`로 멈추고, 캡처용 측정 전에 `docker start`로 켭니다. 결과 파일의 `conditions.prometheus`로 확인할 수 있습니다.
+- 공식 측정 동안은 `docker stop travelpay-monitoring-prometheus-1 travelpay-monitoring-grafana-1`로 멈추고, 캡처용 측정 전에 `docker start`로 켭니다. 공식 측정 중에는 모니터링 컨테이너가 하나도 떠 있지 않아야 합니다(`docker ps --filter name=travelpay-monitoring`이 비어 있음). Prometheus 수집 여부는 결과 파일의 `conditions.prometheus`로 확인할 수 있습니다.
 - Prometheus 수집 간격은 15초라, 15초보다 짧은 측정은 그래프에 처리량이 그려지지 않습니다(합계만 남음). 캡처는 예열 30초 + 측정 2분 기본값이면 충분합니다.
 - 데이터는 72시간 보관됩니다. 캡처는 그 안에 측정 시각 범위를 지정해 합니다.
 - Grafana 값은 서버 안에서 잰 시간이고 1분 단위로 묶여, k6 값과 다릅니다(k6는 네트워크·앱 앞 대기를 포함). 숫자는 결과 표, 그래프는 모양만 씁니다.
