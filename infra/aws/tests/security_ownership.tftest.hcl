@@ -7,8 +7,13 @@ mock_provider "aws" {
 }
 
 variables {
-  aws_account_id     = "123456789012"
-  availability_zones = { a = "ap-northeast-2a", b = "ap-northeast-2c" }
+  enable_app_foundation            = false
+  enable_data_foundation           = false
+  app_host_count                   = 0
+  enable_database_bootstrap_access = false
+  enable_github_deployment         = false
+  aws_account_id                   = "123456789012"
+  availability_zones               = { a = "ap-northeast-2a", b = "ap-northeast-2c" }
 }
 
 # 규칙 ID가 확정된 뒤의 참조를 검사합니다. 모든 AWS 요청은 위 mock Provider가 대체합니다.

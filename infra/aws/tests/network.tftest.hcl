@@ -96,7 +96,12 @@ override_resource {
 }
 
 variables {
-  aws_account_id = "123456789012"
+  enable_app_foundation            = false
+  enable_data_foundation           = false
+  app_host_count                   = 0
+  enable_database_bootstrap_access = false
+  enable_github_deployment         = false
+  aws_account_id                   = "123456789012"
   availability_zones = {
     a = "ap-northeast-2a"
     b = "ap-northeast-2c"
