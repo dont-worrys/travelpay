@@ -1,0 +1,24 @@
+{
+  "metadata": { "description": "가짜 지갑(#282): 누구의 지갑이든 사용 가능한(ACTIVE) 지갑 하나와 KRW·JPY·CNY 계정을 돌려준다. walletId는 exchange-order.js의 WALLET_ID와 같아야 한다" },
+  "request": {
+    "method": "GET",
+    "urlPath": "/internal/v1/wallets/balances"
+  },
+  "response": {
+    "status": 200,
+    "headers": { "Content-Type": "application/json" },
+    "jsonBody": {
+      "success": true,
+      "data": {
+        "walletId": "33333333-3333-4333-8333-333333333333",
+        "status": "ACTIVE",
+        "balances": [
+          { "currency": "KRW", "balance": 1000000000000, "status": "ACTIVE" },
+          { "currency": "JPY", "balance": 1000000000000, "status": "ACTIVE" },
+          { "currency": "CNY", "balance": 1000000000000, "status": "ACTIVE" }
+        ]
+      },
+      "error": null
+    }
+  }
+}

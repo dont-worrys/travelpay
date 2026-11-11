@@ -1,0 +1,15 @@
+{
+  "metadata": { "description": "가짜 원장(#282): 거래 등록을 항상 반영됨(POSTED)으로 답한다. measure-ledger.sh가 회차마다 관리 API로 이 매핑(id 고정)의 지연(fixedDelayMilliseconds)을 바꿔 원장 정상·느림·시간 초과를 만든다" },
+  "id": "8f1e2a64-2c1b-4d6e-9a1f-0c2b3d4e5f60",
+  "request": {
+    "method": "POST",
+    "urlPath": "/internal/v1/ledger/transactions"
+  },
+  "response": {
+    "status": 201,
+    "fixedDelayMilliseconds": 0,
+    "headers": { "Content-Type": "application/json" },
+    "body": "{\"success\":true,\"data\":{\"transactionId\":\"{{randomValue type='UUID'}}\",\"status\":\"POSTED\"},\"error\":null}",
+    "transformers": ["response-template"]
+  }
+}
