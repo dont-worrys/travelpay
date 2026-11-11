@@ -60,3 +60,4 @@ crash.*.log
 *.auto.tfvars
 *.auto.tfvars.json
 /infra/aws/**/backend.hcl
+/infra/aws/**/__pycache__/

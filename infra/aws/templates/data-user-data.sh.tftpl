@@ -1,0 +1,47 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+timeout 300 dnf install -y docker amazon-ssm-agent amazon-cloudwatch-agent awscli-2 postgresql18 python3 e2fsprogs util-linux
+systemctl enable --now docker amazon-ssm-agent
+install -d -m 0700 /opt/travelpay/data
+python3 - <<'PY'
+import base64, gzip, json
+from pathlib import Path
+root = Path('/opt/travelpay/data')
+for name, contents in json.loads(gzip.decompress(base64.b64decode('${assets}'))).items():
+    target = root / name
+    target.write_text(contents)
+    target.chmod(0o600)
+PY
+
+# 버전과 해시를 Terraform에 고정하고 다운로드 결과를 검증합니다.
+read -r compose_version compose_sha256 < <(python3 - <<'PY'
+import json
+from pathlib import Path
+c = json.loads(Path('/opt/travelpay/data/runtime.json').read_text())
+print(c['compose_version'], c['compose_sha256'])
+PY
+)
+install -d -m 0755 /usr/local/lib/docker/cli-plugins
+curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+  "https://github.com/docker/compose/releases/download/$compose_version/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose.download
+printf '%s  %s\n' "$compose_sha256" /usr/local/lib/docker/cli-plugins/docker-compose.download | sha256sum --check --status
+mv /usr/local/lib/docker/cli-plugins/docker-compose.download /usr/local/lib/docker/cli-plugins/docker-compose
+chmod 0755 /usr/local/lib/docker/cli-plugins/docker-compose
+curl --fail --silent --show-error --location --retry 3 --max-time 60 \
+  https://truststore.pki.rds.amazonaws.com/ap-northeast-2/ap-northeast-2-bundle.pem \
+  -o /opt/travelpay/data/rds-ca.pem
+
+# EBS가 확인되기 전에는 root 디스크에 Kafka 데이터를 만들지 않습니다.
+python3 /opt/travelpay/data/mount-data-volumes.py
+install -d -m 0755 /opt/aws/amazon-cloudwatch-agent/etc
+cat > /opt/aws/amazon-cloudwatch-agent/etc/travelpay.json <<'CWCONFIG'
+${cloudwatch_agent}
+CWCONFIG
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/travelpay.json -s
+install -m 0644 /opt/travelpay/data/travelpay-data.service /etc/systemd/system/travelpay-data.service
+systemctl daemon-reload
+systemctl enable --now --no-block travelpay-data.service

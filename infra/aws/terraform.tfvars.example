@@ -11,3 +11,18 @@ vpc_cidr = "10.20.0.0/16"
 
 # DB 초기화 때만 한시적으로 true를 사용하고 완료 후 false로 되돌립니다.
 enable_database_bootstrap_access = false
+
+# GitHub production Environment의 배포 브랜치는 main으로 제한합니다.
+github_repository        = "dont-worrys/travelpay"
+github_environment       = "production"
+enable_github_deployment = false
+
+# 유료 기반의 생성은 별도 plan 검토 후 활성화합니다.
+# 공개 AMI도 버전이 바뀔 수 있으므로 실제 제공 상태를 확인하여 고정합니다.
+enable_app_foundation  = false
+enable_data_foundation = false
+ecs_ami_id             = null
+data_ami_id            = null
+
+# 최초에는 빈 ASG·Capacity Provider를 먼저 준비합니다. 연결 확인 후 2로 변경합니다.
+app_host_count = 0
