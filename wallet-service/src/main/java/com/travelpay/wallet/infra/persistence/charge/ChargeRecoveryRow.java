@@ -11,4 +11,6 @@ public interface ChargeRecoveryRow {
     String getStatus();
 
     Instant getUpdatedAt();
+
+    String getBankCode();
 }

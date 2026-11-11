@@ -20,4 +20,8 @@ public sealed interface BankResult {
     /** 409·400·그 밖의 4xx·응답 형식 이상: 재시도로 풀리지 않음. cause는 last_error에 남길 원인 */
     record Invalid(String cause) implements BankResult {
     }
+
+    /** 그 은행의 서킷이 열려 있어 보내지 않음. 은행은 요청을 받지 않았으므로 실행기는 아무것도 쓰지 않고 멈춘다 */
+    record NotSent(String bankCode) implements BankResult {
+    }
 }

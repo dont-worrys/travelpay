@@ -4,6 +4,7 @@ import com.travelpay.common.response.ApiResponse;
 import com.travelpay.wallet.application.charge.dto.BankResult;
 import feign.FeignException;
 import feign.codec.EncodeException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -138,13 +139,16 @@ class BankClientAdapterTest {
         when(feignClient.refund(any())).thenReturn(ApiResponse.success(
                 new BankTransactionResponse(UUID.randomUUID(), REQUEST_ID, "REFUND", "SUCCEEDED", null)));
 
-        adapterWithMode(mode).refund(REQUEST_ID, originalTxId, 10_000);
+        adapterWithMode(mode).refund(REQUEST_ID, "004", originalTxId, 10_000);
 
         verify(feignClient).refund(new BankRefundRequest(REQUEST_ID, originalTxId, 10_000));
     }
 
     private BankClientAdapter adapterWithMode(String mode) {
-        return new BankClientAdapter(feignClient, new BankFaultInjection(mode, new MockEnvironment()));
+        // 응답 해석만 보는 테스트라 서킷은 매번 새 레지스트리 (호출 수가 창보다 적어 열리지 않음)
+        return new BankClientAdapter(feignClient, new BankFaultInjection(mode, new MockEnvironment()),
+                BankCircuitBreakerConfig.registry(BankCircuitBreakerConfig.config(BankCircuitBreakerTestSupport.properties()),
+                        new SimpleMeterRegistry()));
     }
 
     private static BankTransactionResponse succeededWithdrawal() {
@@ -169,6 +173,6 @@ class BankClientAdapterTest {
     }
 
     private BankResult refund() {
-        return adapter.refund(REQUEST_ID, UUID.randomUUID(), 10_000);
+        return adapter.refund(REQUEST_ID, "004", UUID.randomUUID(), 10_000);
     }
 }
