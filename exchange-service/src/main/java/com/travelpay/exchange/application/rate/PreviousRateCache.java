@@ -9,6 +9,7 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -51,19 +52,23 @@ public class PreviousRateCache {
     private final ExchangeRateRepository repository;
     private final Clock clock;
     private final Duration wait;
-    private final ExecutorService loader = Executors.newVirtualThreadPerTaskExecutor();
+    private final Executor loader;
     private final Map<Slot, Entry> entries = new ConcurrentHashMap<>();
 
     @Autowired
     public PreviousRateCache(ExchangeRateRepository repository, Clock clock) {
-        this(repository, clock, WAIT);
+        this(repository, clock, WAIT, Executors.newVirtualThreadPerTaskExecutor());
     }
 
-    /** 테스트용: 기다리는 시간을 바꿉니다. */
-    PreviousRateCache(ExchangeRateRepository repository, Clock clock, Duration wait) {
+    /**
+     * 테스트용: 기다리는 시간과 DB를 읽을 실행기를 바꿉니다.
+     * 결과를 확인하는 테스트는 그 자리에서 실행하는 실행기(Runnable::run)를 넘겨, find가 돌아올 때 읽기가 끝나 있게 합니다.
+     */
+    PreviousRateCache(ExchangeRateRepository repository, Clock clock, Duration wait, Executor loader) {
         this.repository = repository;
         this.clock = clock;
         this.wait = wait;
+        this.loader = loader;
     }
 
     /**
@@ -113,7 +118,9 @@ public class PreviousRateCache {
 
     @PreDestroy
     void shutdown() {
-        loader.shutdownNow();
+        if (loader instanceof ExecutorService executor) {
+            executor.shutdownNow();
+        }
     }
 
     private record Slot(RateSource source, ForeignCurrency currency) {

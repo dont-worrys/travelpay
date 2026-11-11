@@ -21,6 +21,7 @@ import com.travelpay.exchange.domain.rate.ExchangeRate;
 import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -32,7 +33,10 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** 전일 환율을 서버 메모리에 기억하는지 확인합니다(#272). DB는 가짜(Mockito)로 바꿔 몇 번 읽었는지 셉니다. */
+/**
+ * 전일 환율을 서버 메모리에 기억하는지 확인합니다(#272). DB는 가짜(Mockito)로 바꿔 몇 번 읽었는지 셉니다.
+ * 기억·재시도 규칙은 DB 읽기를 그 자리에서 실행해 확인하고, 기다림 제한(DB가 느릴 때)은 실제 별도 스레드로 따로 확인합니다.
+ */
 class PreviousRateCacheTest {
 
     private static final LocalDate DAY_1 = LocalDate.of(2026, 10, 27);
@@ -42,12 +46,20 @@ class PreviousRateCacheTest {
 
     private final ExchangeRateRepository repository = mock(ExchangeRateRepository.class);
     private final Clock clock = mock(Clock.class);
+    /** 기다림 제한 테스트용: 실제 별도 스레드에서 DB를 읽는다 */
+    private final ExecutorService backgroundLoader = Executors.newVirtualThreadPerTaskExecutor();
     private PreviousRateCache cache;
 
     @BeforeEach
     void setUp() {
         when(clock.instant()).thenReturn(NOW);
-        cache = new PreviousRateCache(repository, clock);
+        // 결과를 확인하는 테스트는 DB 읽기를 그 자리에서 실행해, find가 돌아올 때 읽기가 끝나 있게 한다(시간에 흔들리지 않음)
+        cache = new PreviousRateCache(repository, clock, PreviousRateCache.WAIT, Runnable::run);
+    }
+
+    @AfterEach
+    void tearDown() {
+        backgroundLoader.shutdownNow();
     }
 
     /** 최신 고시일이 같으면 두 번째부터는 DB를 읽지 않습니다. */
@@ -131,7 +143,7 @@ class PreviousRateCacheTest {
             dbReleased.await(5, TimeUnit.SECONDS);
             return Optional.of(previous);
         });
-        PreviousRateCache slowDbCache = new PreviousRateCache(repository, clock, Duration.ofMillis(50));
+        PreviousRateCache slowDbCache = new PreviousRateCache(repository, clock, Duration.ofMillis(50), backgroundLoader);
 
         long started = System.nanoTime();
         assertTrue(slowDbCache.find(jpy("838.30", DAY_2)).isEmpty());
@@ -150,7 +162,7 @@ class PreviousRateCacheTest {
             dbReleased.await(5, TimeUnit.SECONDS);
             return Optional.of(jpy("836.20", DAY_1));
         });
-        PreviousRateCache slowDbCache = new PreviousRateCache(repository, clock, Duration.ofMillis(50));
+        PreviousRateCache slowDbCache = new PreviousRateCache(repository, clock, Duration.ofMillis(50), backgroundLoader);
 
         try (ExecutorService requests = Executors.newFixedThreadPool(20)) {
             List<Future<Optional<ExchangeRate>>> results = new ArrayList<>();
