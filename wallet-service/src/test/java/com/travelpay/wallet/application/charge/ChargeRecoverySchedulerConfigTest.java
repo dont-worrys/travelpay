@@ -1,5 +1,7 @@
 package com.travelpay.wallet.application.charge;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -12,6 +14,7 @@ class ChargeRecoverySchedulerConfigTest {
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withBean(ChargeRecoverySteps.class, () -> mock(ChargeRecoverySteps.class))
             .withBean(ChargeSagaExecutor.class, () -> mock(ChargeSagaExecutor.class))
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withUserConfiguration(ChargeRecoveryScheduler.class);
 
     @Test

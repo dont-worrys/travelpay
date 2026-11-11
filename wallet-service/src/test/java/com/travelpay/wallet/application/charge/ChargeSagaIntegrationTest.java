@@ -7,6 +7,7 @@ import com.travelpay.wallet.domain.charge.AccountNumberCipher;
 import com.travelpay.wallet.domain.charge.AccountNumberCipherException;
 import com.travelpay.wallet.domain.charge.BankAccount;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
+import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.infra.kafka.ChargeSagaConsumer;
 import com.travelpay.wallet.infra.kafka.KafkaOutboxMessageSender;
 import com.travelpay.wallet.infra.kafka.WalletKafkaTopicConfig;
@@ -29,6 +30,8 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -135,8 +138,9 @@ class ChargeSagaIntegrationTest {
         givenWithdraw(new BankResult.Succeeded(bankTxId));
         givenLedger(new LedgerPostResult.Posted(ledgerTxId));
 
-        executor.execute(chargeId);
+        ChargeSagaOutcome outcome = executor.execute(chargeId);
 
+        assertOutcome(outcome, Set.of(ChargeStatus.BANK_PROCESSING, ChargeStatus.CREDIT_PROCESSING), null);
         Map<String, Object> row = chargeRow();
         assertEquals("COMPLETED", row.get("status"));
         assertEquals(bankTxId, row.get("bank_tx_id"));
@@ -234,8 +238,9 @@ class ChargeSagaIntegrationTest {
     void 은행_결과를_모르면_BANK_PROCESSING에_머물고_원장과_환불을_호출하지_않는다() {
         givenWithdraw(new BankResult.Unknown(TIMEOUT));
 
-        executor.execute(chargeId);
+        ChargeSagaOutcome outcome = executor.execute(chargeId);
 
+        assertOutcome(outcome, Set.of(), ChargeStatus.BANK_PROCESSING);
         Map<String, Object> row = chargeRow();
         assertEquals("BANK_PROCESSING", row.get("status"));
         assertEquals(1, row.get("attempt_count"));
@@ -250,8 +255,10 @@ class ChargeSagaIntegrationTest {
         givenWithdraw(new BankResult.Succeeded(bankTxId));
         givenLedger(new LedgerPostResult.Unknown(TIMEOUT));
 
-        executor.execute(chargeId);
+        ChargeSagaOutcome outcome = executor.execute(chargeId);
 
+        // 대상은 출금 단계였지만 결과 모름은 원장 단계에서 났다
+        assertOutcome(outcome, Set.of(ChargeStatus.BANK_PROCESSING), ChargeStatus.CREDIT_PROCESSING);
         Map<String, Object> row = chargeRow();
         assertEquals("CREDIT_PROCESSING", row.get("status"));
         assertEquals(bankTxId, row.get("bank_tx_id"));
@@ -269,8 +276,10 @@ class ChargeSagaIntegrationTest {
         assertEquals("BANK_PROCESSING", chargeRow().get("status"));
         assertEquals(4, chargeRow().get("attempt_count"));
 
-        executor.execute(chargeId);
+        ChargeSagaOutcome exhausted = executor.execute(chargeId);
 
+        // 한도에 이르러 MANUAL_REVIEW로 바뀐 기록도 결과 모름으로 알린다
+        assertOutcome(exhausted, Set.of(), ChargeStatus.BANK_PROCESSING);
         Map<String, Object> row = chargeRow();
         assertEquals("MANUAL_REVIEW", row.get("status"));
         assertEquals("RETRY_EXHAUSTED", row.get("failure_code"));
@@ -278,7 +287,7 @@ class ChargeSagaIntegrationTest {
         verify(bankClient, times(5)).withdraw(
                 eq(bankRequestId), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
 
-        executor.execute(chargeId);
+        assertEquals(ChargeSagaOutcome.NONE, executor.execute(chargeId));
         verify(bankClient, times(5)).withdraw(
                 anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
     }
@@ -375,6 +384,45 @@ class ChargeSagaIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    @Test
+    void 환불_결과를_모르면_환불_단계의_결과_모름으로_알린다() {
+        givenWithdraw(new BankResult.Succeeded(UUID.randomUUID()));
+        givenLedger(new LedgerPostResult.Rejected("LEDGER_REJECTED_ACCOUNT_NOT_FOUND"));
+        when(bankClient.refund(anyString(), any(), anyLong())).thenReturn(new BankResult.Unknown(TIMEOUT));
+
+        ChargeSagaOutcome outcome = executor.execute(chargeId);
+
+        assertOutcome(outcome, Set.of(ChargeStatus.BANK_PROCESSING, ChargeStatus.CREDIT_PROCESSING),
+                ChargeStatus.REFUND_PROCESSING);
+        assertEquals("REFUND_PROCESSING", chargeRow().get("status"));
+    }
+
+    @Test
+    void 결과_모름_기록이_반영되지_않아도_결과_모름으로_알린다() {
+        // 은행 호출 중 다른 실행기가 MANUAL_REVIEW로 바꿔 attempt_count 기록이 0행이 되는 경우(NOT_RECORDED)
+        when(bankClient.withdraw(anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt()))
+                .thenAnswer(invocation -> {
+                    jdbcTemplate.update("UPDATE charge_requests SET status = 'MANUAL_REVIEW' WHERE id = ?", chargeId);
+                    return new BankResult.Unknown(TIMEOUT);
+                });
+
+        ChargeSagaOutcome outcome = executor.execute(chargeId);
+
+        assertOutcome(outcome, Set.of(), ChargeStatus.BANK_PROCESSING);
+        assertEquals(0, chargeRow().get("attempt_count"));
+    }
+
+    @Test
+    void 외부_호출_없이_끝나면_빈_결과를_돌려준다() {
+        assertEquals(ChargeSagaOutcome.NONE, executor.execute(UUID.randomUUID()));
+    }
+
+    private static void assertOutcome(ChargeSagaOutcome outcome, Set<ChargeStatus> answeredAt,
+                                      ChargeStatus unknownAt) {
+        assertEquals(answeredAt, outcome.answeredAt());
+        assertEquals(Optional.ofNullable(unknownAt), outcome.unknownStatus());
     }
 
     private ConsumerRecord<String, String> chargeEvent(String eventId) {
