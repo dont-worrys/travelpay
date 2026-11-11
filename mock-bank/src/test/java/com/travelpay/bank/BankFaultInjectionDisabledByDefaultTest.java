@@ -1,6 +1,9 @@
 package com.travelpay.bank;
 
 import com.travelpay.bank.presentation.fault.BankFaultInjectionFilter;
+import com.travelpay.bank.presentation.fault.BankWithdrawalHoldController;
+import com.travelpay.bank.presentation.fault.BankWithdrawalHoldFilter;
+import com.travelpay.bank.presentation.fault.BankWithdrawalHolds;
 import com.travelpay.bank.presentation.fault.BankWithdrawalLostRateFilter;
 import com.travelpay.bank.presentation.fault.BankWithdrawalLostRateProperties;
 import org.junit.jupiter.api.Test;
@@ -25,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * mock-bank.fault.enabled를 지정하지 않으면(application.yml 기본 false) 장애 주입 빈이 없다:
- * Mock-Fault: LOST 헤더도, 유실 비율 1.0도 무시하고 정상 응답한다. Docker가 없으면 건너뛴다.
+ * Mock-Fault: LOST 헤더도, 유실 비율 1.0도 무시하고 정상 응답한다. 출금 붙잡기 API도 없다(404). Docker가 없으면 건너뛴다.
  */
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -62,9 +65,26 @@ class BankFaultInjectionDisabledByDefaultTest {
         assertEquals(0, context.getBeansOfType(BankFaultInjectionFilter.class).size());
         assertEquals(0, context.getBeansOfType(BankWithdrawalLostRateFilter.class).size());
         assertEquals(0, context.getBeansOfType(BankWithdrawalLostRateProperties.class).size());
+        assertEquals(0, context.getBeansOfType(BankWithdrawalHolds.class).size());
+        assertEquals(0, context.getBeansOfType(BankWithdrawalHoldFilter.class).size());
+        assertEquals(0, context.getBeansOfType(BankWithdrawalHoldController.class).size());
         assertEquals(2L, jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM bank_transactions WHERE request_id IN ('w-disabled-header', 'w-disabled-rate')",
                 Long.class));
+    }
+
+    @Test
+    void enabled가_없으면_출금_붙잡기_API가_없어_404다() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + port + "/internal/v1/bank/faults/withdrawal-holds/004"))
+                .timeout(Duration.ofSeconds(30))
+                .header("Content-Type", "application/json")
+                .PUT(HttpRequest.BodyPublishers.ofString("{\"delaySeconds\":30}"))
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(404, response.statusCode());
     }
 
     private HttpResponse<String> withdraw(String requestId, String fault) throws Exception {
