@@ -310,9 +310,10 @@ run "environment_points_to_private_endpoints_and_production_profile" {
       { for item in jsondecode(aws_ecs_task_definition.application["wallet"].container_definitions)[0].environment : item.name => item.value }.KAFKA_BOOTSTRAP_SERVERS == "data.travelpay.internal:9092" &&
       { for item in jsondecode(aws_ecs_task_definition.application["wallet"].container_definitions)[0].environment : item.name => item.value }.MOCK_BANK_URL == "http://mock-bank.travelpay.internal:8090" &&
       { for item in jsondecode(aws_ecs_task_definition.application["gateway"].container_definitions)[0].environment : item.name => item.value }.GATEWAY_CLOUDFLARE_PROXY_ADDRESSES == "10.20.0.0/24,10.20.1.0/24" &&
-      { for item in jsondecode(aws_ecs_task_definition.application["eureka"].container_definitions)[0].environment : item.name => item.value }.EUREKA_SERVER_RESPONSE_CACHE_UPDATE_INTERVAL_MS == "5000"
+      { for item in jsondecode(aws_ecs_task_definition.application["eureka"].container_definitions)[0].environment : item.name => item.value }.EUREKA_SERVER_RESPONSE_CACHE_UPDATE_INTERVAL_MS == "5000" &&
+      { for item in jsondecode(aws_ecs_task_definition.application["eureka"].container_definitions)[0].environment : item.name => item.value }.EUREKA_SERVER_ENABLE_SELF_PRESERVATION == "false"
     )
-    error_message = "Redis·Kafka·Mock Bank·ALB 주소와 Eureka 응답 캐시가 운영 값과 같아야 합니다."
+    error_message = "Redis·Kafka·Mock Bank·ALB 주소와 Eureka 응답 캐시·자기 보호 설정이 운영 값과 같아야 합니다."
   }
 }
 
@@ -459,6 +460,45 @@ run "runtime_contract_matches_application_configs" {
       )
     ])
     error_message = "실행 계약의 서비스 이름·업무 포트·관리 포트가 각 서비스의 application-prod.yml과 같아야 합니다."
+  }
+
+  # 운영 Task는 application-prod.yml만 읽고 기본값 없는 ${이름}을 환경 변수에서 찾습니다. 빠지면 서비스가 시작하지 못합니다.
+  assert {
+    condition = alltrue(flatten([
+      for key, service in local.application_services : [
+        for match in regexall("\\$\\{([A-Z][A-Z0-9_]*)\\}", file("${path.module}/../../${service.name}/src/main/resources/application-prod.yml")) :
+        contains(concat(
+          [for item in jsondecode(aws_ecs_task_definition.application[key].container_definitions)[0].environment : item.name],
+          [for item in try(jsondecode(aws_ecs_task_definition.application[key].container_definitions)[0].secrets, []) : item.name],
+        ), match[0])
+      ]
+    ]))
+    error_message = "application-prod.yml의 기본값 없는 자리표시자는 모두 Task 정의의 환경 변수나 비밀값이 채워야 합니다."
+  }
+
+  # 운영 Task는 application.yml을 읽지 않습니다. DB 커넥션 풀·서비스 호출 설정이 개발 설정과 다르면 장애 때 개발에서 확인한
+  # 시간보다 오래 붙잡습니다(2026-11-12 Ledger 누락: DB 무응답 시 커넥션 대기 30초, 호출하는 쪽은 5~6초에 끊음).
+  # 파일을 해석하지 못하면(예: 문서 구분 --- 추가) 검사가 꺼진 채 통과하지 않도록 해석 가능 여부도 확인합니다.
+  assert {
+    condition = alltrue([
+      for service in local.application_services : can(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application.yml"))) && can(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application-prod.yml")))
+      ]) && alltrue(flatten([
+        for key, service in local.application_services : [
+          for pair in [
+            [try(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application.yml")).spring.datasource.hikari, null), try(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application-prod.yml")).spring.datasource.hikari, null)],
+            [try(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application.yml")).spring.cloud.openfeign, null), try(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application-prod.yml")).spring.cloud.openfeign, null)],
+            [try(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application.yml")).spring.cloud.gateway.server.webflux.httpclient, null), try(yamldecode(file("${path.module}/../../${service.name}/src/main/resources/application-prod.yml")).spring.cloud.gateway.server.webflux.httpclient, null)],
+          ] : pair[0] == null || pair[0] == pair[1]
+        ]
+    ]))
+    error_message = "application.yml의 DB 커넥션 풀(Hikari)·서비스 호출(OpenFeign)·Gateway 전달(httpclient) 설정은 application-prod.yml에도 블록 전체가 같아야 합니다."
+  }
+
+  # Gateway가 다른 서비스로 넘기는 요청의 연결 대기 기본값은 30초입니다. Eureka에 남은 죽은 인스턴스로 간 요청이 그만큼
+  # 붙잡히므로(2026-11-12 리허설 실측 30.0초, 2초로 둔 뒤 2.0초) 짧게 둡니다.
+  assert {
+    condition     = try(yamldecode(file("${path.module}/../../gateway/src/main/resources/application-prod.yml")).spring.cloud.gateway.server.webflux.httpclient["connect-timeout"], 30000) <= 5000
+    error_message = "Gateway의 다른 서비스 연결 대기(httpclient.connect-timeout)는 5초 이하로 둬야 합니다."
   }
 }
 

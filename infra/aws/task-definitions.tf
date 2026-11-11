@@ -55,8 +55,14 @@ locals {
       },
       lookup({
         # Gateway는 이 주소(ALB 노드)에서 온 요청에만 Cloudflare가 전달한 클라이언트 IP를 신뢰합니다.
-        gateway  = { GATEWAY_CLOUDFLARE_PROXY_ADDRESSES = join(",", [aws_subnet.network["public_a"].cidr_block, aws_subnet.network["public_b"].cidr_block]) }
-        eureka   = { EUREKA_SERVER_RESPONSE_CACHE_UPDATE_INTERVAL_MS = "5000" }
+        gateway = { GATEWAY_CLOUDFLARE_PROXY_ADDRESSES = join(",", [aws_subnet.network["public_a"].cidr_block, aws_subnet.network["public_b"].cidr_block]) }
+        # 자기 보호 모드는 갱신이 기준(85%) 아래로 떨어지면 만료된 인스턴스를 지우지 않습니다. 등록 6개에서는 1개만 비정상 종료돼도
+        # (메모리 부족 종료 등) 기준 아래가 되어, 새 Task가 떠도 죽은 IP가 남아 요청을 받으므로 끕니다(2026-11-12 실험: 6개 중 1개·3개가
+        # 멈춘 경우 모두 켜 둔 서버는 7~8분 넘게 그대로, 끈 서버는 4~6분 안에 제거).
+        eureka = {
+          EUREKA_SERVER_RESPONSE_CACHE_UPDATE_INTERVAL_MS = "5000"
+          EUREKA_SERVER_ENABLE_SELF_PRESERVATION          = "false"
+        }
         user     = { REDIS_SESSION_HOST = local.data_host_name, REDIS_SESSION_PORT = tostring(local.tcp_connections.user_session_redis.port) }
         exchange = { REDIS_CACHE_HOST = local.data_host_name, REDIS_CACHE_PORT = tostring(local.tcp_connections.exchange_cache_redis.port) }
         wallet = {

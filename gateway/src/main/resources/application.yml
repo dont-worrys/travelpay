@@ -7,6 +7,10 @@ spring:
     gateway:
       server:
         webflux:
+          httpclient:
+            # 다른 서비스로 넘기는 요청의 연결 대기입니다. 기본 30초면 Eureka에 남은 죽은 인스턴스로 간 요청이 30초씩 붙잡히므로
+            # 세션 확인 연결(2초)과 같게 둡니다. 응답 대기는 서비스별 처리 시간이 달라 제한하지 않습니다.
+            connect-timeout: 2000
           metrics:
             enabled: true
           observability:
