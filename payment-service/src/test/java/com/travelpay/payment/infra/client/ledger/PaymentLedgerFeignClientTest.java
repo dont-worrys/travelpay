@@ -3,6 +3,8 @@ package com.travelpay.payment.infra.client.ledger;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
@@ -15,6 +17,7 @@ import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerSett
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
+import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.Entry;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.RegisterRequest;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResponse;
@@ -25,6 +28,8 @@ import feign.FeignException;
 import feign.Request;
 import feign.codec.DecodeException;
 import feign.Response;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -39,6 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -67,7 +73,8 @@ class PaymentLedgerFeignClientTest {
     @BeforeEach
     void setUp() {
         feignApi = mock(LedgerFeignApi.class);
-        ledgerClient = new PaymentLedgerFeignClient(feignApi);
+        ledgerClient = new PaymentLedgerFeignClient(feignApi,
+                CircuitBreaker.of("test", PaymentLedgerCircuitBreakerConfig.config()));
     }
 
     @Test
@@ -228,6 +235,69 @@ class PaymentLedgerFeignClientTest {
         for (int i = 0; i < 4; i++) {
             assertEquals(PaymentLedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
         }
+    }
+
+    // ── 원장 서킷 (거래 등록만, 최근 10초 20건 이상 중 절반이 실패·2초 이상이면 열림) ──
+
+    @Test
+    void stopsSendingAfterRepeatedLedgerFailures() {
+        when(feignApi.register(any())).thenThrow(FeignFailures.readTimeout());
+        for (int i = 0; i < 20; i++) {
+            assertEquals(PaymentLedgerResult.unknown(), ledgerClient.createTransaction(PAYMENT));
+        }
+
+        // 서킷이 열리면 결제·환불·정산 모두 원장에 보내지 않음
+        assertEquals(PaymentLedgerResult.notSent(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerResult.notSent(), ledgerClient.refundTransaction(REFUND));
+        assertEquals(PaymentLedgerResult.notSent(), ledgerClient.settlementTransaction(SETTLEMENT));
+        verify(feignApi, times(20)).register(any());
+    }
+
+    @Test
+    void stopsSendingWhenLedgerKeepsRespondingSlowly() {
+        // 원장은 성공 응답을 주지만 매번 3초가 걸리는 경우(느린 호출 기준 2초)
+        AtomicLong nowMillis = new AtomicLong();
+        CircuitBreaker breaker = CircuitBreaker.of("slow",
+                CircuitBreakerConfig.from(PaymentLedgerCircuitBreakerConfig.config())
+                        .currentTimestampFunction(clock -> nowMillis.get(), TimeUnit.MILLISECONDS)
+                        .build());
+        PaymentLedgerFeignClient client = new PaymentLedgerFeignClient(feignApi, breaker);
+        when(feignApi.register(any())).thenAnswer(invocation -> {
+            nowMillis.addAndGet(3_000);
+            return posted(TRANSACTION_ID);
+        });
+        for (int i = 0; i < 20; i++) {
+            assertEquals(PaymentLedgerResult.approved(TRANSACTION_ID), client.createTransaction(PAYMENT));
+        }
+
+        assertEquals(PaymentLedgerResult.notSent(), client.createTransaction(PAYMENT));
+        verify(feignApi, times(20)).register(any());
+    }
+
+    @Test
+    void ledgerRejectionsDoNotOpenCircuit() {
+        // 잔액 부족 같은 거절은 원장이 정상으로 답한 것이라 실패로 세지 않음
+        when(feignApi.register(any()))
+                .thenThrow(feignError(422, rejectedBody("LEDGER_REJECTED_INSUFFICIENT_BALANCE")));
+        for (int i = 0; i < 30; i++) {
+            assertEquals(PaymentLedgerResult.declined("잔액이 부족합니다."), ledgerClient.createTransaction(PAYMENT));
+        }
+
+        verify(feignApi, times(30)).register(any());
+    }
+
+    @Test
+    void lookupDoesNotUseCircuit() {
+        // 거래 등록으로 서킷이 열려도 운영자 처리용 조회는 원장에 보냄
+        when(feignApi.register(any())).thenThrow(FeignFailures.readTimeout());
+        for (int i = 0; i < 20; i++) {
+            ledgerClient.createTransaction(PAYMENT);
+        }
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID))
+                .thenReturn(result(TRANSACTION_ID, "POSTED", null));
+
+        assertEquals(PaymentLedgerResult.notSent(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(ReviewLedgerStatus.POSTED, ledgerClient.findPaymentTransaction(PAYMENT_ID).status());
     }
 
     // ── 원장 거래 조회 (MANUAL_REVIEW 처리) ──

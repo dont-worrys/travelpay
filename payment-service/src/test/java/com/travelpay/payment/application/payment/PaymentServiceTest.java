@@ -235,6 +235,20 @@ class PaymentServiceTest {
     }
 
     @Test
+    void keepsPendingWithoutCountingAttemptWhenLedgerCircuitIsOpen() {
+        givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
+        givenWallet();
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.notSent());
+
+        PaymentResult result = paymentService.paymentRequest(command(10_000L));
+
+        assertEquals(PaymentStatus.PENDING, result.status());
+        verify(paymentRepository, times(1)).save(any(Payment.class));
+        // 원장에 보내지 않았으므로 시도로 세지 않음
+        verify(paymentRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+    }
+
+    @Test
     void keepsPendingWhenRecordingUnknownFails() {
         givenMerchant(MerchantStatus.ACTIVE, CurrencyCode.KRW);
         givenWallet();
@@ -613,6 +627,19 @@ class PaymentServiceTest {
         assertEquals(RefundStatus.REQUESTED, result.refunds().get(0).status());
         savedHistories(1);
         verify(refundRepository).recordUnknownAttempt(eq(REFUND_ID), eq(0), eq(RefundStatus.REQUESTED), eq(null), any());
+    }
+
+    @Test
+    void keepsRefundPendingWithoutCountingAttemptWhenLedgerCircuitIsOpen() {
+        Payment payment = refundRequestedPayment();
+        when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
+        when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.notSent());
+
+        PaymentResult result = paymentService.refundRequest(refundCommand(OWNER_ID, PAYMENT_ID));
+
+        assertEquals(PaymentStatus.REFUND_PENDING, result.status());
+        assertEquals(RefundStatus.REQUESTED, result.refunds().get(0).status());
+        verify(refundRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
     }
 
     @Test
@@ -1667,6 +1694,24 @@ class PaymentServiceTest {
         verify(ledgerClient, times(3)).createTransaction(any());
         verify(paymentRepository, never()).save(any(Payment.class));
         verify(paymentRepository, times(3)).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+    }
+
+    @Test
+    void stopsPaymentRecoveryWithoutCountingAttemptsWhenLedgerCircuitIsOpen() {
+        givenClaimable();
+        List<Payment> pendings = List.of(
+                savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT),
+                savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT));
+        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(pendings);
+        when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.notSent());
+
+        RecoveryBatchResult result = paymentService.recoverPayments(NOW, 100);
+
+        // 보내지 않음도 원장 장애 신호라 연속 3번이면 멈추지만, 재시도 횟수는 늘리지 않음(MANUAL_REVIEW로 넘어가지 않음)
+        assertEquals(new RecoveryBatchResult(4, true), result);
+        verify(ledgerClient, times(3)).createTransaction(any());
+        verify(paymentRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+        verify(paymentRepository, never()).save(any(Payment.class));
     }
 
     @Test

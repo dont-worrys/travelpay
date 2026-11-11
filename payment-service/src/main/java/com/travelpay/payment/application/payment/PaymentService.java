@@ -401,6 +401,10 @@ public class PaymentService {
             case UNKNOWN -> {
                 return recordPaymentUnknown(payment);
             }
+            case NOT_SENT -> {
+                // 원장 서킷이 열려 보내지 않음. 원장에 기록이 없으니 재시도 횟수는 그대로 두고 PENDING 유지(복구 스케줄러가 다시 요청)
+                return payment;
+            }
             case NOT_ACCEPTED -> {
                 return markPaymentManualReview(payment);
             }
@@ -483,6 +487,10 @@ public class PaymentService {
         switch (paymentLedgerResult.status()) {
             case UNKNOWN -> {
                 return new RefundProgress(payment, recordRefundUnknown(refund));
+            }
+            case NOT_SENT -> {
+                // 원장 서킷이 열려 보내지 않음. 재시도 횟수는 그대로 두고 REQUESTED 유지(결제는 REFUND_PENDING)
+                return new RefundProgress(payment, refund);
             }
             case NOT_ACCEPTED -> {
                 return new RefundProgress(payment, markRefundManualReview(refund));
