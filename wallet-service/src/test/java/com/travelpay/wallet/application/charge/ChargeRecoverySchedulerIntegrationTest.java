@@ -8,6 +8,7 @@ import com.travelpay.wallet.domain.charge.BankAccount;
 import com.travelpay.wallet.domain.charge.ChargeRecoveryTarget;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -103,6 +104,7 @@ class ChargeRecoverySchedulerIntegrationTest {
     private JdbcTemplate jdbcTemplate;
 
     private ChargeRecoveryScheduler scheduler;
+    private SimpleMeterRegistry meterRegistry;
     private UUID userId;
     private UUID walletId;
 
@@ -113,7 +115,8 @@ class ChargeRecoverySchedulerIntegrationTest {
         userId = UUID.randomUUID();
         walletId = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO wallets (id, user_id, status) VALUES (?, ?, 'ACTIVE')", walletId, userId);
-        scheduler = new ChargeRecoveryScheduler(recoverySteps, executor, 10, "10s");
+        meterRegistry = new SimpleMeterRegistry();
+        scheduler = new ChargeRecoveryScheduler(recoverySteps, executor, meterRegistry, 10, "10s");
     }
 
     @Test
@@ -136,7 +139,7 @@ class ChargeRecoverySchedulerIntegrationTest {
     void 대기_시간이_지나지_않은_건은_조회되지_않는다() {
         newCharge(ChargeStatus.BANK_PROCESSING, 0, 10);
 
-        assertTrue(recoverySteps.findTargets(10).isEmpty());
+        assertTrue(allTargets(10).isEmpty());
     }
 
     @Test
@@ -149,7 +152,7 @@ class ChargeRecoverySchedulerIntegrationTest {
             notDue.add(newCharge(ChargeStatus.BANK_PROCESSING, c[0], c[1] - 2));
         }
 
-        List<UUID> found = recoverySteps.findTargets(100).stream().map(ChargeRecoveryTarget::id).toList();
+        List<UUID> found = allTargets(100).stream().map(ChargeRecoveryTarget::id).toList();
 
         assertTrue(found.containsAll(due), "대기 시간이 지난 건이 모두 조회되어야 한다");
         assertTrue(notDue.stream().noneMatch(found::contains), "대기 시간이 남은 건은 조회되지 않아야 한다");
@@ -161,7 +164,7 @@ class ChargeRecoverySchedulerIntegrationTest {
         Instant stored = jdbcTemplate.queryForObject("SELECT updated_at FROM charge_requests WHERE id = ?",
                 java.sql.Timestamp.class, chargeId).toInstant();
 
-        ChargeRecoveryTarget target = recoverySteps.findTargets(10).getFirst();
+        ChargeRecoveryTarget target = allTargets(10).getFirst();
 
         assertEquals(chargeId, target.id());
         assertEquals(stored, target.updatedAt());
@@ -173,7 +176,7 @@ class ChargeRecoverySchedulerIntegrationTest {
     @Test
     void 같은_건을_두_스레드가_동시에_선점하면_하나만_성공한다() throws Exception {
         newCharge(ChargeStatus.BANK_PROCESSING, 0, 3600);
-        ChargeRecoveryTarget target = recoverySteps.findTargets(10).getFirst();
+        ChargeRecoveryTarget target = allTargets(10).getFirst();
         CyclicBarrier barrier = new CyclicBarrier(2);
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
@@ -204,7 +207,7 @@ class ChargeRecoverySchedulerIntegrationTest {
         doAnswer(invocation -> {
             called.set(true);
             txActive.set(TransactionSynchronizationManager.isActualTransactionActive());
-            return null;
+            return ChargeSagaOutcome.NONE;
         }).when(executor).execute(any(UUID.class), anyString());
 
         scheduler.recover();
@@ -245,7 +248,7 @@ class ChargeRecoverySchedulerIntegrationTest {
         assertEquals("RETRY_EXHAUSTED", jdbcTemplate.queryForObject(
                 "SELECT failure_code FROM charge_requests WHERE id = ?", String.class, chargeId));
         pushBack(chargeId, 3600);
-        assertTrue(recoverySteps.findTargets(10).isEmpty());
+        assertTrue(allTargets(10).isEmpty());
     }
 
     @Test
@@ -273,7 +276,7 @@ class ChargeRecoverySchedulerIntegrationTest {
         verify(bankClient, never()).refund(anyString(), any(), anyLong());
 
         pushBack(chargeId, 3600);
-        assertTrue(recoverySteps.findTargets(10).isEmpty());
+        assertTrue(allTargets(10).isEmpty());
         scheduler.recover();
         verify(executor, times(1)).execute(eq(chargeId), anyString());
     }
@@ -285,7 +288,87 @@ class ChargeRecoverySchedulerIntegrationTest {
             newCharge(status, 0, 3600);
         }
 
-        assertTrue(recoverySteps.findTargets(10).isEmpty());
+        assertTrue(allTargets(10).isEmpty());
+    }
+
+    @Test
+    void 단계_묶음별_조회는_다른_묶음의_상태를_섞지_않는다() {
+        UUID requested = newCharge(ChargeStatus.REQUESTED, 0, 3600);
+        UUID withdrawing = newCharge(ChargeStatus.BANK_PROCESSING, 0, 3600);
+        UUID refunding = newCharge(ChargeStatus.REFUND_PROCESSING, 0, 3600);
+        UUID crediting = newCharge(ChargeStatus.CREDIT_PROCESSING, 0, 3600);
+
+        List<UUID> bank = ids(recoverySteps.findTargets(ChargeRecoveryGroup.BANK.statuses(), 10));
+        List<UUID> ledger = ids(recoverySteps.findTargets(ChargeRecoveryGroup.LEDGER.statuses(), 10));
+
+        assertEquals(3, bank.size());
+        assertTrue(bank.containsAll(List.of(requested, withdrawing, refunding)));
+        assertEquals(List.of(crediting), ledger);
+    }
+
+    @Test
+    void 배치보다_많이_쌓이면_한_주기에서_이어서_모두_처리한다() {
+        List<UUID> charges = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            charges.add(newCharge(ChargeStatus.BANK_PROCESSING, 0, 3600 + i));
+        }
+        // bank_tx_id·ledger_ref는 UNIQUE라 호출마다 다른 ID를 준다
+        when(bankClient.withdraw(anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt()))
+                .thenAnswer(invocation -> new BankResult.Succeeded(UUID.randomUUID()));
+        when(ledgerClient.postCharge(any(), any(), any(), anyLong()))
+                .thenAnswer(invocation -> new LedgerPostResult.Posted(UUID.randomUUID()));
+
+        scheduler.recover();
+
+        for (UUID chargeId : charges) {
+            assertEquals("COMPLETED", status(chargeId));
+        }
+        verify(executor, times(25)).execute(any(UUID.class), anyString());
+    }
+
+    @Test
+    void 은행_결과_모름이_3번_연달아_나오면_이번_주기의_은행_묶음_처리를_멈춘다() {
+        for (int i = 0; i < 5; i++) {
+            newCharge(ChargeStatus.BANK_PROCESSING, 0, 3600 + i);
+        }
+        UUID crediting = newCharge(ChargeStatus.CREDIT_PROCESSING, 0, 3600);
+        givenWithdraw(new BankResult.Unknown(TIMEOUT));
+        givenLedger(new LedgerPostResult.Posted(UUID.randomUUID()));
+
+        scheduler.recover();
+
+        verify(bankClient, times(3)).withdraw(
+                anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt());
+        assertEquals("COMPLETED", status(crediting));
+        Integer untouched = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM charge_requests WHERE status = 'BANK_PROCESSING' AND attempt_count = 0",
+                Integer.class);
+        assertEquals(2, untouched);
+    }
+
+    @Test
+    void 멈춘_충전_수는_생성_후_30분이_지난_처리_중_충전만_센다() {
+        UUID oldRequested = newCharge(ChargeStatus.REQUESTED, 0, 10);
+        UUID oldCrediting = newCharge(ChargeStatus.CREDIT_PROCESSING, 0, 10);
+        UUID oldCompleted = newCharge(ChargeStatus.COMPLETED, 0, 10);
+        UUID oldManualReview = newCharge(ChargeStatus.MANUAL_REVIEW, 0, 10);
+        newCharge(ChargeStatus.BANK_PROCESSING, 0, 10);
+        for (UUID chargeId : List.of(oldRequested, oldCrediting, oldCompleted, oldManualReview)) {
+            jdbcTemplate.update("UPDATE charge_requests SET created_at = now() - interval '31 minutes' WHERE id = ?",
+                    chargeId);
+        }
+
+        scheduler.recover();
+
+        assertEquals(2.0, meterRegistry.get(ChargeRecoveryScheduler.STUCK_METRIC).gauge().value());
+    }
+
+    private static List<UUID> ids(List<ChargeRecoveryTarget> targets) {
+        return targets.stream().map(ChargeRecoveryTarget::id).toList();
+    }
+
+    private List<ChargeRecoveryTarget> allTargets(int limit) {
+        return recoverySteps.findTargets(ChargeRecoveryGroup.allStatuses(), limit);
     }
 
     /** 상태·attempt_count를 맞추고 updated_at을 DB now() 기준 secondsAgo초 전으로 둔 충전 */
