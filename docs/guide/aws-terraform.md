@@ -35,6 +35,9 @@ infra/aws/
 ├── compute.tf               # ECS·빈 ASG·Capacity Provider
 ├── rds.tf                   # 사설 RDS·관리형 관리자 암호·복구 보호
 ├── data-ec2.tf / private-dns.tf # Data EC2·별도 EBS·공유 사설 DNS
+├── data-config.tf           # Data 설정 묶음의 S3 전달·SSM 적용
+├── registry.tf              # 앱 이미지 저장소(ECR)·앱 로그 그룹
+├── public-ingress.tf        # 공개 API 인증서(ACM)
 ├── host-observability.tf    # 호스트 메모리·디스크·초기화 로그
 ├── templates/               # EC2 기동·Data Compose·systemd 설정
 ├── scripts/                 # 적용 순서·비밀값 준비·디스크·DB 초기화 도구
@@ -253,7 +256,7 @@ terraform -chdir=infra/aws apply stage-4.tfplan
 
 4~6단계는 이미 적용됐으므로 위 최초 생성 절차를 그대로 반복하지 않습니다. 실제 운영 입력은 Git에서 제외한 개인 파일에 유지하고 매번 최신 State로 새 plan을 만듭니다. 다음 단계는 앞 단계의 옵션·호스트 수를 유지합니다. 분리 전 또는 적용 전 State로 만든 plan을 재사용하지 않습니다.
 
-DB 계정 초기화는 별도 작업입니다. `enable_database_bootstrap_access=true`의 plan/apply 후 SSM으로 Data에 접속해 아래 명령을 실행합니다. 암호는 출력하지 않으며 DB 역할·스키마를 한 트랜잭션으로 준비합니다. Flyway는 이후 앱 기동 시 실행합니다.
+DB 계정 초기화는 별도 작업입니다. `enable_database_bootstrap_access=true`의 plan/apply 후 SSM으로 Data에 접속해 아래 명령을 실행합니다. 암호는 출력하지 않으며 DB 역할·스키마를 한 트랜잭션으로 준비합니다. 앱 계정 암호는 평문 대신 SCRAM-SHA-256 값으로 보냅니다. RDS는 `pg_stat_statements`를 기본으로 로드하므로 평문을 보내면 쿼리 통계에 원문이 남습니다. Flyway는 이후 앱 기동 시 실행합니다.
 
 ```bash
 sudo python3 /opt/travelpay/data/bootstrap-database.py
@@ -265,9 +268,32 @@ sudo python3 /opt/travelpay/data/bootstrap-database.py
 
 현재 확인한 TLS는 **Data EC2 → RDS**이며 RDS 서버 인증서와 AWS CA 번들을 사용합니다. 클라이언트의 `verify-full` 접속과 평문 접속 거절을 실제로 확인했습니다. ACM 인증서를 사용하는 **브라우저 → ALB HTTPS**와 구분합니다. `rds.force_ssl`은 AWS 제어면의 설정과 실제 접속 거절로 검증하며, 이 환경에서는 PostgreSQL의 `current_setting()`에 같은 이름이 노출되지 않았습니다.
 
-Data는 16GiB root, Kafka 30GiB, 향후 모니터링용 20GiB의 별도 암호화 gp3를 사용합니다. Kafka 3072MiB·Redis 두 개 512MiB의 컨테이너 상한을 두고, 모니터링 배치 때 전체 RAM을 다시 검증합니다. 두 EBS와 Data EC2·RDS에는 `prevent_destroy`가 있으며, RDS에는 추가 삭제 보호와 최종 스냅샷을 설정합니다. 삭제·교체는 데이터 보존과 중단 영향을 검토한 별도 작업입니다. 반복 종료 시 최종 스냅샷 이름 충돌도 확인합니다.
+Data는 16GiB root, Kafka 30GiB, 향후 모니터링용 20GiB의 별도 암호화 gp3를 사용합니다. Kafka 3072MiB·Redis 두 개 512MiB의 컨테이너 상한을 두고, 모니터링 배치 때 전체 RAM을 다시 검증합니다. 두 EBS와 RDS에는 `prevent_destroy`가 있으며, RDS에는 추가 삭제 보호와 최종 스냅샷을 설정합니다. Data EC2 인스턴스에는 고유 데이터가 없으므로 삭제 보호를 두지 않습니다. 교체가 필요하면 plan의 `must be replaced`와 디스크 재부착을 검토해 승인합니다. 삭제·교체는 데이터 보존과 중단 영향을 검토한 별도 작업입니다. 반복 종료 시 최종 스냅샷 이름 충돌도 확인합니다.
 
-기동 코드 변경은 Data EC2 교체 계획을 만들 수 있고 삭제 보호가 이를 차단합니다. 자동 교체를 강행하거나 User Data만 바꾸고 적용됐다고 보지 않습니다. 승인된 유지보수에서 중단·디스크 재부착·검증 절차를 먼저 정합니다. Redis는 현재 로컬 정책처럼 영속 저장하지 않아 재시작 시 세션·견적이 사라집니다. Kafka EBS와 DB의 영속 데이터와 구분합니다.
+Data 호스트의 스크립트·Compose·CloudWatch Agent 설정은 user data가 아니라 설정 묶음으로 전달합니다. `data-config.tf`가 묶음을 비공개 S3 객체로 올리고, SSM association이 Data 호스트에서 묶음을 받아 Terraform이 계산한 SHA-256과 비교한 뒤 `apply-data-bundle.py`로 설치합니다. 실행 중인 서비스는 `systemctl reload-or-restart`의 `ExecReload`로 Compose 정의가 바뀐 컨테이너만 다시 만듭니다. Provider는 association을 처음 만들 때만 성공을 기다리므로, 묶음·SSM 문서·인스턴스가 바뀌면 association을 다시 만들어 호스트의 적용 실패가 `terraform apply` 실패로 드러나게 합니다. user data는 패키지 설치만 하는 고정 스크립트이므로 이 파일이나 AMI를 바꿀 때만 인스턴스가 교체됩니다.
+
+- Compose 정의가 아닌 파일만 바뀌는 경우(예: Redis 암호 파일)는 컨테이너를 다시 만들지 않으므로 별도 재시작이 필요합니다.
+- Redis는 로컬 정책처럼 영속 저장하지 않아 인스턴스 교체나 Redis 재시작 시 세션·견적이 사라집니다. Kafka EBS와 DB의 영속 데이터와 구분합니다.
+- 7일 운영 범위에서 바꾸지 않은 알려진 한계: 데이터 볼륨은 설정한 크기와 정확히 같아야 마운트하므로 확장하려면 스크립트 변경이 필요합니다. fstab에 `nofail`이 없어 볼륨 없이 부팅하면 응급 모드로 들어갑니다. 볼륨 분리·확장 작업을 계획하지 않으므로 이번에는 변경하지 않습니다.
+
+## 앱 이미지와 공개 인증서 준비
+
+앱 기반을 켜면 서비스별 ECR 저장소 8개, 앱 로그 그룹 8개(7일 보관), Eureka·Mock Bank의 Cloud Map 이름, `api.travelpay.store` 공개 인증서를 만듭니다. 저장소·로그 그룹 이름은 실행 역할과 배포 역할의 권한 ARN과 같습니다. ECR은 태그를 덮어쓸 수 없고(Git SHA 태그), 푸시할 때 이미지를 스캔하며, 서비스별 최근 10개만 남깁니다. 지워진 이미지는 Task 재시작·롤백에 쓸 수 없으므로 보관 개수는 7일 동안의 배포 횟수보다 넉넉하게 둡니다.
+
+Cloud Map 이름에는 ECS가 관리하는 custom 헬스 체크를 씁니다. AWS ECS 문서는 사설 namespace에 이 방식을 권장하며, 컨테이너 헬스 체크를 통과한 Task만 DNS에 남깁니다. Provider가 대체로 안내하는 `health_check_config`는 Route 53 헬스 체크라 공개 namespace에만 맞습니다.
+
+이미지는 `deploy/docker/Dockerfile` 하나로 모든 서비스를 만듭니다. 빌드는 JDK 21, 실행은 JRE 21이며 기본 이미지는 digest로 고정합니다. 실행 사용자는 root가 아니고(uid 10001), 앱 파일은 읽기만 할 수 있습니다. JDBC `verify-full`에 쓰는 RDS CA 번들은 체크섬을 확인해 넣습니다. `.dockerignore`는 빌드에 필요한 Gradle 파일과 서비스 소스만 보내며 `.env`·인프라 State·문서·부하 시험 파일은 보내지 않습니다.
+
+시작 스크립트(`deploy/docker/entrypoint.sh`)는 Eureka에 등록하는 서비스에서 종료 신호를 받으면 먼저 Eureka의 상태를 `OUT_OF_SERVICE`로 바꾸고 기다린 뒤 Java를 종료합니다. Spring은 웹 서버를 먼저 닫고 Eureka 등록 해제를 맨 나중에 하므로(종료 순서 값 2147482623과 0), 이 순서를 앞당기지 않으면 다른 서비스가 캐시된 주소로 종료 중인 Task에 요청을 보냅니다. Task IP는 ECS 메타데이터에서 읽어 Eureka 인스턴스 ID로 고정합니다. 인자를 주면 앱 대신 그 명령을 실행하므로 시험 실행에 씁니다.
+
+이미지는 커밋된 소스로만 게시합니다. 기본 실행은 미리보기이고 `--push`를 주면 빌드·푸시합니다. 같은 Git SHA 태그가 이미 있으면 다시 빌드하지 않고 그 digest를 씁니다. 결과는 Git에서 제외한 `infra/aws/application-images.auto.tfvars.json`에 기록합니다.
+
+```bash
+python3 infra/aws/scripts/publish-images.py --profile <프로필>
+python3 infra/aws/scripts/publish-images.py --profile <프로필> --push
+```
+
+공개 인증서는 DNS로 검증합니다. `terraform -chdir=infra/aws output api_certificate`의 검증 레코드를 Cloudflare DNS에 CNAME으로 추가하고 Proxy status는 **DNS only**로 둡니다. 프록시를 켜면 ACM이 레코드를 확인하지 못합니다. 발급(ISSUED) 뒤에도 자동 갱신에 쓰이므로 레코드를 지우지 않습니다. 발급 전 인증서로는 HTTPS 리스너를 만들 수 없으므로 ALB는 발급을 확인한 뒤 적용합니다.
 
 ## AWS에 접속하지 않는 코드 검증
 
@@ -286,7 +312,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s infra/aws/tests -p 'te
 
 Terraform test의 run은 기본적으로 apply입니다. 기본 구성 테스트는 `mock_provider "aws"`와 `command = plan`을 명시합니다. SG 규칙 ID 참조와 OIDC 역할 신뢰 등 적용 후 계산값이 필요한 일부 검사는 AWS 동작 전체를 mock 처리한 `command = apply`를 명시합니다. 이 경우에도 실제 AWS 리소스는 생성하지 않습니다. 새 Provider나 실제 AWS 시험을 추가할 때는 모의 처리 범위와 실행·정리 대상을 별도로 검토합니다.
 
-DB 초기화 SQL은 별도 경계 검사로도 확인합니다. 로컬에 `postgres:18.6-bookworm` 이미지가 준비된 경우 `TRAVELPAY_TEST_POSTGRES=1`을 위 Python 검사 명령 앞에 추가합니다. 포트·호스트 볼륨·외부 네트워크 없는 임시 컨테이너에서 비슈퍼유저 초기화·재실행·스키마 격리를 검사하고 제거합니다. 실제 RDS의 확장 권한 동작과 접속 검증은 적용 후 확인합니다.
+DB 초기화 SQL은 별도 경계 검사로도 확인합니다. 로컬에 `postgres:18.6-bookworm` 이미지가 준비된 경우 `TRAVELPAY_TEST_POSTGRES=1`을 위 Python 검사 명령 앞에 추가합니다. 포트·호스트 볼륨·외부 네트워크 없는 임시 컨테이너에서 비슈퍼유저 초기화·재실행·스키마 격리를 검사하고 제거합니다. TCP 접속에 암호 인증을 강제해 SCRAM 값으로 로그인되는지, `pg_stat_statements`에 평문 암호가 남지 않는지도 확인합니다. 실제 RDS의 확장 권한 동작과 접속 검증은 적용 후 확인합니다.
+
+`TRAVELPAY_TEST_DOCKER_IMAGE=1`을 붙이면 실제 이미지를 빌드해 실행 사용자, 파일 권한, 시작 스크립트 실행, RDS CA 체크섬을 확인합니다. 실행 이미지(Ubuntu 26.04)에서만 드러나는 결함을 잡기 위한 검사입니다. 이 이미지의 `env`는 다른 이름으로 불리면 실행을 거부하므로 시작 스크립트는 `#!/bin/bash`를 쓰고, `ADD --chmod`가 폴더를 만들면 파일 권한이 폴더에도 적용되므로 앱 폴더는 먼저 0755로 만듭니다.
 
 첫 PR의 구성 테스트는 총 16개입니다. State 보안·IAM 범위 3개, 네트워크 파생·입력·라우팅 7개, SG 허용 행렬·공개 범위·초기화 옵션·규칙 소유권 6개를 확인합니다. 넓은 공개 CIDR·불필요한 DB 연결·HTTPS 포트 확대·규칙 관리 목록 누락을 넣은 임시 복사본에서 해당 테스트가 실패하는 것도 확인했습니다.
 
@@ -322,6 +350,29 @@ NAT Gateway 1개와 공인 IPv4 1개가 실제로 실행 중입니다. 서울 �
 | Data 재기동 | Boot ID 변경, Kafka cluster ID·시험 메시지·두 EBS UUID 유지, Redis 임시 키 초기화·인증 복구, 시험 토픽 삭제 |
 | 기본 관측 | 호스트 메모리 3개·디스크 5개 지표 수집, 호스트 초기화 로그 스트림 3개·보관 7일 확인 |
 | 적용 후 재검사 | 본 root plan `No changes`, 구성 테스트 33개·Python 검사 22개 통과 |
+
+2026-11-11 개선 코드는 실제 AWS에 적용하기 전에 다음을 확인했습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 정적·모의 검사 | fmt·validate, 본 root 구성 테스트 35개·bootstrap 3개, Python 검사 33개 통과 |
+| Data 호스트 환경 | AL2023 컨테이너의 Python 3.9에서 같은 Python 검사 통과, cloud-init 22.2.2의 `status --wait` 지원, systemd 유닛 문법 검사 |
+| systemd 동작 | `oneshot`·`RemainAfterExit` 유닛에서 `reload-or-restart`가 여러 `ExecReload`를 순서대로 실행하고 `TimeoutStartSec`이 reload 시간도 제한함을 임시 유닛으로 확인 |
+| DB 초기화 | PostgreSQL 18.6에서 SCRAM 값으로 로그인·틀린 암호 거절, `pg_stat_statements` 평문 0건. 수정 전 스크립트는 같은 검사에서 평문 1건으로 실패 |
+| 실제 plan(잠금 없는 조회) | 추가 12·변경 2·삭제 3: S3 묶음·SSM 문서·association 생성, Data EC2와 볼륨 부착 2개 교체(원인은 user data), Cloud Map·정책 목록 갱신. EBS·RDS·SG·App 호스트 변경 없음 |
+
+같은 날 저장한 plan을 적용하고 다음을 확인했습니다. 교체 전 Kafka cluster ID와 시험 메시지를 기록해 두고 교체 후 같은 값인지 비교했습니다.
+
+| 대상 | 실제 확인 결과 |
+|---|---|
+| 적용 | 저장한 plan 적용 성공: 추가 12·변경 2·삭제 3, 오류·경고 없음 |
+| 교체 시간 | 새 인스턴스 시작 33초 후 association 실행, 94초 후 서비스 준비. 이전 인스턴스 정지부터 재기동까지 약 2분 40초 |
+| 묶음 무결성 | Terraform이 넘긴 SHA-256, S3 객체를 받아 계산한 값, 호스트가 적용한 값이 모두 같음 |
+| 데이터 보존 | Kafka cluster ID·시험 메시지 유지, 같은 볼륨 ID의 두 EBS가 같은 경로에 마운트, Redis 두 개 인증 응답 정상 |
+| 실행 설정 | Kafka 종료 대기 60초, Redis 설정 해시 값이 코드 계산값과 같음, 데이터 파일 0600·유닛 0644 |
+| 주소·관측 | `data.travelpay.internal`이 새 사설 IP를 가리킴, 새 인스턴스의 메모리 1개·디스크 3개 지표와 cloud-init 로그 수집 |
+| 제자리 반영 | association 재실행 8초 성공. 인스턴스·컨테이너 ID 3개·서비스 시작 시각·Redis 시험 키가 그대로임 |
+| 적용 후 재검사 | 본 root plan `No changes`. 시험 토픽·시험 키 삭제 |
 
 EC2·RDS·Data 기반은 실행 중이며 ECS의 애플리케이션 Task는 아직 0개입니다. 외부 환율 API 키와 Wallet 암호화 키는 앱 배포 전 별도로 준비합니다. 앱 Task의 실제 업무 통신·전체 업무 흐름과 Prometheus·Alloy·Loki·Grafana 배치는 후속 단계에서 검증합니다.
 

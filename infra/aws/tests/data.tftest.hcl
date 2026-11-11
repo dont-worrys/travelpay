@@ -145,3 +145,92 @@ run "bootstrap_grants_only_the_rds_master_secret" {
     error_message = "초기화 때만 생성한 DB의 관리자 Secret 하나를 읽도록 해야 합니다."
   }
 }
+
+run "data_config_is_applied_in_place_through_ssm" {
+  command = plan
+  override_resource {
+    override_during = plan
+    target          = aws_ebs_volume.data["kafka"]
+    values          = { id = "vol-0123456789abcdef0" }
+  }
+  override_resource {
+    override_during = plan
+    target          = aws_ebs_volume.data["monitoring"]
+    values          = { id = "vol-0123456789abcdef1" }
+  }
+  override_resource {
+    override_during = plan
+    target          = aws_db_instance.main[0]
+    values = {
+      address            = "travelpay-production.test.ap-northeast-2.rds.amazonaws.com"
+      master_user_secret = [{ secret_arn = "arn:aws:secretsmanager:ap-northeast-2:123456789012:secret:rds!db-test", secret_status = "active", kms_key_id = "test" }]
+    }
+  }
+  override_resource {
+    override_during = plan
+    target          = aws_s3_bucket.data_config[0]
+    values = {
+      id  = "travelpay-production-data-config-123456789012"
+      arn = "arn:aws:s3:::travelpay-production-data-config-123456789012"
+    }
+  }
+  override_resource {
+    override_during = plan
+    target          = aws_instance.data[0]
+    values          = { id = "i-0123456789abcdef0" }
+  }
+  assert {
+    condition = (
+      aws_s3_bucket.data_config[0].bucket == "travelpay-production-data-config-123456789012" &&
+      aws_s3_bucket_public_access_block.data_config[0].block_public_acls &&
+      aws_s3_bucket_public_access_block.data_config[0].block_public_policy &&
+      aws_s3_bucket_public_access_block.data_config[0].ignore_public_acls &&
+      aws_s3_bucket_public_access_block.data_config[0].restrict_public_buckets &&
+      one(aws_s3_bucket_ownership_controls.data_config[0].rule).object_ownership == "BucketOwnerEnforced" &&
+      jsondecode(aws_s3_bucket_policy.data_config[0].policy).Statement[0].Effect == "Deny" &&
+      jsondecode(aws_s3_bucket_policy.data_config[0].policy).Statement[0].Condition.Bool["aws:SecureTransport"] == "false"
+    )
+    error_message = "설정 묶음 버킷은 비공개·소유자 강제·TLS 전용이어야 합니다."
+  }
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role_policy.data_config_read[0].policy).Statement) == 1 &&
+      jsondecode(aws_iam_role_policy.data_config_read[0].policy).Statement[0].Action == ["s3:GetObject"] &&
+      jsondecode(aws_iam_role_policy.data_config_read[0].policy).Statement[0].Resource == [
+        "arn:aws:s3:::travelpay-production-data-config-123456789012/data/bundle.json.gz",
+      ] &&
+      contains(aws_iam_role_policies_exclusive.hosts["data"].policy_names, "read-data-config-bundle")
+    )
+    error_message = "Data 역할은 설정 묶음 객체 하나만 읽고, 그 정책이 역할의 관리 목록에 있어야 합니다."
+  }
+  assert {
+    condition = (
+      one(aws_ssm_association.data_apply[0].targets).key == "InstanceIds" &&
+      one(one(aws_ssm_association.data_apply[0].targets).values) == "i-0123456789abcdef0" &&
+      aws_ssm_association.data_apply[0].parameters["Key"] == "data/bundle.json.gz" &&
+      aws_ssm_association.data_apply[0].parameters["Sha256"] == sha256(local.data_bundle_json) &&
+      aws_ssm_association.data_apply[0].wait_for_success_timeout_seconds == 1800
+    )
+    error_message = "association은 Data 인스턴스에 이 묶음의 해시를 넘기고 성공을 기다려야 합니다."
+  }
+  assert {
+    condition = sort(keys(jsondecode(local.data_bundle_json))) == sort([
+      "runtime.json", "compose.yaml", "travelpay-data.service", "cloudwatch-agent.json",
+      "mount-data-volumes.py", "prepare-data.py", "bootstrap-database.py", "apply-data-bundle.py",
+    ])
+    error_message = "설정 묶음에 Data 호스트 적용에 필요한 파일이 모두 있어야 합니다."
+  }
+  assert {
+    condition = (
+      length(regexall("\\$\\{REDIS_SETTINGS_VERSION:\\?\\}", jsondecode(local.data_bundle_json)["compose.yaml"])) == 2 &&
+      strcontains(jsondecode(local.data_bundle_json)["compose.yaml"], "stop_grace_period: 60s")
+    )
+    error_message = "Redis 설정 변경은 두 컨테이너를 다시 만들고, Kafka는 다시 만들 때도 60초 안에 정상 종료해야 합니다."
+  }
+  assert {
+    condition = alltrue([
+      for parameter in values(jsondecode(aws_ssm_document.data_apply[0].content).parameters) : can(regex(".", parameter.allowedPattern))
+    ])
+    error_message = "SSM 문서 매개변수는 셸에 들어가기 전에 형식을 제한해야 합니다."
+  }
+}

@@ -2,6 +2,7 @@
 """Data EC2의 임시 Redis 설정과 영속 Kafka ID를 준비합니다. 비밀값은 출력하지 않습니다."""
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,11 +21,17 @@ def failure_message(error):
     return f"Data runtime preparation failed: {reason}"
 
 
+REDIS_SETTINGS = ("bind 0.0.0.0\nprotected-mode yes\nmaxmemory 128mb\nmaxmemory-policy noeviction\n"
+                  'save ""\nappendonly no\n')
+# Compose는 bind한 설정 파일의 내용 변화를 감지하지 않습니다. 비밀값이 아닌 설정의 해시를 환경 값으로 넘겨
+# 설정이 바뀌면 Redis 컨테이너를 다시 만들게 합니다.
+REDIS_SETTINGS_VERSION = hashlib.sha256(REDIS_SETTINGS.encode()).hexdigest()[:16]
+
+
 def redis_config(password):
     if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", password):
         raise PreparationError("Redis 비밀번호는 32~128자의 영문·숫자·밑줄·하이픈이어야 합니다.")
-    return ("bind 0.0.0.0\nprotected-mode yes\nmaxmemory 128mb\nmaxmemory-policy noeviction\n"
-            'save ""\nappendonly no\n' + f"requirepass {password}\n")
+    return REDIS_SETTINGS + f"requirepass {password}\n"
 
 
 def cluster_id(root):
@@ -91,7 +98,8 @@ def main():
     import ipaddress
     if not ipaddress.IPv4Address(address).is_private:
         raise PreparationError("Data 호스트의 사설 IPv4를 확인할 수 없습니다.")
-    (root / "runtime.env").write_text(f"DATA_PRIVATE_IP={address}\nKAFKA_CLUSTER_ID={identity}\n")
+    (root / "runtime.env").write_text(f"DATA_PRIVATE_IP={address}\nKAFKA_CLUSTER_ID={identity}\n"
+                                    f"REDIS_SETTINGS_VERSION={REDIS_SETTINGS_VERSION}\n")
 
 
 if __name__ == "__main__":

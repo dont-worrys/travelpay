@@ -162,3 +162,41 @@ run "reject_wildcard_environment" {
 
   expect_failures = [var.github_environment]
 }
+
+run "enabled_deployment_can_read_task_definitions" {
+  command = apply
+
+  variables {
+    enable_github_deployment = true
+  }
+
+  # DescribeTaskDefinition은 리소스 단위 권한을 지원하지 않아 "*" 외의 Resource로는 허용되지 않습니다.
+  assert {
+    condition = alltrue([
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      statement.Resource == ["*"] if contains(statement.Action, "ecs:DescribeTaskDefinition")
+      ]) && length([
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      statement if contains(statement.Action, "ecs:DescribeTaskDefinition")
+    ]) == 1
+    error_message = "배포 역할이 기준 Task Definition을 조회할 수 있어야 합니다."
+  }
+}
+
+run "enabled_deployment_cannot_register_privileged_tasks" {
+  command = apply
+
+  variables {
+    enable_github_deployment = true
+  }
+
+  # 값이 true인 요청만 거부해야 privileged 키가 없는 일반 등록이 막히지 않습니다.
+  assert {
+    condition = length([
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      statement if statement.Effect == "Deny" && statement.Action == ["ecs:RegisterTaskDefinition"] &&
+      try(statement.Condition.Bool["ecs:privileged"], "") == "true"
+    ]) == 1
+    error_message = "배포 역할은 privileged 컨테이너가 있는 Task Definition을 등록할 수 없어야 합니다."
+  }
+}

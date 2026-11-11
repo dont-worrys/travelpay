@@ -45,6 +45,24 @@ output "application_capacity" {
   } : null
 }
 
+output "application_repositories" {
+  description = "이미지 게시 도구가 사용하는 서비스별 ECR 주소입니다."
+  value       = { for key, repository in aws_ecr_repository.application : key => repository.repository_url }
+}
+
+output "api_certificate" {
+  description = "Cloudflare에 추가할 ACM DNS 검증 레코드입니다. 프록시 없이(DNS only) 추가하고 발급 뒤에도 갱신용으로 유지합니다."
+  value = var.enable_app_foundation ? {
+    arn    = aws_acm_certificate.api[0].arn
+    domain = aws_acm_certificate.api[0].domain_name
+    validation_records = [
+      for option in aws_acm_certificate.api[0].domain_validation_options : {
+        name = option.resource_record_name, type = option.resource_record_type, value = option.resource_record_value
+      }
+    ]
+  } : null
+}
+
 output "data_runtime" {
   description = "Data 접속·초기화용 비밀값 없는 실행 계약입니다. 관리자 암호 대신 Secret ARN만 제공합니다."
   value = var.enable_data_foundation ? {
@@ -55,5 +73,11 @@ output "data_runtime" {
     database_host     = aws_db_instance.main[0].address
     master_secret_arn = one(aws_db_instance.main[0].master_user_secret).secret_arn
     volumes           = { for name, volume in aws_ebs_volume.data : name => volume.id }
+    config_bundle = {
+      bucket         = aws_s3_bucket.data_config[0].id
+      key            = aws_s3_object.data_bundle[0].key
+      sha256         = sha256(local.data_bundle_json)
+      association_id = aws_ssm_association.data_apply[0].association_id
+    }
   } : null
 }

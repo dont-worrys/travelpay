@@ -44,10 +44,18 @@ resource "aws_iam_role_policy" "github_deploy" {
         Action   = ["ecs:RegisterTaskDefinition"]
         Resource = ["*"]
       },
+      # privileged 컨테이너는 호스트 권한을 얻을 수 있습니다. 값이 true인 요청만 거부해 일반 등록은 그대로 둡니다.
+      {
+        Effect    = "Deny"
+        Action    = ["ecs:RegisterTaskDefinition"]
+        Resource  = ["*"]
+        Condition = { Bool = { "ecs:privileged" = "true" } }
+      },
+      # DescribeTaskDefinition은 리소스 단위 권한을 지원하지 않아 ARN을 지정하면 항상 거부됩니다.
       {
         Effect   = "Allow"
         Action   = ["ecs:DescribeTaskDefinition"]
-        Resource = [for service in local.application_services : "arn:aws:ecs:${local.runtime_region}:${var.aws_account_id}:task-definition/travelpay-${service.name}:*"]
+        Resource = ["*"]
       },
       {
         Effect   = "Allow"

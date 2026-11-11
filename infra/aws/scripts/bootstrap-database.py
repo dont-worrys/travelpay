@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """초기화 권한이 열린 Data EC2에서만 실행합니다. Flyway는 이후 앱 기동 때 실행합니다."""
 
+import base64
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+
+SCRAM_ITERATIONS = 4096
 
 
 class DatabaseBootstrapError(ValueError):
@@ -18,7 +23,20 @@ def failure_message(error):
     return f"Database initialization failed: {reason}"
 
 
-def build_sql(name, databases, passwords):
+def scram_verifier(password, salt, iterations=SCRAM_ITERATIONS):
+    """PostgreSQL이 저장하는 SCRAM-SHA-256 값입니다. 평문 대신 보내면 통계·로그에 암호 원문이 남지 않습니다."""
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+
+    def encode(value):
+        return base64.b64encode(value).decode()
+
+    return (f"SCRAM-SHA-256${iterations}:{encode(salt)}$"
+            f"{encode(hashlib.sha256(client_key).digest())}:{encode(server_key)}")
+
+
+def build_sql(name, databases, passwords, salt=lambda: os.urandom(16)):
     def identifier(value):
         if not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", value):
             raise DatabaseBootstrapError("DB 식별자 형식이 올바르지 않습니다.")
@@ -31,6 +49,7 @@ def build_sql(name, databases, passwords):
         password = passwords[key]
         if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", password):
             raise DatabaseBootstrapError("DB 비밀번호 형식이 올바르지 않습니다.")
+        verifier = scram_verifier(password, salt())
         lines.extend([
             f"""DO $bootstrap$
 DECLARE target_oid oid; could_set boolean; had_membership boolean;
@@ -44,7 +63,7 @@ BEGIN
     OR EXISTS (SELECT FROM pg_auth_members WHERE member = target_oid) THEN
     RAISE EXCEPTION 'Existing application role has unexpected privileges';
   END IF;
-  ALTER ROLE {role} WITH LOGIN PASSWORD '{password}';
+  ALTER ROLE {role} WITH LOGIN PASSWORD '{verifier}';
   SELECT pg_has_role(current_user, target_oid, 'SET') INTO could_set;
   SELECT EXISTS (SELECT FROM pg_auth_members WHERE roleid = target_oid AND
     member = (SELECT oid FROM pg_roles WHERE rolname = current_user)) INTO had_membership;

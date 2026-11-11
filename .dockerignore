@@ -1,0 +1,23 @@
+# 이미지 빌드에는 Gradle 빌드 파일과 서비스 소스만 보냅니다. .env·인프라 상태·로컬 산출물은 보내지 않습니다.
+*
+!gradlew
+!gradle/
+!build.gradle
+!settings.gradle
+!common/
+!eureka-server/
+!gateway/
+!user-service/
+!wallet-service/
+!payment-service/
+!exchange-service/
+!ledger-service/
+!mock-bank/
+!deploy/docker/entrypoint.sh
+**/build/
+**/.gradle/
+**/out/
+**/src/test/
+**/load-test/
+**/*.log
+**/.env*

@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -17,6 +18,14 @@ class DataPreparationTest(unittest.TestCase):
         config = prepare.redis_config("a" * 64)
         self.assertIn("maxmemory-policy noeviction\n", config)
         self.assertIn("requirepass " + "a" * 64 + "\n", config)
+
+    def test_settings_version_follows_non_secret_settings_only(self):
+        # 설정 줄이 바뀌면 버전이 바뀌어 Compose가 Redis를 다시 만들고, 비밀번호는 버전에 들어가지 않습니다.
+        config = prepare.redis_config("a" * 64)
+        self.assertTrue(config.startswith(prepare.REDIS_SETTINGS))
+        self.assertEqual(prepare.REDIS_SETTINGS_VERSION,
+                         hashlib.sha256(prepare.REDIS_SETTINGS.encode()).hexdigest()[:16])
+        self.assertNotIn("requirepass", prepare.REDIS_SETTINGS)
 
     def test_kafka_cluster_id_survives_restart(self):
         with tempfile.TemporaryDirectory() as directory:

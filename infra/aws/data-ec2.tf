@@ -26,16 +26,19 @@ locals {
       }
     }
   } : null
-  data_assets = var.enable_data_foundation ? merge({
+  # data-config.tf가 이 묶음을 S3로 올리고 SSM association이 Data 호스트에 적용합니다.
+  data_bundle = var.enable_data_foundation ? merge({
     "runtime.json" = jsonencode(local.data_runtime_config)
     "compose.yaml" = templatefile("${path.module}/templates/data-compose.yaml.tftpl", {
       redis_image = local.data_runtime_config.redis_image, kafka_image = local.data_runtime_config.kafka_image,
     })
     "travelpay-data.service" = file("${path.module}/templates/travelpay-data.service")
+    "cloudwatch-agent.json"  = local.host_cloudwatch_configs["data"]
     }, {
-    for name in ["mount-data-volumes.py", "prepare-data.py", "bootstrap-database.py"] :
+    for name in ["mount-data-volumes.py", "prepare-data.py", "bootstrap-database.py", "apply-data-bundle.py"] :
     name => file("${path.module}/scripts/${name}")
   }) : {}
+  data_bundle_json = jsonencode(local.data_bundle)
 }
 
 data "aws_ami" "data" {
@@ -89,13 +92,12 @@ resource "aws_instance" "data" {
     volume_size = 16
     encrypted   = true
   }
-  user_data = templatefile("${path.module}/templates/data-user-data.sh.tftpl", {
-    assets           = base64gzip(jsonencode(local.data_assets)),
-    cloudwatch_agent = local.host_cloudwatch_configs["data"],
-  })
-  tags = { Name = "${local.runtime_name_prefix}-data", Role = "data" }
+  # 패키지 설치만 하는 고정 user data입니다. 설정 변경은 data-config.tf의 association이 맡습니다.
+  user_data = file("${path.module}/templates/data-user-data.sh")
+  tags      = { Name = "${local.runtime_name_prefix}-data", Role = "data" }
 
-  lifecycle { prevent_destroy = true }
+  # 인스턴스에는 고유 데이터가 없습니다. 영속 데이터는 prevent_destroy가 있는 별도 EBS와 RDS에 있고,
+  # 교체가 필요하면 plan의 "must be replaced"를 검토해 승인합니다.
   depends_on = [
     aws_iam_role_policies_exclusive.hosts, aws_iam_role_policy_attachments_exclusive.hosts,
     aws_cloudwatch_log_group.hosts, aws_route.private_egress,
