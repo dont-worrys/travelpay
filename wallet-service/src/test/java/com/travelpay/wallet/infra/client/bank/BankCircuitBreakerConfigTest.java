@@ -68,6 +68,25 @@ class BankCircuitBreakerConfigTest {
         });
     }
 
+    @Test
+    void 창_크기가_상한_48이면_기동된다() {
+        runner.withPropertyValues(validWith(PREFIX + "sliding-window-size=48")).run(context -> {
+            assertTrue(context.getStartupFailure() == null, () -> String.valueOf(context.getStartupFailure()));
+            assertEquals(48, context.getBean(CircuitBreakerRegistry.class).getDefaultConfig().getSlidingWindowSize());
+        });
+    }
+
+    @Test
+    void 창_크기가_상한을_넘는_49면_기동에_실패한다() {
+        runner.withPropertyValues(validWith(PREFIX + "sliding-window-size=49")).run(context -> {
+            assertNotNull(context.getStartupFailure());
+            Throwable cause = rootCause(context.getStartupFailure());
+            assertInstanceOf(IllegalStateException.class, cause);
+            assertTrue(cause.getMessage().contains("48 이하") && cause.getMessage().contains("max.poll.interval.ms"),
+                    cause.getMessage());
+        });
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"sliding-window-size", "minimum-number-of-calls", "failure-rate-threshold",
             "wait-duration-in-open-state", "permitted-number-of-calls-in-half-open-state"})
