@@ -205,6 +205,54 @@ class BankWithdrawalHoldIntegrationTest {
         assertEquals(400, invalid.statusCode());
     }
 
+    @Test
+    void 붙잡기를_덮어써도_끄면_덮어쓰기_전부터_기다리던_출금까지_모두_풀린다() throws Exception {
+        put("004", 60);
+        CompletableFuture<HttpResponse<String>> before = httpClient.sendAsync(
+                post("/internal/v1/bank/withdrawals", withdrawal004("w-hold-before-overwrite"))
+                        .timeout(Duration.ofSeconds(30)).build(), HttpResponse.BodyHandlers.ofString());
+        awaitHeldCount("004", 1, Duration.ofSeconds(10));
+
+        put("004", 2);
+        // 덮어쓴 뒤 들어온 출금은 새 대기 시간(2초)을 따른다
+        long started = System.nanoTime();
+        HttpResponse<String> after = send(post("/internal/v1/bank/withdrawals", withdrawal004("w-hold-after-overwrite")),
+                Duration.ofSeconds(10));
+        long elapsedMs = (System.nanoTime() - started) / 1_000_000;
+        assertEquals(201, after.statusCode());
+        assertTrue(elapsedMs >= 2_000 && elapsedMs < 10_000, "새 대기 시간을 따라야 함 elapsedMs=" + elapsedMs);
+        // 덮어쓰기 전부터 기다리던 출금은 이전 대기 시간(60초) 그대로 아직 기다린다
+        assertTrue(!before.isDone(), "덮어쓰기 전 출금은 아직 기다려야 함");
+
+        send(delete("004"), QUICK);
+        HttpResponse<String> released = before.get(5, TimeUnit.SECONDS);
+        assertEquals(201, released.statusCode());
+    }
+
+    @Test
+    void 붙잡는_중_제한을_넘는_출금_본문은_413이고_정상_출금은_그대로_처리된다() throws Exception {
+        put("004", 1);
+        String oversized = "{\"requestId\":\"w-hold-big\",\"pad\":\"" + "x".repeat(64 * 1024) + "\"}";
+
+        HttpResponse<String> withLength = send(post("/internal/v1/bank/withdrawals", oversized), QUICK);
+        HttpResponse<String> chunked = send(chunkedPost(oversized), QUICK);
+        HttpResponse<String> normalChunked = send(chunkedPost(withdrawal004("w-hold-chunked")), Duration.ofSeconds(10));
+
+        assertEquals(413, withLength.statusCode());
+        assertEquals(413, chunked.statusCode());
+        assertEquals("COMMON_PAYLOAD_TOO_LARGE",
+                ((Map<?, ?>) jsonMapper.readValue(chunked.body(), Map.class).get("error")).get("code"));
+        assertEquals(201, normalChunked.statusCode());
+    }
+
+    /** 길이를 모르는 본문이라 Content-Length 없이 Transfer-Encoding: chunked로 보낸다 */
+    private HttpRequest.Builder chunkedPost(String body) {
+        byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return HttpRequest.newBuilder(uri("/internal/v1/bank/withdrawals"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofInputStream(() -> new java.io.ByteArrayInputStream(bytes)));
+    }
+
     private HttpResponse<String> put(String bankCode, int delaySeconds) throws Exception {
         HttpResponse<String> response = send(putRequest(bankCode, "{\"delaySeconds\":" + delaySeconds + "}"), QUICK);
         assertEquals(200, response.statusCode());
