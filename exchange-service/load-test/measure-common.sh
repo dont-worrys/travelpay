@@ -30,14 +30,36 @@ check_run() {
         echo "무효 측정: 실패한 요청 ${failed}건(4xx/5xx/응답 없음), 불완전 응답 ${incomplete:-0}건: ${run}. 원인을 확인한 뒤 다시 측정합니다." >&2
         return 1
     fi
-    # 견적 발급 검산: 성공 응답(예열 포함) 수만큼 정확히 견적이 저장됐는지. 다르면 응답과 저장이 어긋난 것이라 멈춘다
+    # 견적 발급 검산(예열 포함): 성공 응답 ≤ 저장된 견적 ≤ 보낸 요청이어야 한다.
+    #   저장 < 성공: 성공이라고 답한 견적이 저장되지 않음(유실) → 멈춘다
+    #   저장 > 보낸 요청: 보내지 않은 요청이 저장됨(앞 측정 키가 남음 등) → 멈춘다
+    #   성공 < 저장 ≤ 보낸 요청: 실패로 답했는데 저장된 견적이 적어도 (저장 - 성공)건 있다는 뜻. 멈추지 않고 그 차이를 기록한다.
+    #     (차이는 정확한 수가 아니다. 성공한 견적이 유실됐다면 실패 응답 중 저장된 견적은 그만큼 더 많다)
+    #     Redis 견적 jar는 명령을 200ms(spring.data.redis.timeout)까지만 기다려 503으로 답하지만, Redis는 늦게라도 저장한다.
+    #     앱을 막 띄운 직후 동시 300이 몰린 예열 첫 1~2초에 생겼다(2026-11-10, #250). 측정 구간의 실패는 위 검사가 따로 막는다
+    #   개수 비교로 "유실 없음"을 증명할 수 있는 건 실패 응답이 0건일 때뿐이다. 요청 하나는 견적을 많아야 하나 저장하므로
+    #   실패 0건이면 성공 = 보낸 요청이고, 저장이 그 사이에 있으려면 모든 요청이 저장된 것이다.
+    #   실패 응답이 있으면 "실패했는데 저장됨"과 "성공했는데 유실됨"이 같은 수만큼 생겨도 개수가 맞으므로 증명하지 못한다고 알린다
+    #   (측정 구간 실패는 따로 무효라, 여기 남는 실패는 예열 구간의 것). 응답별 견적 ID 대조는 하지 않는다(회차당 약 200만 건)
     if [ "${SCRIPT:-rate-query.js}" = quote-issue.js ]; then
-        local ok_all saved
+        local ok_all requests_all saved failed_all
         ok_all=$(value "$run" okAll)
+        requests_all=$(value "$run" requestsAll)
         saved=$(nested "results/$1-vus$2-db.json" quoteRows all)
-        if [ "$ok_all" != "$saved" ]; then
-            echo "견적 검산 실패: 성공 응답 ${ok_all}건, 저장된 견적 ${saved}건 (${run})" >&2
+        # 값이 없거나 숫자가 아니면 아래 비교가 오류로 거짓이 되어 검산을 그냥 통과하므로 먼저 막는다
+        for count in "$ok_all" "$requests_all" "$saved"; do
+            if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+                echo "견적 검산 실패: 성공 응답(okAll)·보낸 요청(requestsAll)·저장 수(quoteRows.all) 중 숫자가 아닌 값이 있습니다: '${ok_all}' '${requests_all}' '${saved}' (${run})" >&2
+                return 1
+            fi
+        done
+        if [ "$saved" -lt "$ok_all" ] || [ "$saved" -gt "$requests_all" ]; then
+            echo "견적 검산 실패: 성공 응답 ${ok_all}건 ≤ 저장된 견적 ${saved}건 ≤ 보낸 요청 ${requests_all}건이 아닙니다 (${run})" >&2
             return 1
+        fi
+        failed_all=$((requests_all - ok_all))
+        if [ "$failed_all" -gt 0 ]; then
+            echo "    참고: 예열 중 실패 응답 ${failed_all}건, 저장 수와 성공 응답 수의 차이 $((saved - ok_all))건. 실패 응답이 있어 개수만으로는 유실 없음을 증명하지 못함 (보낸 요청 ${requests_all} / 성공 ${ok_all} / 저장 ${saved})"
         fi
     fi
 }

@@ -77,6 +77,40 @@ psql_q -v hours="${HOURS}" -f /load-test/seed-rate-history.sql >/dev/null
 docker compose exec -T measure-redis redis-cli FLUSHALL >/dev/null
 docker compose exec -T measure-redis redis-cli CONFIG RESETSTAT >/dev/null
 
+# 측정 조건(#250): PC 상태와 측정 앱의 히스토그램·Prometheus 연결 여부. k6 직전·직후에 읽어 결과 파일에 남긴다
+# 히스토그램 값은 실제로 뜬 앱의 실행 명령에서 읽는다(환경 변수를 잘못 넘겨도 실제 상태가 기록되게).
+# 앱 컨테이너를 찾지 못하거나 inspect가 실패하면 조건을 모르는 채 결과를 남기지 않도록 멈춘다(set -e).
+# grep만 "없음"을 허용해 unset으로 둔다: 옵션이 빠진 compose로 띄운 경우라 그대로 기록한다
+app_id=$(docker compose ps -q app)
+if [ -z "$app_id" ]; then
+    echo "측정 앱 컨테이너를 찾지 못했습니다 (docker compose ps -q app이 비어 있음)." >&2
+    exit 1
+fi
+app_cmd=$(docker inspect "$app_id" --format '{{json .Config.Cmd}}')
+histogram=$(echo "$app_cmd" | grep -o 'percentiles-histogram.http.server.requests=[a-z]*' | cut -d= -f2 || true)
+histogram=${histogram:-unset}
+# 측정 앱과 같은 Docker 네트워크에 붙은 Prometheus가 있으면 측정 중에 앱 지표를 수집한다(모니터링 켬)
+app_network=$(docker inspect "$app_id" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+prometheus=off
+if docker ps --filter "network=${app_network}" --format '{{.Image}}' | grep -q 'prom/prometheus'; then
+    prometheus=on
+fi
+# PC 상태를 읽지 못하면(빈 출력, Windows인데 전원 모드·충전기 unknown) 직전·직후 비교가 "둘 다 unknown이라 같음"으로
+# 통과해 전원 검사가 사라지므로 측정을 시작하지 않는다(직후 상태도 아래에서 같은 검사)
+require_pc_state() {
+    if [ -z "$1" ]; then
+        echo "PC 상태를 읽지 못했습니다(pc-state.sh 출력 없음). 측정하지 않습니다." >&2
+        exit 1
+    fi
+    if echo "$1" | grep -q '"os": "windows"' && echo "$1" | grep -q '"powerMode": "unknown"\|"charger": "unknown"'; then
+        echo "PC 전원 모드나 충전기 상태를 읽지 못했습니다: $1. 측정하지 않습니다." >&2
+        exit 1
+    fi
+}
+pc_before=$(bash pc-state.sh)
+require_pc_state "$pc_before"
+echo "      측정 조건: 히스토그램 ${histogram}, Prometheus ${prometheus}, PC ${pc_before}"
+
 echo "[3/4] k6 실행 (${SCRIPT}, VUS=${VUS}), DB 지표 1초 간격 기록"
 # 지표는 Docker 네트워크 안에서 읽는다(앱 컨테이너 안에서 curl). PC에서 읽으면 포트 전달을 지나 표본이 빠짐.
 # 수집기는 정해진 시간이 지나면 스스로 끝난다(Windows에서는 백그라운드 docker를 kill로 멈출 수 없음).
@@ -105,9 +139,42 @@ printf "SELECT extract(epoch FROM now())::bigint, (SELECT count(*) FROM pg_stat_
     | docker compose exec -T measure-postgres psql -U exchange_app -d travelpay -qAt -F $'\t' >"$session_samples" &
 session_pid=$!
 
+k6_started=$(date +%s)
+# k6가 결과 JSON을 쓴 뒤 어디서든 실패로 끝나면(set -e로 멈추는 명령 포함: PowerShell·psql·redis-cli·지표 정리)
+# k6 결과만 남고 지표 요약(-db.json)은 없는 반쪽 결과가 된다. 그러면 SUMMARY_ONLY 요약이 그 회차에서 막히므로,
+# 끝날 때 k6 결과와 만들던 요약을 지우도록 걸어 두고, 결과 파일을 다 만든 뒤에만 푼다
+trap 'rm -f "results/${LABEL}-vus${VUS}.json" "$summary.tmp"' EXIT
 docker compose run --rm -e VUS="${VUS}" -e LABEL="${LABEL}" -e WARMUP="${WARMUP_SECONDS}s" \
     -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet "/scripts/${SCRIPT}"
 k6_ended=$(date +%s)
+if ! pc_after=$(bash pc-state.sh) || ! (require_pc_state "$pc_after"); then
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
+# k6가 도는 동안 PC가 대기 모드에 들어간 횟수. Windows가 아니면 null(확인 안 함), 로그를 읽지 못하면 error.
+# 빈 출력이나 error는 "대기 모드 0번"이 아니라 확인하지 못한 것이라 무효로 끝낸다
+standby=$(bash standby-events.sh "$k6_started" "$k6_ended")
+if [ "$standby" != null ] && ! [[ "$standby" =~ ^[0-9]+$ ]]; then
+    echo "무효 측정: k6 구간의 대기 모드 진입 여부를 확인하지 못했습니다(standby-events.sh 결과 '${standby}'). Windows 시스템 로그 읽기 권한을 확인합니다." >&2
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
+if [ "$standby" != null ] && [ "$standby" != 0 ]; then
+    echo "무효 측정: k6가 도는 동안 PC가 대기 모드에 ${standby}번 들어갔습니다(CPU 제한·Docker 일시 정지)." >&2
+    echo "  Windows 설정 > 전원 > 전원에 연결된 경우 화면 끄기·절전을 '안 함'으로 두고 다시 잽니다 (README \"측정 전 PC 조건\")." >&2
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
+
+# 측정 중에 전원 모드나 충전기 연결이 바뀌면 PC 성능이 달라져 처리량이 흔들린다(README "측정 전 PC 조건"). 무효로 끝낸다
+pc_power() { echo "$1" | grep -o '"powerMode": [^,]*\|"charger": [^,]*' | tr '\n' ' '; }
+if [ "$(pc_power "$pc_before")" != "$(pc_power "$pc_after")" ]; then
+    echo "무효 측정: 측정 중에 전원 모드나 충전기 연결이 바뀌었습니다." >&2
+    echo "  직전 ${pc_before}" >&2
+    echo "  직후 ${pc_after}" >&2
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
 
 # 측정 구간은 k6가 실제로 테스트를 시작한 시각에서 계산한다. 컨테이너 생성·이미지 내려받기에 걸린 시간과 상관없이
 # 예열 표본이 섞이지 않게 하려는 것이다. 시작 시각 = k6가 끝난 시각 - k6가 실제로 돈 시간(results JSON)
@@ -149,7 +216,8 @@ fi
 awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects" \
     -v quoteAll="$quote_all" -v quoteMeasure="$quote_measure" -v quoteDb="$quote_db" -v quoteRedis="$quote_redis" \
     -v redisUsed="$redis_used" -v redisMax="$redis_maxmemory" -v redisPolicy="$redis_policy" \
-    -v label="$LABEL" -v vus="$VUS" '
+    -v label="$LABEL" -v vus="$VUS" \
+    -v pcBefore="$pc_before" -v pcAfter="$pc_after" -v histogram="$histogram" -v prometheus="$prometheus" -v standby="$standby" '
     FNR == 1 { file++ }
     $1 < from || $1 > to || $2 == "" { next }
     # 커넥션 풀 표본은 지표 6개가 모두 있어야 쓴다. 응답이 중간에 끊겨 일부만 오면 빠진 값이 0으로 더해져
@@ -212,6 +280,8 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
         acqAvgMs = (c1 > c0) ? (s1 - s0) / (c1 - c0) * 1000 : 0
         printf "{\n"
         printf "  \"label\": \"%s\",\n  \"vus\": %d,\n", label, vus
+        # 측정 조건: 히스토그램(true면 Grafana p95용 구간을 셈), Prometheus 수집 여부, k6 직전·직후 PC 상태, k6 중 대기 모드 진입 수
+        printf "  \"conditions\": {\"histogram\": \"%s\", \"prometheus\": \"%s\", \"pcBefore\": %s, \"pcAfter\": %s, \"standbyEntries\": %s},\n", histogram, prometheus, pcBefore, pcAfter, standby
         printf "  \"samples\": {\"hikari\": %d, \"sessions\": %d},\n", n, m
         printf "  \"hikariPending\": {\"avg\": %.2f, \"max\": %d},\n", (n ? pend / n : 0), pendMax
         printf "  \"hikariActive\": {\"avg\": %.2f, \"max\": %d},\n", (n ? act / n : 0), actMax
@@ -235,5 +305,7 @@ awk -F'\t' -v from="$measure_from" -v to="$measure_to" -v selects="$rate_selects
     }
 # 검사를 모두 통과했을 때만 결과 파일을 만든다 (실패하면 빈 결과 파일도 남기지 않음)
 mv "$summary.tmp" "$summary"
+# k6 결과와 지표 요약이 모두 갖춰졌으니 실패 시 지우기를 푼다
+trap - EXIT
 
 cat "$summary"
