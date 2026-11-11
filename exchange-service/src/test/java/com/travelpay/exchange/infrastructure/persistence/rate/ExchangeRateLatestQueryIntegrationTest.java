@@ -133,6 +133,42 @@ class ExchangeRateLatestQueryIntegrationTest {
                 List.of(ForeignCurrency.JPY, ForeignCurrency.CNY))).size());
     }
 
+    /**
+     * 전일 대비 기준(#272): 앞선 고시일 중 가장 최근 날의 마지막 수집분입니다.
+     * 공식 환율은 주말을 건너뛰어 직전 영업일 값을 고르고, 같은 날·다른 출처는 섞지 않습니다.
+     */
+    @Test
+    void findsLastRateOfMostRecentEarlierRateDate() {
+        LocalDate friday = LocalDate.of(2026, 10, 23);
+        LocalDate monday = LocalDate.of(2026, 10, 26);
+        save(RateSource.KOREAEXIM, ForeignCurrency.JPY, LocalDate.of(2026, 10, 22), "2026-10-22T02:10:00Z", "830");
+        UUID fridayJpy = save(RateSource.KOREAEXIM, ForeignCurrency.JPY, friday, "2026-10-23T02:10:00Z", "835");
+        save(RateSource.KOREAEXIM, ForeignCurrency.JPY, monday, "2026-10-26T02:10:00Z", "838.3");
+        save(RateSource.MOCK, ForeignCurrency.JPY, LocalDate.of(2026, 10, 25), "2026-10-25T23:59:55Z", "999");
+
+        assertEquals(fridayJpy, repository.findLatestBefore(RateSource.KOREAEXIM, ForeignCurrency.JPY, monday)
+                .orElseThrow().getId());
+    }
+
+    /** mock은 하루에 여러 번 만들므로, 전날 것 중 가장 늦게 수집한 값을 고릅니다. 오늘 수집분은 보지 않습니다. */
+    @Test
+    void findsLatestCollectionOfPreviousDayForMock() {
+        save(RateSource.MOCK, ForeignCurrency.JPY, DAY_1, "2026-10-27T23:59:50Z", "900");
+        UUID lastOfDay1 = save(RateSource.MOCK, ForeignCurrency.JPY, DAY_1, "2026-10-27T23:59:55Z", "901");
+        save(RateSource.MOCK, ForeignCurrency.JPY, DAY_2, "2026-10-28T00:00:00Z", "902");
+
+        assertEquals(lastOfDay1, repository.findLatestBefore(RateSource.MOCK, ForeignCurrency.JPY, DAY_2)
+                .orElseThrow().getId());
+    }
+
+    /** 앞선 고시일이 없으면(수집을 시작한 첫날) empty입니다. */
+    @Test
+    void findLatestBeforeIsEmptyWithoutEarlierRateDate() {
+        save(RateSource.MOCK, ForeignCurrency.JPY, DAY_2, "2026-10-28T00:00:00Z", "900");
+
+        assertTrue(repository.findLatestBefore(RateSource.MOCK, ForeignCurrency.JPY, DAY_2).isEmpty());
+    }
+
     @Test
     void emptyRequestReturnsEmpty() {
         save(RateSource.MOCK, ForeignCurrency.JPY, DAY_2, "2026-10-28T00:00:00Z", "900");

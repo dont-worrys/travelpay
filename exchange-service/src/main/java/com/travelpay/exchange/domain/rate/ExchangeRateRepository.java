@@ -28,5 +28,14 @@ public interface ExchangeRateRepository {
      */
     List<ExchangeRate> findLatestOfEach(RateSource source, List<ForeignCurrency> currencies);
 
+    /**
+     * 주어진 고시일보다 앞선 고시일 중 가장 최근 고시일의 가장 최근 수집분입니다(전일 대비의 비교 기준, #272).
+     * 공식 환율이면 직전 영업일 고시 값(주말·휴일은 건너뜀), mock이면 전날 마지막으로 만든 값입니다.
+     * 고르는 규칙은 findLatest와 같고(고시일 최신 → 수집 시각 최신), 고시일이 주어진 날보다 앞선 것만 봅니다.
+     *
+     * @return 앞선 고시일의 환율이 없으면(수집을 시작한 첫날 등) empty
+     */
+    Optional<ExchangeRate> findLatestBefore(RateSource source, ForeignCurrency currency, LocalDate rateDate);
+
     boolean existsByRateDate(RateSource source, ForeignCurrency currency, LocalDate rateDate);
 }
