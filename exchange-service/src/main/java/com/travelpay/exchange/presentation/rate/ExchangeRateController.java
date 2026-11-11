@@ -3,7 +3,7 @@ package com.travelpay.exchange.presentation.rate;
 import java.util.List;
 
 import com.travelpay.common.response.ApiResponse;
-import com.travelpay.exchange.application.rate.ExchangeRateQueryService;
+import com.travelpay.exchange.application.rate.ExchangeRateChangeQueryService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
@@ -15,12 +15,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class ExchangeRateController {
 
-    private final ExchangeRateQueryService queryService;
+    private final ExchangeRateChangeQueryService queryService;
 
-    /** 통화별 최신 환율을 조회합니다. currency를 지정해도 응답은 항상 목록입니다. */
+    /** 통화별 최신 환율과 전일 대비를 조회합니다(#272). currency를 지정해도 응답은 항상 목록입니다. */
     @GetMapping
     public ApiResponse<List<ExchangeRateResponse>> getLatestRates(@ModelAttribute ExchangeRateSearchRequest request) {
-        List<ExchangeRateResponse> rates = queryService.findLatest(request.targetCurrencies()).stream()
+        List<ExchangeRateResponse> rates = queryService.findLatestWithChange(request.targetCurrencies()).stream()
                 .map(ExchangeRateResponse::from)
                 .toList();
         return ApiResponse.success(rates);

@@ -56,6 +56,12 @@ class ExchangeRateRepositoryAdapter implements ExchangeRateRepository {
     }
 
     @Override
+    public Optional<ExchangeRate> findLatestBefore(RateSource source, ForeignCurrency currency, LocalDate rateDate) {
+        return jpaRepository.findFirstBySourceAndCurrencyAndRateDateBeforeOrderByRateDateDescCollectedAtDesc(
+                source, currency, rateDate);
+    }
+
+    @Override
     public boolean existsByRateDate(RateSource source, ForeignCurrency currency, LocalDate rateDate) {
         return jpaRepository.existsBySourceAndCurrencyAndRateDate(source, currency, rateDate);
     }
