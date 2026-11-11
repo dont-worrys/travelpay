@@ -75,10 +75,18 @@ def precheck(data):
         raise SystemExit(f"mock-bank 측정 계좌가 {accounts}개입니다(회원 {len(data['users'])}명). prepare.py를 다시 실행하세요.")
 
 
+def user_bank_code(data, user):
+    """회원의 은행 코드. 회원별 은행 코드가 없는 이전 users.json은 공통 bankCode를 씁니다."""
+    return user.get("bankCode") or data["bankCode"]
+
+
 def accounts_sql(data):
+    """측정 계좌 ID: 회원별 (은행, 계좌번호) 쌍과 정확히 맞는 계좌"""
+    banks = [user_bank_code(data, user) for user in data["users"]]
     numbers = [user["accountNumber"] for user in data["users"]]
-    return (f"SELECT id FROM mock_bank.bank_accounts WHERE bank_code = {sql_text(data['bankCode'])}"
-            f" AND account_number = ANY({sql_array(numbers, 'varchar')})")
+    return ("SELECT a.id FROM mock_bank.bank_accounts a"
+            f" JOIN unnest({sql_array(banks, 'varchar')}, {sql_array(numbers, 'varchar')}) AS u(bank_code, account_number)"
+            " ON a.bank_code = u.bank_code AND a.account_number = u.account_number")
 
 
 def bank_balance(data):
@@ -288,7 +296,33 @@ def charge_metrics(data, since):
             "p50": round(float(p50), 1) if p50 else None,
             "p95": round(float(p95), 1) if p95 else None,
         },
+        "byBank": charges_by_bank(measured),
     }
+
+
+def charges_by_bank(measured):
+    """충전의 은행 코드(charge_requests.bank_code)별 상태와 완료 지연(접수 → 첫 COMPLETED 이력). 정의는 전체 값과 같습니다."""
+    by_bank = {}
+    for bank, status, count, amount in psql(
+            f"SELECT bank_code, status, count(*), coalesce(sum(amount), 0) FROM ({measured}) m"
+            " GROUP BY bank_code, status ORDER BY bank_code, status;"):
+        entry = by_bank.setdefault(bank, {"accepted": 0, "statuses": {},
+                                          "completionLatencyMs": {"count": 0, "p50": None, "p95": None}})
+        entry["statuses"][status] = {"count": int(count), "amount": int(amount)}
+        entry["accepted"] += int(count)
+    for bank, p50, p95, completed_count in psql(
+            "SELECT bank_code, percentile_cont(0.5) WITHIN GROUP (ORDER BY ms),"
+            " percentile_cont(0.95) WITHIN GROUP (ORDER BY ms), count(*)"
+            " FROM (SELECT m.bank_code, extract(epoch FROM (min(h.created_at) - m.created_at)) * 1000 AS ms"
+            f"       FROM ({measured}) m JOIN wallet_service.charge_status_history h ON h.charge_id = m.id"
+            "       WHERE h.to_status = 'COMPLETED' GROUP BY m.id, m.created_at, m.bank_code) c"
+            " GROUP BY bank_code;"):
+        by_bank[bank]["completionLatencyMs"] = {
+            "count": int(completed_count),
+            "p50": round(float(p50), 1) if p50 else None,
+            "p95": round(float(p95), 1) if p95 else None,
+        }
+    return by_bank
 
 
 # ---- 장애(응답 유실) 지표 ----
@@ -342,7 +376,7 @@ def fault_metrics(data, since, fault_rate, samples, end, lost_before, charges, s
 
 # ---- 출금 정합성 (mock-bank DB) ----
 
-def bank_consistency(data, since, statuses, balance_before):
+def bank_consistency(data, since, statuses, balance_before, by_bank_statuses):
     rows = psql(
         "SELECT type, count(*), coalesce(sum(amount), 0) FROM mock_bank.bank_transactions"
         f" WHERE status = 'SUCCEEDED' AND created_at >= {sql_text(iso(since))}::timestamptz"
@@ -364,14 +398,48 @@ def bank_consistency(data, since, statuses, balance_before):
         violations.append(f"REFUND 성공 {refund} ≠ REFUNDED 충전 {refunded}")
     if decrease != debit["amount"] - refund["amount"]:
         violations.append(f"계좌 잔액 감소 {decrease} ≠ DEBIT 합계 − REFUND 합계 {debit['amount'] - refund['amount']}")
+    by_bank = bank_consistency_by_bank(data, since, by_bank_statuses)
+    for bank, entry in by_bank.items():
+        violations += [f"은행 {bank}: {violation}" for violation in entry.pop("violations")]
     return {
         "debit": debit,
         "refund": refund,
         "expectedDebit": expected_debit,
         "expectedRefund": refunded,
         "balance": {"before": balance_before, "after": balance_after, "decrease": decrease},
+        "byBank": by_bank,
         "violations": violations,
     }
+
+
+def bank_consistency_by_bank(data, since, by_bank_statuses):
+    """은행 코드별 DEBIT·REFUND 성공 = 그 은행 COMPLETED·REFUNDED 충전. 계좌의 은행은 mock-bank 계좌(bank_code)로 나눕니다."""
+    rows = psql(
+        "SELECT a.bank_code, t.type, count(*), coalesce(sum(t.amount), 0) FROM mock_bank.bank_transactions t"
+        " JOIN mock_bank.bank_accounts a ON a.id = CASE WHEN t.type = 'DEBIT' THEN t.from_account_id ELSE t.to_account_id END"
+        f" WHERE t.status = 'SUCCEEDED' AND t.created_at >= {sql_text(iso(since))}::timestamptz"
+        f" AND a.id IN ({accounts_sql(data)})"
+        " GROUP BY a.bank_code, t.type;")
+    actual = {}
+    for bank, kind, count, amount in rows:
+        actual.setdefault(bank, {})[kind] = {"count": int(count), "amount": int(amount)}
+    empty = {"count": 0, "amount": 0}
+    result = {}
+    for bank in sorted(set(actual) | set(by_bank_statuses)):
+        statuses = by_bank_statuses.get(bank, {})
+        completed, refunded = statuses.get("COMPLETED", empty), statuses.get("REFUNDED", empty)
+        expected_debit = {"count": completed["count"] + refunded["count"],
+                          "amount": completed["amount"] + refunded["amount"]}
+        debit = actual.get(bank, {}).get("DEBIT", empty)
+        refund = actual.get(bank, {}).get("REFUND", empty)
+        violations = []
+        if debit != expected_debit:
+            violations.append(f"DEBIT 성공 {debit} ≠ COMPLETED·REFUNDED 충전 {expected_debit}")
+        if refund != refunded:
+            violations.append(f"REFUND 성공 {refund} ≠ REFUNDED 충전 {refunded}")
+        result[bank] = {"debit": debit, "refund": refund, "expectedDebit": expected_debit,
+                        "expectedRefund": refunded, "violations": violations}
+    return result
 
 
 # ---- 대사 (운영 API) ----
@@ -545,7 +613,9 @@ def main():
         reasons.append("종결 상태 이력이 없음 (출금 정합성·대사 생략)")
     else:
         print("[5/6] 출금 정합성 (mock-bank 측정 계좌)")
-        metrics["bankConsistency"] = bank_consistency(data, since, charges["statuses"], balance_before)
+        by_bank_statuses = {bank: entry["statuses"] for bank, entry in charges["byBank"].items()}
+        metrics["bankConsistency"] = bank_consistency(data, since, charges["statuses"], balance_before,
+                                                      by_bank_statuses)
         reasons += metrics["bankConsistency"]["violations"]
         print("[6/6] 대사 (POST /api/v1/admin/charges/reconciliations)")
         metrics["reconciliation"] = reconcile(charges["firstCreatedAt"], charges["lastTerminalEpoch"])
@@ -584,6 +654,11 @@ def print_brief(m):
           f" | 종결 대기 {m['drainSeconds']}초")
     statuses = ", ".join(f"{status} {entry['count']}" for status, entry in c["statuses"].items())
     print(f"  상태 {statuses}")
+    for bank, entry in (c.get("byBank") or {}).items():
+        bank_latency = entry["completionLatencyMs"]
+        bank_statuses = ", ".join(f"{status} {s['count']}" for status, s in entry["statuses"].items())
+        print(f"  은행 {bank}: 접수 {entry['accepted']}건 | 완료 지연 P50 {bank_latency['p50']}ms"
+              f" P95 {bank_latency['p95']}ms ({bank_latency['count']}건) | {bank_statuses}")
     f = m.get("fault") or {}
     if f.get("faultRate") or f.get("lostResponses"):
         recovered = f.get("recoveredLatencyMs") or {}

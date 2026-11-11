@@ -1,6 +1,9 @@
 package com.travelpay.bank;
 
 import com.travelpay.bank.presentation.fault.BankFaultInjectionFilter;
+import com.travelpay.bank.presentation.fault.BankWithdrawalHoldController;
+import com.travelpay.bank.presentation.fault.BankWithdrawalHoldFilter;
+import com.travelpay.bank.presentation.fault.BankWithdrawalHolds;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -23,7 +26,7 @@ import java.time.Duration;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * prod 프로필에서는 mock-bank.fault.enabled=true여도 Mock-Fault 헤더 장애 주입이 동작하지 않는다.
+ * prod 프로필에서는 mock-bank.fault.enabled=true여도 Mock-Fault 헤더 장애 주입·출금 붙잡기가 동작하지 않는다.
  * 배포와 같게 application-prod.yml만 읽고(SPRING_CONFIG_NAME) prod 프로필을 켠다(SPRING_PROFILES_ACTIVE).
  * Docker가 없으면 건너뛴다.
  */
@@ -71,5 +74,22 @@ class BankFaultInjectionProdProfileTest {
         assertEquals(0, context.getBeansOfType(BankFaultInjectionFilter.class).size());
         assertEquals(1L, jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM bank_transactions WHERE request_id = 'w-prod-lost'", Long.class));
+    }
+
+    @Test
+    void prod에서는_enabled여도_출금_붙잡기_빈과_API가_없다() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + port + "/internal/v1/bank/faults/withdrawal-holds/004"))
+                .timeout(Duration.ofSeconds(30))
+                .header("Content-Type", "application/json")
+                .PUT(HttpRequest.BodyPublishers.ofString("{\"delaySeconds\":30}"))
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(404, response.statusCode());
+        assertEquals(0, context.getBeansOfType(BankWithdrawalHolds.class).size());
+        assertEquals(0, context.getBeansOfType(BankWithdrawalHoldFilter.class).size());
+        assertEquals(0, context.getBeansOfType(BankWithdrawalHoldController.class).size());
     }
 }
