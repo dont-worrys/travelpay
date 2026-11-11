@@ -15,6 +15,7 @@ import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.RegisterRequest;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResponse;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResultResponse;
 import feign.FeignException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -57,6 +58,8 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
             "정산이 거절되었습니다.");
 
     private final LedgerFeignApi ledgerFeignApi;
+    // 거래 등록(결제·환불·정산)에만 사용. 조회(lookup)는 운영자 처리용이라 서킷을 거치지 않음
+    private final CircuitBreaker circuitBreaker;
 
     @Override
     public PaymentLedgerResult createTransaction(PaymentLedgerTransactionCommand command) {
@@ -152,16 +155,26 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
     }
 
     private PaymentLedgerResult register(RegisterRequest request, DeclineReasons declineReasons) {
+        // 원장 장애가 이어져 서킷이 열려 있으면 원장에 보내지 않음
+        if (!circuitBreaker.tryAcquirePermission()) {
+            log.debug("원장 서킷 열림, 원장에 보내지 않음 referenceType={} referenceId={}",
+                    request.referenceType(), request.referenceId());
+            return PaymentLedgerResult.notSent();
+        }
+        long start = circuitBreaker.getCurrentTimestamp();
         ApiResponse<TransactionResponse> response;
         try {
             response = ledgerFeignApi.register(request);
         } catch (FeignException exception) {
             // 4xx 거절이 아니면 원장이 처리했을 수 있다 (연결 실패·시간 초과·5xx·2xx 본문 해석 실패). 같은 referenceId로 다시 확인한다
             if (!FeignErrors.isRejected(exception)) {
+                circuitBreaker.onError(elapsedSince(start), circuitBreaker.getTimestampUnit(), exception);
                 log.warn("원장 거래 결과 모름 referenceType={} referenceId={} status={}",
                         request.referenceType(), request.referenceId(), exception.status());
                 return PaymentLedgerResult.unknown();
             }
+            // 4xx 거절은 원장이 정상으로 판단해 답한 것이라 서킷에서는 성공으로 판단
+            circuitBreaker.onSuccess(elapsedSince(start), circuitBreaker.getTimestampUnit());
             // 원장 코드는 응답에 그대로 내보내지 않고 결제 서비스의 거절 사유로 바꾼다 (원장 코드는 로그에만 남김)
             Optional<String> rejectedCode = rejectedCode(exception);
             if (rejectedCode.isPresent()) {
@@ -173,7 +186,13 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
                     request.referenceType(), request.referenceId(), exception.status(),
                     FeignErrors.errorCode(exception).orElse("-"));
             return PaymentLedgerResult.notAccepted();
+        } catch (RuntimeException exception) {
+            // Feign 밖의 예외도 서킷에 결과를 남겨야 반열림 시험 호출 자리가 반납
+            circuitBreaker.onError(elapsedSince(start), circuitBreaker.getTimestampUnit(), exception);
+            throw exception;
         }
+        // 원장이 응답에 2초 이상 걸렸으면 서킷이 느린 호출로 센다
+        circuitBreaker.onSuccess(elapsedSince(start), circuitBreaker.getTimestampUnit());
 
         // 2xx를 받았으니 원장이 처리했을 수 있다. 내용이 이상해도 실패로 단정하지 않고 결과 모름으로 둔다
         if (response == null || !response.success() || response.data() == null
@@ -183,6 +202,10 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
             return PaymentLedgerResult.unknown();
         }
         return PaymentLedgerResult.approved(response.data().transactionId());
+    }
+
+    private long elapsedSince(long start) {
+        return circuitBreaker.getCurrentTimestamp() - start;
     }
 
     /** 422이고 오류 코드가 LEDGER_REJECTED_로 시작할 때만 확정 거절로 본다 */

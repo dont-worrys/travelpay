@@ -303,6 +303,10 @@ public class SettlementService {
             case UNKNOWN -> {
                 return recordUnknown(settlement);
             }
+            case NOT_SENT -> {
+                // 원장 서킷이 열려 보내지 않음. 재시도 횟수는 그대로 두고 REQUESTED 유지(복구 스케줄러가 다시 요청)
+                return settlement;
+            }
             case NOT_ACCEPTED -> {
                 return markManualReview(settlement);
             }
