@@ -23,9 +23,14 @@ resource "aws_service_discovery_service" "data" {
 }
 
 # Eureka와 Mock Bank는 다른 앱이 고정 주소로 찾아야 하므로 Cloud Map 이름을 둡니다. 업무 앱끼리는 Eureka로 찾습니다.
+# 앱 설정(task-definitions.tf)과 Prometheus 수집 대상(monitoring.tf)이 이 이름을 함께 씁니다.
+locals {
+  application_discovery_names = { eureka = "eureka", mock_bank = "mock-bank" }
+}
+
 # Task 등록은 ECS Service(PR4)가 하고, 롤링으로 IP가 바뀌므로 TTL을 Data(30초)보다 짧게 둡니다.
 resource "aws_service_discovery_service" "application" {
-  for_each = var.enable_app_foundation && var.enable_data_foundation ? { eureka = "eureka", mock_bank = "mock-bank" } : {}
+  for_each = var.enable_app_foundation && var.enable_data_foundation ? local.application_discovery_names : {}
 
   name = each.value
   dns_config {

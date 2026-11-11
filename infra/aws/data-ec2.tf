@@ -37,7 +37,7 @@ locals {
     }, {
     for name in ["mount-data-volumes.py", "prepare-data.py", "bootstrap-database.py", "apply-data-bundle.py"] :
     name => file("${path.module}/scripts/${name}")
-  }) : {}
+  }, local.monitoring_files, local.monitoring_runtime_files) : {}
   data_bundle_json = jsonencode(local.data_bundle)
 }
 

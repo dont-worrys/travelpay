@@ -76,10 +76,11 @@ class ParameterPreparationTest(unittest.TestCase):
     def test_contract_must_classify_every_secret(self):
         account = "123456789012"
         names = [f"{prefix}_DB_PASSWORD" for prefix in ["USER", "WALLET", "PAYMENT", "EXCHANGE", "LEDGER", "MOCK_BANK"]]
-        names += ["REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD", "WALLET_ACCOUNT_NUMBER_KEY", "KOREAEXIM_API_KEY"]
+        names += ["REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD", "WALLET_ACCOUNT_NUMBER_KEY", "GRAFANA_ADMIN_PASSWORD",
+                  "KOREAEXIM_API_KEY"]
         contract = {name: f"arn:aws:ssm:ap-northeast-2:{account}:parameter/travelpay/production/{name}" for name in names}
         ordered = parameters.parameter_names(contract, account)
-        self.assertEqual(len(ordered), 10)
+        self.assertEqual(len(ordered), 11)
         self.assertEqual(ordered[-1], "/travelpay/production/KOREAEXIM_API_KEY")
         missing_wallet_with_extra_database = {name: arn for name, arn in contract.items() if name != "WALLET_ACCOUNT_NUMBER_KEY"}
         missing_wallet_with_extra_database["AUDIT_DB_PASSWORD"] = f"arn:aws:ssm:ap-northeast-2:{account}:parameter/travelpay/production/AUDIT_DB_PASSWORD"
@@ -88,6 +89,7 @@ class ParameterPreparationTest(unittest.TestCase):
             {**contract, "NEW_SERVICE_TOKEN": f"arn:aws:ssm:ap-northeast-2:{account}:parameter/travelpay/production/NEW_SERVICE_TOKEN"},
             {**contract, "USER_DB_PASSWORD": f"arn:aws:ssm:ap-northeast-2:999999999999:parameter/travelpay/production/USER_DB_PASSWORD"},
             {name: arn for name, arn in contract.items() if name != "KOREAEXIM_API_KEY"},
+            {name: arn for name, arn in contract.items() if name != "GRAFANA_ADMIN_PASSWORD"},
         ]:
             with self.subTest(names=sorted(broken)), self.assertRaises(parameters.ParameterPreparationError):
                 parameters.parameter_names(broken, account)
@@ -136,6 +138,43 @@ class ParameterPreparationTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             parameters.prepare(aws, names, apply=True, report=lambda name, status: reported.append((name, status)))
         self.assertEqual(reported, [("/travelpay/production/REDIS_CACHE_PASSWORD", "created")])
+
+    def test_grafana_password_is_typed_twice_and_follows_the_host_rule(self):
+        def prompt_with(*answers):
+            pending = list(answers)
+            return lambda message: pending.pop(0)
+
+        self.assertEqual(parameters.read_grafana_password(prompt_with("Travel pay 2026 ok", "Travel pay 2026 ok")),
+                         "Travel pay 2026 ok")
+        for answers in [("Travel pay 2026 ok", "Travel pay 2026 no"), ("short pw", "short pw"), (" edge space", " edge space")]:
+            with self.subTest(answers=answers), self.assertRaises(parameters.ParameterPreparationError):
+                parameters.read_grafana_password(prompt_with(*answers))
+
+    def test_grafana_password_rule_matches_the_data_host(self):
+        # Data 호스트의 준비 스크립트가 같은 값을 받아야 모니터링이 시작합니다.
+        host_path = Path(__file__).parents[1] / "scripts" / "prepare-monitoring.py"
+        host_spec = importlib.util.spec_from_file_location("monitoring_preparation_rule", host_path)
+        host = importlib.util.module_from_spec(host_spec)
+        host_spec.loader.exec_module(host)
+        self.assertEqual(parameters.GRAFANA_PASSWORD_PATTERN, host.GRAFANA_PASSWORD_PATTERN)
+
+    def test_set_grafana_password_overwrites_only_that_parameter(self):
+        calls = []
+        parameters.set_grafana_password(lambda operation, payload: calls.append((operation, payload)), "Travel pay 2026 ok")
+        self.assertEqual(calls, [("put-parameter", {"Name": "/travelpay/production/GRAFANA_ADMIN_PASSWORD", "Value": "Travel pay 2026 ok",
+                                                    "Type": "SecureString", "Tier": "Standard", "Overwrite": True})])
+
+    def test_grafana_prompt_refuses_when_input_cannot_be_hidden(self):
+        code = ("import importlib.util, sys\n"
+                "spec = importlib.util.spec_from_file_location('tool', sys.argv[1])\n"
+                "tool = importlib.util.module_from_spec(spec); spec.loader.exec_module(tool)\n"
+                "try:\n    tool.read_grafana_password()\n"
+                "except tool.ParameterPreparationError:\n    sys.exit(3)\n"
+                "sys.exit(0)\n")
+        result = subprocess.run([sys.executable, "-c", code, str(path)], input="Travel pay 2026 ok\nTravel pay 2026 ok\n",
+                                capture_output=True, text=True, timeout=30, start_new_session=True)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertNotIn("Travel pay 2026 ok", result.stdout + result.stderr)
 
     def test_cli_history_setting_blocks_secret_writes(self):
         self.assertTrue(parameters.history_enabled(lambda arguments: "enabled\n"))

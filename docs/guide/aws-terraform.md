@@ -224,7 +224,7 @@ VPC의 원래 Main Route Table도 local만 유지합니다. Public 여부는 IGW
 
 SG 본체와 개별 규칙을 분리해 상호 참조에 따른 생성 순환을 피합니다. `aws_vpc_security_group_rules_exclusive`가 선언한 규칙 전체를 관리하고 VPC 기본 SG는 닫습니다. 다른 도구·수동 규칙을 같은 SG에 섞으면 다음 apply에서 제거될 수 있으므로 보존할 변경을 먼저 코드에 반영합니다.
 
-DB 계정·스키마 초기화 때만 `enable_database_bootstrap_access=true`로 Data → RDS 5432와 해당 RDS 관리자 Secret 조회 권한, 앱 DB 암호 조회를 엽니다. 완료 후 `false`로 되돌려 plan/apply합니다. 평상시 Data는 Redis 암호 두 개만 조회합니다. EC2에는 역할별 SG를 연결하며 앱 Task 연결과 실제 허용·차단 검증은 배치 단계에서 확인합니다.
+DB 계정·스키마 초기화 때만 `enable_database_bootstrap_access=true`로 Data → RDS 5432와 해당 RDS 관리자 Secret 조회 권한, 앱 DB 암호 조회를 엽니다. 완료 후 `false`로 되돌려 plan/apply합니다. 평상시 Data는 Redis 암호 두 개와 Grafana 관리자 암호만 조회합니다. EC2에는 역할별 SG를 연결하며 앱 Task 연결과 실제 허용·차단 검증은 배치 단계에서 확인합니다.
 
 ## 실행 기반 적용 순서
 
@@ -248,7 +248,7 @@ python3 infra/aws/scripts/check-runtime-plan.py infra/aws/stage-4.tfplan --profi
 python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profile travelpay --account 123456789012
 ```
 
-비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가하면 DB 6개·Redis 2개 암호를 SecureString으로 만듭니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. AWS CLI 기록(`cli_history`)이 켜져 있으면 요청 내용이 로컬 기록에 남으므로 쓰기를 거절합니다.
+비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가하면 DB 6개·Redis 2개·Grafana 관리자 암호를 SecureString으로 만듭니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. AWS CLI 기록(`cli_history`)이 켜져 있으면 요청 내용이 로컬 기록에 남으므로 쓰기를 거절합니다.
 
 - Wallet 계좌번호 키(무작위 32바이트의 Base64)는 `--apply --create-wallet-key`를 줄 때만 만듭니다. 데이터가 생긴 뒤 바꾸거나, 지워진 뒤 새로 만들면 저장된 계좌번호를 풀 수 없으므로 Wallet 데이터가 생기기 전 처음 한 번만 씁니다.
 - 수출입은행에서 발급받은 환율 API 키는 `--apply --external`을 줄 때만 입력받습니다. 입력을 숨길 수 있는 터미널에서 직접 실행해야 하며, 파이프 입력처럼 입력이 화면에 보일 수 있으면 거절합니다. 키를 명령 인자·파일·채팅에 남기지 않습니다.
@@ -271,7 +271,7 @@ sudo python3 /opt/travelpay/data/bootstrap-database.py
 
 현재 확인한 TLS는 **Data EC2 → RDS**이며 RDS 서버 인증서와 AWS CA 번들을 사용합니다. 클라이언트의 `verify-full` 접속과 평문 접속 거절을 실제로 확인했습니다. ACM 인증서를 사용하는 **브라우저 → ALB HTTPS**와 구분합니다. `rds.force_ssl`은 AWS 제어면의 설정과 실제 접속 거절로 검증하며, 이 환경에서는 PostgreSQL의 `current_setting()`에 같은 이름이 노출되지 않았습니다.
 
-Data는 16GiB root, Kafka 30GiB, 향후 모니터링용 20GiB의 별도 암호화 gp3를 사용합니다. Kafka 3072MiB·Redis 두 개 512MiB의 컨테이너 상한을 두고, 모니터링 배치 때 전체 RAM을 다시 검증합니다. 두 EBS와 RDS에는 `prevent_destroy`가 있으며, RDS에는 추가 삭제 보호와 최종 스냅샷을 설정합니다. Data EC2 인스턴스에는 고유 데이터가 없으므로 삭제 보호를 두지 않습니다. 교체가 필요하면 plan의 `must be replaced`와 디스크 재부착을 검토해 승인합니다. 삭제·교체는 데이터 보존과 중단 영향을 검토한 별도 작업입니다. 반복 종료 시 최종 스냅샷 이름 충돌도 확인합니다.
+Data는 16GiB root, Kafka 30GiB, 모니터링 20GiB의 별도 암호화 gp3를 사용합니다. Kafka 3072MiB·Redis 두 개 512MiB의 컨테이너 상한을 두며, 모니터링을 포함한 메모리·디스크 여유는 'AWS 모니터링(Prometheus·Loki·Grafana·Alloy)' 절에 정리합니다. 두 EBS와 RDS에는 `prevent_destroy`가 있으며, RDS에는 추가 삭제 보호와 최종 스냅샷을 설정합니다. Data EC2 인스턴스에는 고유 데이터가 없으므로 삭제 보호를 두지 않습니다. 교체가 필요하면 plan의 `must be replaced`와 디스크 재부착을 검토해 승인합니다. 삭제·교체는 데이터 보존과 중단 영향을 검토한 별도 작업입니다. 반복 종료 시 최종 스냅샷 이름 충돌도 확인합니다.
 
 Data 호스트의 스크립트·Compose·CloudWatch Agent 설정은 user data가 아니라 설정 묶음으로 전달합니다. `data-config.tf`가 묶음을 비공개 S3 객체로 올리고, SSM association이 Data 호스트에서 묶음을 받아 Terraform이 계산한 SHA-256과 비교한 뒤 `apply-data-bundle.py`로 설치합니다. 실행 중인 서비스는 `systemctl reload-or-restart`의 `ExecReload`로 Compose 정의가 바뀐 컨테이너만 다시 만듭니다. Provider는 association을 처음 만들 때만 성공을 기다리므로, 묶음·SSM 문서·인스턴스가 바뀌면 association을 다시 만들어 호스트의 적용 실패가 `terraform apply` 실패로 드러나게 합니다. user data는 패키지 설치만 하는 고정 스크립트이므로 이 파일이나 AMI를 바꿀 때만 인스턴스가 교체됩니다.
 
@@ -338,6 +338,62 @@ ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합�
 - SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. Cloudflare가 붙이는 비밀 헤더 확인이나 Authenticated Origin Pulls(mTLS)를 Cloudflare 전환과 함께 PR4에서 정합니다.
 - PR4의 CD가 Task 정의를 복사해 이미지만 바꾼 새 리비전을 등록하면, 이후 Terraform이 설정을 바꿀 때 `application_images`가 배포 중인 digest와 같아야 이전 이미지로 되돌아가지 않습니다. 이 규칙은 PR4에서 정합니다.
 
+## AWS 모니터링(Prometheus·Loki·Grafana·Alloy)
+
+중앙 저장·조회는 Data 호스트에, 앱 로그 수집기는 앱 호스트마다 둡니다. 버전은 로컬 Compose(`compose.monitoring.yaml`)와 같고 이미지는 digest로 고정합니다. 두 버전이 다르면 테스트가 실패합니다. 설정은 S3 묶음과 SSM association으로 전달하므로 인스턴스를 교체하지 않고 바뀐 컨테이너만 다시 만듭니다. Data와 앱 호스트는 같은 SSM 문서를 쓰고, 묶음 안에서 실행할 적용 스크립트는 허용한 두 이름으로만 고릅니다. 묶음 읽기 권한과 association을 같은 apply에서 만들면 IAM 전파 전에 첫 읽기가 거절될 수 있습니다. 그래서 묶음 받기는 AccessDenied일 때만 10초 간격으로 6번까지 시도합니다.
+
+Data 호스트의 모니터링은 Redis·Kafka와 Compose 프로젝트, systemd 유닛, 준비 스크립트를 따로 둡니다(`monitoring-compose.yaml`, `travelpay-monitoring.service`, `prepare-monitoring.py`). Grafana 암호가 없거나 모니터링 컨테이너가 준비되지 않아도, 재부팅이나 재적용 때 Redis·Kafka는 시작·반영됩니다. 적용 스크립트는 두 유닛을 먼저 켜 둔 뒤 Redis·Kafka 유닛부터 반영하고, 모니터링 반영이 실패하면 association 실패로 드러냅니다. Redis·Kafka 반영이 실패해도 모니터링 유닛은 다음 부팅에 시작합니다. Grafana 암호 읽기도 권한 거부와 연결 실패일 때만 10초 간격으로 6번까지 시도합니다. 같은 apply에서 이 매개변수 읽기 권한이 생기고, 부팅 직후에는 SSM에 아직 닿지 않을 수 있기 때문입니다. 다만 모니터링 EBS는 Kafka EBS와 함께 Data 유닛의 마운트 단계가 붙이므로(1단계 구성), 이 볼륨 자체의 장애는 지금도 Data 유닛을 막습니다.
+
+| 위치 | 구성 | 공개 범위 |
+|---|---|---|
+| Data 호스트(Compose 프로젝트 `travelpay-production-monitoring`) | Prometheus(7일·8GB), Loki(7일), Grafana, Alloy(Data 호스트 컨테이너 로그) | Loki만 사설 IP 3100(SG가 로그 수집기 역할에서 온 연결만 허용), 나머지는 호스트 루프백 |
+| 앱 호스트(systemd) | Alloy(ECS Task 로그) | 준비 확인용 12345만 호스트 루프백 |
+
+- **지표:** Prometheus가 Eureka로 업무 서비스를 찾습니다. Gateway는 Eureka 메타데이터의 관리 포트 18080으로 수집합니다. Eureka 서버와 Mock Bank는 Cloud Map 사설 DNS로 찾습니다. 레이블은 로컬과 같은 `job=spring-jvm`, `service`, `environment=production`이므로 로컬 대시보드를 그대로 씁니다. 가짜 Eureka 응답과 실제 Prometheus로 주소와 레이블을 확인했습니다.
+- **로그:** 앱 컨테이너는 awslogs로 CloudWatch에 보냅니다. Docker는 원격 드라이버의 로그를 로컬 캐시(dual logging)에도 남기고, 앱 호스트의 Alloy가 이 캐시를 Docker API로 읽어 Loki로 보냅니다. 캐시는 Docker 기본값으로 켜져 있고, 앱 호스트에는 이를 끄는 Docker 설정 파일이 없습니다(2026-11-11 확인). Docker 문서는 원격 드라이버에 네트워크 문제가 있으면 로컬 캐시에도 쓰지 않는다고 설명합니다. 따라서 CloudWatch 전송이 막힌 동안의 로그는 Loki에도 없을 수 있습니다.
+- **레이블:** 앱 로그의 `service_name`은 ECS 컨테이너 이름이고 `job=ecs-tasks`입니다. Data 호스트의 Redis·Kafka·모니터링 컨테이너 로그는 `job=docker-data`, `host=travelpay-data`입니다. awsvpc의 pause 컨테이너는 발견 단계에서 뺍니다.
+- **대시보드·알림:** 운영 대시보드와 송금 알림 규칙은 `infra/monitoring`의 로컬 파일에서 데이터소스, 환경, 로그 job, uid만 바꿔 만듭니다. 원본에서 바꿀 곳의 수는 테스트가 확인합니다.
+- **AWS 기본 지표:** RDS·호스트·ECS·ALB 지표와 경보 상태는 CloudWatch 대시보드(`travelpay-production`)로 봅니다. Data 호스트는 IMDS hop 제한(1)으로 컨테이너가 인스턴스 역할 자격 증명을 받지 못하게 했습니다. 그래서 Grafana는 AWS API를 조회하지 않습니다.
+
+Grafana 알림 규칙은 네 개입니다. 알림 채널(contact point)은 두지 않으므로 상태는 Grafana Alerting 화면에서 확인합니다.
+
+| 규칙 | 조건 | 지표가 없을 때 |
+|---|---|---|
+| 송금 MANUAL_REVIEW 발생 | 운영자 확정이 필요한 송금이 1건 이상 | 정상(서비스 중단은 수집 중단 규칙이 알림) |
+| 송금 30분 넘게 PROCESSING | 오래 확정되지 않은 송금이 1건 이상 | 정상 |
+| 서비스 지표 수집 중단 | 서비스별 정상 수집 대상이 0개인 상태가 2분 지속. Eureka에서 사라진 서비스도 0으로 셈 | 경보 |
+| 결제·송금 복구 스케줄러 정지 | `recover` 스케줄러의 실행 횟수가 2분 동안 늘지 않은 상태가 2분 지속. payment-service는 수집되는데 실행 기록 지표가 없는 경우(스케줄러 비활성, 클래스 이름 변경)도 포함 | 정상(payment-service 중단은 수집 중단 규칙이 알림) |
+
+Grafana는 외부에 공개하지 않고 관리자 계정 `admin` 하나로 씁니다. 암호는 Parameter Store의 `GRAFANA_ADMIN_PASSWORD`이며, 비밀값 준비 도구가 처음에 무작위 값으로 만듭니다. 이 값이 없으면 모니터링 유닛이 시작하지 않으므로, 이 단계는 plan을 저장한 뒤 apply 전에 준비 도구를 `--apply`로 실행합니다. 기존 값은 그대로 두고 없는 값만 만듭니다.
+
+접속은 SSM 포트 포워딩으로 합니다. 작업 PC에 AWS CLI용 Session Manager 플러그인(1.2.764.0 이상)이 필요합니다. 출력의 명령을 실행한 뒤 `http://localhost:3000`에 `admin`과 Parameter Store의 암호로 로그인합니다.
+
+```bash
+terraform -chdir=infra/aws output -json monitoring
+aws ssm get-parameter --name /travelpay/production/GRAFANA_ADMIN_PASSWORD --with-decryption --query Parameter.Value --output text --profile <프로필>
+```
+
+암호를 직접 정하려면 준비 도구에 `--set-grafana-password`를 붙입니다. 화면에 표시하지 않고 두 번 입력받아 Parameter Store 값을 바꿉니다. 규칙은 앞뒤 공백 없이 영문·숫자·기호·공백으로 10~128자이며, 문장형도 됩니다. 한글은 브라우저 암호 칸에서 입력기가 꺼지는 환경이 있어 받지 않습니다. Data 호스트의 준비 스크립트도 같은 규칙으로 확인합니다.
+
+```bash
+python3 infra/aws/scripts/prepare-parameters.py <저장한 plan> --profile <프로필> --account <계정 ID> --apply --set-grafana-password
+```
+
+Grafana는 암호 파일을 데이터가 처음 만들어질 때만 적용합니다. 그래서 Parameter Store 값을 바꾼 뒤에는 실행 중인 Grafana에도 반영해야 합니다. Data 호스트에서 모니터링 유닛을 다시 읽어 Parameter Store 값을 암호 파일로 받고, 그 파일을 Grafana CLI에 넘깁니다(2026-11-12 Grafana 13.3.0에서 공백·기호가 든 암호로 확인). 아래는 Session Manager 플러그인 없이 작업 PC에서 실행하는 형태입니다. 암호는 명령이나 출력에 나타나지 않습니다.
+
+```bash
+aws ssm send-command --profile <프로필> --region ap-northeast-2 --instance-ids <Data 인스턴스 ID> --document-name AWS-RunShellScript \
+  --parameters '{"commands":["systemctl reload travelpay-monitoring.service && docker exec -i travelpay-production-monitoring-grafana-1 grafana cli admin reset-admin-password --password-from-stdin < /run/travelpay/grafana/admin-password"]}'
+```
+
+- **메모리:** Data 호스트의 컨테이너 메모리 상한 합계는 6,400MiB입니다(Kafka 3,072, Redis 512, Prometheus 1,024, Loki 768, Grafana 768, Alloy 256). Data 호스트 메모리는 7,779MiB입니다. 상한은 예약이 아니라 넘을 수 없는 값입니다. 로컬에서 같은 정의로 띄운 뒤 Grafana는 2분 뒤 279MiB, 5분 유휴 뒤 333MiB(익명 254MiB·파일 캐시 64MiB)를 썼습니다. Loki는 65MiB, Alloy는 49~64MiB, Prometheus는 40~58MiB였습니다. 상한에는 회수 가능한 파일 캐시도 들어갑니다. 독립 리뷰의 측정에서는 Grafana가 512MiB 가까이 올랐으므로 여유를 두어 768MiB로 둡니다. 앱 호스트 Alloy(256MiB 상한)는 ECS 밖이라 호스트 예약 메모리(1,024MiB)를 씁니다.
+- **권한:** Alloy는 Docker 소켓으로 컨테이너 로그를 읽으므로 사실상 호스트 root 권한입니다. 로컬과 같은 방식이며, 이미지를 digest로 고정하고 다른 권한은 모두 뺐습니다. 사용 통계 전송도 끕니다. Loki는 인증 없이 SG로만 접근을 막습니다.
+- **디스크:** 이미지는 Data 루트 볼륨(16GiB)에 받습니다. 적용 전 사용량은 2.9GiB(18%)였고, 모니터링 이미지 네 개는 로컬 기준 최대 약 3.5GB라 받은 뒤에도 75% 경보 기준보다 낮습니다. 지표·로그는 모니터링 EBS(20GiB)에 쌓습니다.
+- **이미지 받기:** 모니터링 이미지는 Docker Hub에서 받습니다. 비로그인 받기는 NAT 공인 IP 하나에 6시간 100회로 제한되며, 이번 적용에서 받는 것은 Data 4회와 앱 호스트 2회입니다.
+- **복구 스케줄러 규칙의 전제:** payment Task가 하나라고 보고 Task를 합쳐 셉니다. PR4에서 payment를 여러 Task로 늘리면 Task별로 나눠야 한 Task의 정지가 가려지지 않습니다. 스케줄러 클래스 목록(`monitoring.tf`)은 테스트가 payment-service 코드와 대조합니다.
+- **PR4 전까지:** 첫 ECS Service 전(PR4)에는 Eureka와 Mock Bank가 없습니다. 그래서 Prometheus의 대상 발견 오류가 로그에 남고, 수집 중단 규칙은 8개 서비스 모두 경보 상태입니다.
+- **앱 호스트 Alloy 지표:** 호스트 주소를 찾을 수단이 없어 수집하지 않습니다. 대신 Loki의 `host` 레이블별 로그 수신으로 동작을 확인합니다.
+
 ## AWS에 접속하지 않는 코드 검증
 
 ```bash
@@ -358,6 +414,14 @@ Terraform test의 run은 기본적으로 apply입니다. 기본 구성 테스트
 `terraform test`도 모듈 폴더의 `terraform.tfvars`·`*.auto.tfvars.json`을 읽습니다. 저장소에는 실제 운영 입력 파일이 있으므로 테스트 파일은 모든 입력 변수를 직접 정해 실제 값이 섞이지 않게 합니다. 변수를 추가하면 모든 테스트 파일의 `variables`에도 값을 넣습니다(2026-11-11 실제 입력 파일이 섞여 8개 파일이 실패한 것을 확인하고 고정).
 
 DB 초기화 SQL은 별도 경계 검사로도 확인합니다. 로컬에 `postgres:18.6-bookworm` 이미지가 준비된 경우 `TRAVELPAY_TEST_POSTGRES=1`을 위 Python 검사 명령 앞에 추가합니다. 포트·호스트 볼륨·외부 네트워크 없는 임시 컨테이너에서 비슈퍼유저 초기화·재실행·스키마 격리를 검사하고 제거합니다. TCP 접속에 암호 인증을 강제해 SCRAM 값으로 로그인되는지, `pg_stat_statements`에 평문 암호가 남지 않는지도 확인합니다. 실제 RDS의 확장 권한 동작과 접속 검증은 적용 후 확인합니다.
+
+`TRAVELPAY_TEST_DOCKER_MONITORING=1`을 붙이면 Docker 실행 검사를 함께 돌립니다. 운영 Alloy·Loki 설정과 권한 제한(모든 권한 제거, 권한 상승 금지)으로 임시 컨테이너를 외부와 막힌 네트워크에 띄우고, 확인이 끝나면 지웁니다. 다음을 확인합니다.
+
+- ECS Task 로그가 원격 로그 드라이버의 로컬 캐시를 거쳐 대시보드 레이블과 함께 저장되는지
+- Data 호스트 로그가 두 Compose 프로젝트의 것만 들어가고, pause 컨테이너 로그는 빠지는지
+- 모니터링 이미지의 실행 사용자가 준비 스크립트의 폴더 소유자와 같은지
+
+설정 문법 검사로는 드러나지 않았던 두 결함을 실제 실행으로 다시 막기 위한 검사입니다. 하나는 권한을 모두 뺀 root가 이미지의 저장 경로에 들어가지 못해 Alloy가 시작하지 못한 것이고, 다른 하나는 수집기 단계의 drop이 레이블만 지우고 pause 로그를 그대로 보낸 것입니다. 운영 유닛·Compose의 해당 설정은 Terraform 테스트가 고정합니다.
 
 `TRAVELPAY_TEST_DOCKER_IMAGE=1`을 붙이면 실제 이미지를 빌드해 실행 사용자, 파일 권한, 시작 스크립트 실행, RDS CA 체크섬을 확인합니다. 실행 이미지(Ubuntu 26.04)에서만 드러나는 결함을 잡기 위한 검사입니다. 이 이미지의 `env`는 다른 이름으로 불리면 실행을 거부하므로 시작 스크립트는 `#!/bin/bash`를 쓰고, `ADD --chmod`가 폴더를 만들면 파일 권한이 폴더에도 적용되므로 앱 폴더는 먼저 0755로 만듭니다.
 
@@ -433,6 +497,28 @@ NAT Gateway 1개와 공인 IPv4 1개가 실제로 실행 중입니다. 서울 �
 | 비밀값 | 키 준비 전에는 Exchange Task가 `TaskFailedToStart`(파라미터 없음)로 시작 전에 멈춤. 준비 후 Wallet 키는 32바이트로 풀리고, 환율 API 키는 공백·끝 `;` 없이 실제 API 1회 호출이 HTTP 200·23개 통화·`result=1` |
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task·사용 중 Task ENI 0개, Data 설정 묶음은 다시 적용되지 않음 |
 
-ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱의 실제 기동(RDS 인증서 검증 접속·Flyway)과 업무 통신은 ECS Service를 만드는 PR4에서 검증합니다. Prometheus·Alloy·Loki·Grafana 배치는 다음 단계에서 검증합니다.
+ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱의 실제 기동(RDS 인증서 검증 접속·Flyway)과 업무 통신은 ECS Service를 만드는 PR4에서 검증합니다.
+
+2026-11-12 AWS 모니터링 단계는 다음 순서로 확인했습니다.
+
+- 적용 전에 독립 리뷰를 두 번 받았습니다. 지적 19건을 근거로 확인해 반영했습니다.
+- 사본 코드에 결함을 일부러 넣어 테스트가 잡는지 봤습니다(Terraform 29개, Python 8개, Docker 실행 검사 3개).
+- 로컬에서 같은 이미지·설정으로 Compose, 알림 발동·해소, 로그 수집을 실행해 봤습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 59개·bootstrap 3개, Python 검사 90개 통과(Docker·PostgreSQL 선택 실행 제외). Python 3.9에서는 시험 이미지에 `curl`이 없어 시작 스크립트 검사 3개만 실패하고, 호스트 스크립트 검사는 모두 통과. 저장소에서 잠금을 건 plan이 검토한 잠금 없는 plan과 동작·값까지 같음 |
+| 적용 | 저장한 plan 적용: 추가 6·변경 5·삭제 8, 오류 없음. 삭제 8개는 SSM 문서·association 교체 2개와, 쓰이지 않게 된 모니터링 SG 규칙 3개의 수신·송신 6개. 앱 호스트 association 53초, Data association 1분 23초에 성공. 이어서 Grafana 암호 규칙만 바꾼 적용: 추가 1·변경 1·삭제 1 |
+| Redis·Kafka | 두 번의 적용 뒤에도 컨테이너 3개의 ID·시작 시각·재시작 0회가 적용 전과 같음 |
+| Data 호스트 | 두 유닛 실행·자동 시작. 모니터링 4종 준비 응답 200. Loki만 사설 IP 3100, 나머지는 루프백 |
+| Grafana | 익명 401. 데이터소스 2개·대시보드(TRAVELPAY 폴더)·규칙 4개, 플러그인 설치·프로비저닝 오류 0건. 사용자가 정한 암호를 Parameter Store에서 반영해 로그인 200 |
+| 알림 | 수집 중단 규칙은 8개 서비스 모두 경보 대기(앱 Service 전이라 예상한 상태). 나머지 세 규칙은 지표 없음으로 정상 |
+| 앱 호스트 | 두 대 모두 Alloy 실행·자동 시작·준비 응답 200, 12345는 루프백만. 사용 통계 전송 0건 |
+| 로그 경로 | 시험 Task(mock-bank 정의, 명령만 바꿈)의 출력 6줄이 `job=ecs-tasks`, `service_name=mock-bank`, 실행 호스트 레이블로 Loki에 도착 |
+| 접근 차단 | 수집기 역할이 아닌 Task SG에서 Data의 3100·3000·9090 연결 차단. Data 인스턴스에 공인 IP 없음. SG에는 수집기→Loki 3100만 남음 |
+| IMDS | Grafana·Alloy 컨테이너 네트워크에서 토큰 요청 시간 초과(호스트는 200) |
+| 자원 | Data 메모리 7,779MiB 중 1,876MiB, 루트 디스크 34%. Grafana 246MiB·Loki 52MiB·Alloy 49MiB·Prometheus 35MiB |
+| 기타 | CloudWatch 대시보드 위젯 11개, association 두 개 Success, 이전 SSM 문서 삭제 |
+| 적용 후 재검사 | 본 root plan `No changes` |
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).

@@ -16,16 +16,18 @@ def load(name):
 class RuntimeErrorMessageTest(unittest.TestCase):
     def test_owned_validation_error_keeps_its_safe_reason(self):
         for name, kind in [("mount-data-volumes", "StorageError"), ("prepare-data", "PreparationError"),
+                           ("prepare-monitoring", "PreparationError"),
                            ("bootstrap-database", "DatabaseBootstrapError"), ("prepare-parameters", "ParameterPreparationError"),
-                           ("fetch-data-bundle", "BundleError"), ("apply-data-bundle", "ApplyError"),
-                           ("publish-images", "PublishError")]:
+                           ("fetch-config-bundle", "BundleError"), ("apply-data-bundle", "ApplyError"),
+                           ("apply-app-bundle", "ApplyError"), ("publish-images", "PublishError")]:
             module = load(name)
             with self.subTest(script=name):
                 self.assertIn("지정한 데이터 경로가 일치하지 않습니다.", module.failure_message(getattr(module, kind)("지정한 데이터 경로가 일치하지 않습니다.")))
 
     def test_external_error_does_not_expose_response_or_password(self):
-        for name in ["mount-data-volumes", "prepare-data", "bootstrap-database", "prepare-parameters", "fetch-data-bundle",
-                     "apply-data-bundle", "publish-images"]:
+        for name in ["mount-data-volumes", "prepare-data", "prepare-monitoring", "bootstrap-database", "prepare-parameters",
+                     "fetch-config-bundle",
+                     "apply-data-bundle", "apply-app-bundle", "publish-images"]:
             module = load(name)
             with self.subTest(script=name):
                 message = module.failure_message(RuntimeError("raw SQL password=private-test-value"))

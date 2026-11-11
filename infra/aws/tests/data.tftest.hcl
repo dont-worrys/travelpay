@@ -220,6 +220,9 @@ run "data_config_is_applied_in_place_through_ssm" {
     condition = sort(keys(jsondecode(local.data_bundle_json))) == sort([
       "runtime.json", "compose.yaml", "travelpay-data.service", "cloudwatch-agent.json",
       "mount-data-volumes.py", "prepare-data.py", "bootstrap-database.py", "apply-data-bundle.py",
+      "prometheus.yml", "loki.yml", "data.alloy", "grafana-datasources.yml", "grafana-dashboards.yml",
+      "grafana-alert-transfer.yml", "grafana-alert-operations.yml", "dashboard-production.json",
+      "monitoring-compose.yaml", "travelpay-monitoring.service", "prepare-monitoring.py",
     ])
     error_message = "설정 묶음에 Data 호스트 적용에 필요한 파일이 모두 있어야 합니다."
   }
@@ -232,8 +235,8 @@ run "data_config_is_applied_in_place_through_ssm" {
   }
   assert {
     condition = alltrue([
-      for parameter in values(jsondecode(aws_ssm_document.data_apply[0].content).parameters) : can(regex(".", parameter.allowedPattern))
-    ])
-    error_message = "SSM 문서 매개변수는 셸에 들어가기 전에 형식을 제한해야 합니다."
+      for parameter in values(jsondecode(aws_ssm_document.config_apply[0].content).parameters) : can(regex(".", parameter.allowedPattern))
+    ]) && aws_ssm_association.data_apply[0].parameters["ApplyScript"] == "apply-data-bundle.py"
+    error_message = "SSM 문서 매개변수는 셸에 들어가기 전에 형식을 제한하고, Data association은 Data 적용 스크립트를 실행해야 합니다."
   }
 }

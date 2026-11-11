@@ -1,0 +1,43 @@
+// TRAVELPAY Data 호스트 로그 수집 설정입니다. Redis·Kafka와 모니터링 컨테이너의 표준 출력을 Loki로 보냅니다.
+
+// Compose 프로젝트 레이블이 있는 컨테이너만 찾고, 아래에서 두 프로젝트(Redis·Kafka, 모니터링)만 남깁니다.
+discovery.docker "data" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "15s"
+
+	filter {
+		name   = "label"
+		values = ["com.docker.compose.project"]
+	}
+}
+
+// 걸러 낸 대상만 수집기에 넘깁니다. loki.source.docker의 relabel_rules에서 keep·drop하면 레이블만 바뀌고
+// 컨테이너는 그대로 수집되므로 발견 단계에서 고릅니다.
+discovery.relabel "data" {
+	targets = discovery.docker.data.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		regex         = "travelpay-production-(data|monitoring)"
+		action        = "keep"
+	}
+
+	// 로컬과 같은 service_name 레이블에 Compose 서비스 이름을 넣습니다.
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service_name"
+	}
+}
+
+loki.source.docker "data" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.data.output
+	labels     = {job = "docker-data", environment = "production", host = constants.hostname}
+	forward_to = [loki.write.data.receiver]
+}
+
+loki.write "data" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

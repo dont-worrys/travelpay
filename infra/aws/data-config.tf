@@ -95,34 +95,41 @@ resource "aws_iam_role_policy" "data_config_read" {
   })
 }
 
-resource "aws_ssm_document" "data_apply" {
+# Data·앱 호스트가 같은 문서를 씁니다. 묶음 안에서 실행할 적용 스크립트는 허용 패턴의 두 이름으로만 고릅니다.
+moved {
+  from = aws_ssm_document.data_apply
+  to   = aws_ssm_document.config_apply
+}
+
+resource "aws_ssm_document" "config_apply" {
   count = var.enable_data_foundation ? 1 : 0
 
-  name            = "${local.runtime_name_prefix}-data-apply"
+  name            = "${local.runtime_name_prefix}-config-apply"
   document_type   = "Command"
   document_format = "JSON"
   # 매개변수는 셸 작은따옴표 안에 들어가므로 형식을 제한합니다. 스크립트에는 SSM 치환 기호를 쓰지 않습니다.
   content = jsonencode({
     schemaVersion = "2.2"
-    description   = "Fetch the TravelPay Data host bundle, verify its SHA-256 and apply it."
+    description   = "Fetch a TravelPay host config bundle, verify its SHA-256 and run its apply script."
     parameters = {
-      Bucket = { type = "String", allowedPattern = "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" }
-      Key    = { type = "String", allowedPattern = "^[A-Za-z0-9][A-Za-z0-9/._-]{0,255}$" }
-      Sha256 = { type = "String", allowedPattern = "^[0-9a-f]{64}$" }
-      Region = { type = "String", allowedPattern = "^[a-z]{2}-[a-z]+-[0-9]$" }
+      Bucket      = { type = "String", allowedPattern = "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$" }
+      Key         = { type = "String", allowedPattern = "^[A-Za-z0-9][A-Za-z0-9/._-]{0,255}$" }
+      Sha256      = { type = "String", allowedPattern = "^[0-9a-f]{64}$" }
+      Region      = { type = "String", allowedPattern = "^[a-z]{2}-[a-z]+-[0-9]$" }
+      ApplyScript = { type = "String", allowedPattern = "^apply-(data|app)-bundle\\.py$" }
     }
     mainSteps = [{
       action = "aws:runShellScript"
-      name   = "applyDataBundle"
+      name   = "applyConfigBundle"
       inputs = {
         timeoutSeconds = "1500"
         runCommand = concat(
           [
             "set -eu",
-            "export TRAVELPAY_BUNDLE_BUCKET='{{ Bucket }}' TRAVELPAY_BUNDLE_KEY='{{ Key }}' TRAVELPAY_BUNDLE_SHA256='{{ Sha256 }}' TRAVELPAY_REGION='{{ Region }}'",
+            "export TRAVELPAY_BUNDLE_BUCKET='{{ Bucket }}' TRAVELPAY_BUNDLE_KEY='{{ Key }}' TRAVELPAY_BUNDLE_SHA256='{{ Sha256 }}' TRAVELPAY_REGION='{{ Region }}' TRAVELPAY_APPLY_SCRIPT='{{ ApplyScript }}'",
             "python3 -I - <<'TRAVELPAY_FETCH'",
           ],
-          split("\n", trimspace(file("${path.module}/scripts/fetch-data-bundle.py"))),
+          split("\n", trimspace(file("${path.module}/scripts/fetch-config-bundle.py"))),
           ["TRAVELPAY_FETCH"],
         )
       }
@@ -133,7 +140,7 @@ resource "aws_ssm_document" "data_apply" {
 resource "aws_ssm_association" "data_apply" {
   count = var.enable_data_foundation ? 1 : 0
 
-  name             = aws_ssm_document.data_apply[0].name
+  name             = aws_ssm_document.config_apply[0].name
   association_name = "${local.runtime_name_prefix}-data-apply"
   max_concurrency  = "1"
   max_errors       = "0"
@@ -142,17 +149,18 @@ resource "aws_ssm_association" "data_apply" {
     values = [aws_instance.data[0].id]
   }
   parameters = {
-    Bucket = aws_s3_bucket.data_config[0].id
-    Key    = aws_s3_object.data_bundle[0].key
-    Sha256 = sha256(local.data_bundle_json)
-    Region = local.runtime_region
+    Bucket      = aws_s3_bucket.data_config[0].id
+    Key         = aws_s3_object.data_bundle[0].key
+    Sha256      = sha256(local.data_bundle_json)
+    Region      = local.runtime_region
+    ApplyScript = "apply-data-bundle.py"
   }
   # Provider는 생성할 때만 성공을 기다립니다. 묶음·문서·인스턴스가 바뀌면 다시 만들어 실패가 apply에 드러나게 합니다.
   # 문서 실행 한도(1500초)보다 길게 기다려 성공·실패·시간 초과의 최종 상태를 apply에서 확인합니다.
   wait_for_success_timeout_seconds = 1800
 
   lifecycle {
-    replace_triggered_by = [aws_s3_object.data_bundle[0], aws_ssm_document.data_apply[0], aws_instance.data[0]]
+    replace_triggered_by = [aws_s3_object.data_bundle[0], aws_ssm_document.config_apply[0], aws_instance.data[0]]
   }
 
   # 디스크 부착과 S3 조회 권한은 참조로 드러나지 않는 실행 조건입니다.

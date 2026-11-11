@@ -1,0 +1,28 @@
+[Unit]
+Description=TravelPay Alloy log collector
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+# 이전 실행이 남긴 같은 이름의 컨테이너가 있으면 지우고 시작합니다.
+ExecStartPre=-/usr/bin/docker rm --force travelpay-alloy
+# ECS 밖의 호스트 컨테이너라 메모리는 호스트 예약분(ECS_RESERVED_MEMORY)에서 씁니다. 상한을 두어 Task 몫을 침범하지 않게 합니다.
+# Docker 소켓은 컨테이너 로그를 읽는 데 필요하며 사실상 호스트 root 권한이므로 이미지를 digest로 고정합니다.
+# 브리지 네트워크라 IMDS hop 제한(1)으로 호스트 역할 자격 증명에 닿지 않습니다. 12345는 적용 스크립트의 준비 확인용이라 루프백에만 엽니다.
+# 이미지의 /var/lib/alloy는 alloy 사용자(473) 전용이라 권한을 모두 뺀 root는 들어갈 수 없으므로 root 소유 경로에 저장합니다.
+ExecStart=/usr/bin/docker run --rm --name travelpay-alloy --hostname %H \
+  --memory 256m --security-opt no-new-privileges --cap-drop ALL \
+  --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
+  --publish 127.0.0.1:12345:12345 \
+  --volume /var/run/docker.sock:/var/run/docker.sock:ro \
+  --volume /etc/travelpay/alloy/config.alloy:/etc/alloy/config.alloy:ro \
+  --volume /var/lib/travelpay/alloy:/alloy-data \
+  ${alloy_image} run --server.http.listen-addr=0.0.0.0:12345 --storage.path=/alloy-data --disable-reporting /etc/alloy/config.alloy
+ExecStop=/usr/bin/docker stop --time 30 travelpay-alloy
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -18,8 +18,10 @@ locals {
     mock_bank = { name = "mock-bank", port = 8090, management_port = 8090, schema = "mock_bank", db_username = "bank_app", secret_names = ["MOCK_BANK_DB_PASSWORD"] }
   }
 
+  # Data 호스트의 Grafana 관리자 암호입니다. 앱 비밀값과 같은 경로·준비 도구를 쓰고 Data 역할만 읽습니다.
+  monitoring_secret_names = ["GRAFANA_ADMIN_PASSWORD"]
   secret_parameter_arns = {
-    for name in toset(flatten([for service in local.application_services : service.secret_names])) :
+    for name in toset(concat(flatten([for service in local.application_services : service.secret_names]), local.monitoring_secret_names)) :
     name => "arn:aws:ssm:${local.runtime_region}:${var.aws_account_id}:parameter${local.runtime_parameter_prefix}/${name}"
   }
   database_password_names = toset([
@@ -27,7 +29,7 @@ locals {
     "EXCHANGE_DB_PASSWORD", "LEDGER_DB_PASSWORD", "MOCK_BANK_DB_PASSWORD",
   ])
   data_secret_names = setunion(
-    toset(["REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD"]),
+    toset(concat(["REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD"], local.monitoring_secret_names)),
     var.enable_database_bootstrap_access ? local.database_password_names : toset([]),
   )
   repository_arns = {

@@ -16,27 +16,26 @@ locals {
   # 연결을 추가할 때는 여기에서 출발·도착·단일 TCP 포트를 함께 정의합니다.
   tcp_connections = merge(
     {
-      alb_gateway_api       = { source = "alb", target = "gateway", port = 8080 }
-      alb_gateway_health    = { source = "alb", target = "gateway", port = 18080 }
-      gateway_user          = { source = "gateway", target = "user", port = 8080 }
-      gateway_wallet        = { source = "gateway", target = "wallet", port = 8080 }
-      gateway_payment       = { source = "gateway", target = "payment", port = 8080 }
-      gateway_exchange      = { source = "gateway", target = "exchange", port = 8080 }
-      wallet_user           = { source = "wallet", target = "user", port = 8080 }
-      payment_user          = { source = "payment", target = "user", port = 8080 }
-      wallet_ledger         = { source = "wallet", target = "ledger", port = 8080 }
-      payment_ledger        = { source = "payment", target = "ledger", port = 8080 }
-      exchange_ledger       = { source = "exchange", target = "ledger", port = 8080 }
-      payment_wallet        = { source = "payment", target = "wallet", port = 8080 }
-      exchange_wallet       = { source = "exchange", target = "wallet", port = 8080 }
-      wallet_bank           = { source = "wallet", target = "mock_bank", port = 8090 }
-      user_session_redis    = { source = "user", target = "data", port = 16379 }
-      exchange_cache_redis  = { source = "exchange", target = "data", port = 16380 }
-      wallet_kafka          = { source = "wallet", target = "data", port = 9092 }
-      collector_loki        = { source = "log_collector", target = "monitoring", port = 3100 }
-      monitoring_collector  = { source = "monitoring", target = "log_collector", port = 12345 }
-      monitoring_prometheus = { source = "monitoring", target = "monitoring", port = 9090 }
-      monitoring_loki       = { source = "monitoring", target = "monitoring", port = 3100 }
+      alb_gateway_api      = { source = "alb", target = "gateway", port = 8080 }
+      alb_gateway_health   = { source = "alb", target = "gateway", port = 18080 }
+      gateway_user         = { source = "gateway", target = "user", port = 8080 }
+      gateway_wallet       = { source = "gateway", target = "wallet", port = 8080 }
+      gateway_payment      = { source = "gateway", target = "payment", port = 8080 }
+      gateway_exchange     = { source = "gateway", target = "exchange", port = 8080 }
+      wallet_user          = { source = "wallet", target = "user", port = 8080 }
+      payment_user         = { source = "payment", target = "user", port = 8080 }
+      wallet_ledger        = { source = "wallet", target = "ledger", port = 8080 }
+      payment_ledger       = { source = "payment", target = "ledger", port = 8080 }
+      exchange_ledger      = { source = "exchange", target = "ledger", port = 8080 }
+      payment_wallet       = { source = "payment", target = "wallet", port = 8080 }
+      exchange_wallet      = { source = "exchange", target = "wallet", port = 8080 }
+      wallet_bank          = { source = "wallet", target = "mock_bank", port = 8090 }
+      user_session_redis   = { source = "user", target = "data", port = 16379 }
+      exchange_cache_redis = { source = "exchange", target = "data", port = 16380 }
+      wallet_kafka         = { source = "wallet", target = "data", port = 9092 }
+      # 모니터링 구성 요소끼리는 Data 호스트의 Compose 네트워크와 루프백으로만 통신하므로, 앱 호스트 수집기가 Loki로 보내는
+      # 연결만 엽니다(monitoring-compose.yaml).
+      collector_loki = { source = "log_collector", target = "monitoring", port = 3100 }
     },
     {
       for source in toset(["gateway", "user", "wallet", "payment", "exchange", "ledger"]) :

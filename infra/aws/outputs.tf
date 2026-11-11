@@ -72,6 +72,14 @@ output "application_runtime" {
   } : null
 }
 
+output "monitoring" {
+  description = "Grafana는 공개하지 않으므로 SSM 포트 포워딩으로 접속합니다(로컬 http://localhost:3000). AWS 기본 지표는 CloudWatch 대시보드로 봅니다."
+  value = var.enable_data_foundation ? {
+    grafana_port_forward = "aws ssm start-session --target ${aws_instance.data[0].id} --document-name AWS-StartPortForwardingSession --parameters portNumber=3000,localPortNumber=3000"
+    cloudwatch_dashboard = aws_cloudwatch_dashboard.operations[0].dashboard_name
+  } : null
+}
+
 output "alerts_topic_arn" {
   description = "CloudWatch 경보를 보내는 SNS 주제입니다. 이메일 구독은 받는 사람이 확인해야 활성화됩니다."
   value       = one(aws_sns_topic.alerts[*].arn)

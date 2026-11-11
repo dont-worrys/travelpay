@@ -91,6 +91,7 @@ resource "aws_iam_role_policies_exclusive" "hosts" {
   policy_names = concat(
     [aws_iam_role_policy.ssm_boundary[each.key].name, aws_iam_role_policy.host_observability[each.key].name],
     each.key == "app_host" ? [aws_iam_role_policy.app_agent_boundary.name] : [],
+    each.key == "app_host" ? [for policy in aws_iam_role_policy.app_config_read : policy.name] : [],
     each.key == "data" ? [for policy in aws_iam_role_policy.database_bootstrap : policy.name] : [],
     each.key == "data" ? [for policy in aws_iam_role_policy.data_config_read : policy.name] : [],
   )
