@@ -490,18 +490,20 @@ flowchart TD
 - 대시보드 값은 표 패널의 쿼리를 Grafana 데이터소스 API로 실행해 확인했습니다(화면 캡처는 하지 않음).
 - `transfer_processing_stuck`은 계속 0이었습니다. 복구가 정상으로 돌면 30분 전에 `MANUAL_REVIEW`로 넘어가기 때문입니다. 값이 올라가는 경우는 2026-11-11 알림 확인 때 DB로 만들어 확인했습니다(아래).
 
-#### 알림 규칙 (2026-11-11, 로컬, 인프라 담당 확인 필요)
+#### 알림 규칙 (2026-11-11, 로컬, 인프라 담당 확인 완료)
 
 `infra/monitoring/grafana/provisioning/alerting/transfer-alerts.yml`(Grafana 파일 프로비저닝, `compose.monitoring.yaml`에 마운트)에 두 규칙을 둡니다.
 
 | 규칙 | 조건 | 등급 | 대응 |
 |---|---|---|---|
 | 송금 MANUAL_REVIEW 발생 | `max by (environment, service) (transfer_manual_review) > 0` | warning | 확정 미리보기 → resolve([MANUAL_REVIEW 확정](#manual_review-확정)) |
-| 송금 30분 넘게 PROCESSING | `max by (environment, service) (transfer_processing_stuck) > 0` | critical | 복구 스케줄러 동작·payment DB 쓰기 오류·원장 장애 확인, ERROR 로그의 송금 ID |
+| 송금 30분 넘게 PROCESSING | `max by (environment, service) (transfer_processing_stuck) > 0` | critical | 복구 주기 ERROR 로그(payment DB 쓰기 오류 등)·원장 장애 확인, ERROR 로그의 송금 ID |
 
 - 30초마다 평가하고 `for`는 0초입니다. 두 게이지가 이미 "운영자 확인 필요"·"30분 경과"를 담고 있어 더 기다릴 이유가 없습니다.
 - 게이지가 DB 값이라 인스턴스마다 같으므로 `max`로 묶습니다. 지표가 없으면(서비스 다운) 이 규칙은 OK로 둡니다. 서비스 다운은 별도 규칙의 몫입니다.
-- 알림 채널(contact point)은 정하지 않았습니다. 로컬은 Grafana 기본 채널(SMTP 없음)이라 발송되지 않고, Alerting 화면·API에서 상태만 봅니다. 실제 채널은 인프라 담당과 정합니다.
+- 알림 채널(contact point)은 정하지 않았습니다. 로컬은 Grafana 기본 채널(SMTP 없음)이라 발송되지 않고, Alerting 화면·API에서 상태만 봅니다.
+- 한계: 두 게이지는 복구 스케줄러가 주기마다 갱신합니다(`TransferRecoveryScheduler`). 스케줄러가 멈추거나 건수 조회가 계속 실패하면 마지막 값이 그대로 남습니다. 그래서 stuck 알림은 스케줄러는 돌지만 송금을 확정하지 못하는 경우(복구 주기 실패 반복 등)를 잡고, 스케줄러 정지는 잡지 못합니다. 지표 수집이 끊겨도(NoData) OK로 두기 때문에 수집 장애도 이 규칙으로는 모릅니다.
+- 인프라 담당 확인(2026-11-11): 파일 프로비저닝과 `compose.monitoring.yaml` 마운트는 로컬 용도로 적절합니다. Slack 연동은 AWS 배포에서 후순위입니다. 운영에 적용할 때는 인프라 담당이 다음을 보완합니다. ① 운영 Prometheus 데이터소스 UID·수집 대상 `job` 설정(현재 `prometheus-local`·`spring-jvm`에 맞춤) ② payment-service·지표 수집 장애 감지 ③ 복구 스케줄러 동작 상태 감지 ④ 알림 발동·해소 검증
 
 로컬 확인 (원장 정지 중 송금 2건, 그중 1건의 `created_at`을 31분 앞당김. 시각은 KST):
 
@@ -1121,7 +1123,7 @@ python -X utf8 same_key_check.py --rounds 20 --threads 20 --pair 5      # 같은
 | `direction` 생략 목록을 두 인덱스에서 20건씩 읽어 합치기(UNION ALL + LIMIT) | 송금 | 보류. 회원별 송금이 수천 건을 넘을 때 검토 |
 | 목록 건수 조회 생략·상한 | 송금 | 하지 않음. `totalElements`·`totalPages`를 바꾸는 계약 변경 |
 | 대량 대사 속도 | 측정 | `measure.py` API 대사가 페이지 번호 방식이라 수십만 건이면 1시간 가까이 걸림. 장시간 측정은 DB 읽기 전용 SQL 대사로 대신함. 스크립트를 커서·DB 방식으로 바꿀지는 미정 |
-| 송금 게이지 알림 규칙 | 인프라 | 로컬 설정·발동 확인 완료(2026-11-11, [알림 규칙](#알림-규칙-2026-11-11-로컬-인프라-담당-확인-필요)). 알림 채널(Slack 등)과 운영 적용은 인프라 담당 협의 |
+| 송금 게이지 알림 규칙 | 인프라 | 로컬 설정·발동 확인, 인프라 담당 검토 완료(2026-11-11, [알림 규칙](#알림-규칙-2026-11-11-로컬-인프라-담당-확인-완료)). 운영 적용(데이터소스, 수집·스케줄러 장애 감지)은 AWS 모니터링 구축 때 인프라 담당이 보완. Slack 연동은 후순위 |
 | `load-test/README.md`에 새 옵션 반영 | 송금 | 하지 않음. README는 첫 측정 기준으로 두고, 이후 실행 방법·옵션은 이 가이드의 [실행 방법](#실행-방법-readme-이후-추가분)과 [단계별 심화 측정](#단계별-심화-측정-2026-11-10)에서 관리 |
 | 조회 측정의 `dial: i/o timeout` | 측정 | 원인 확인(2026-11-10). Tomcat이 요청 100건마다 연결을 닫아 생기는 새 연결 일부가 Docker Desktop 포트 전달에서 실패하고, 가상 사용자가 약 30초 멈춤. 측정할 때만 `--server.tomcat.max-keep-alive-requests=-1`을 주면 3번 모두 0건([원인](#조회-측정의-dial-io-timeout-원인)). 앱 설정은 바꾸지 않음 |
 
