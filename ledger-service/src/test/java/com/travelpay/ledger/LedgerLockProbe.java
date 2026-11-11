@@ -190,13 +190,16 @@ final class LedgerLockProbe implements AutoCloseable {
                         + "건 중):\n", ""));
     }
 
+    /** 샘플러 스레드의 snapshot()과 같은 observer 연결을 쓰므로 같은 잠금(observer)으로 한 번에 하나만 쓴다 */
     Instant dbNow() throws SQLException {
-        try (PreparedStatement statement = observer.prepareStatement("SELECT clock_timestamp()");
-             ResultSet resultSet = statement.executeQuery()) {
-            resultSet.next();
-            Instant now = resultSet.getTimestamp(1).toInstant();
-            observer.commit();
-            return now;
+        synchronized (observer) {
+            try (PreparedStatement statement = observer.prepareStatement("SELECT clock_timestamp()");
+                 ResultSet resultSet = statement.executeQuery()) {
+                resultSet.next();
+                Instant now = resultSet.getTimestamp(1).toInstant();
+                observer.commit();
+                return now;
+            }
         }
     }
 

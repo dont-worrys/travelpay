@@ -18,6 +18,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -200,15 +201,20 @@ class LedgerDatabaseFailureIntegrationTest {
         Call call;
         String external;
         String samples;
+        Instant appWaitDetected;
+        java.util.concurrent.atomic.AtomicReference<Instant> externalLockRequestedAt =
+                new java.util.concurrent.atomic.AtomicReference<>();
         ExecutorService externalThread = Executors.newSingleThreadExecutor();
         try (LedgerLockProbe probe = newProbe()) {
             // 외부 연결이 뒤 계정 Y를 쥔다 → 앱은 앞 계정 X를 잠근 뒤 Y에서 기다린다
             Connection holder = probe.holdAccount(second);
             probe.startSampling();
             LedgerTestClient.Pending pending = client.sendConcurrently(List.of(body));
-            probe.awaitWaiting(1, WAIT_TIMEOUT);
+            appWaitDetected = probe.awaitWaiting(1, WAIT_TIMEOUT).getFirst().at();
             // 외부 연결이 X를 요청해 교착을 만든다. 앱이 먼저 기다렸으므로 deadlock_timeout이 먼저 지나는 쪽은 앱이다
+            // (외부 세션의 deadlock_timeout을 따로 늘리지는 않았다. 희생자는 결과로 기록하고 경우별로 확인한다)
             Future<String> externalLock = externalThread.submit(() -> {
+                externalLockRequestedAt.set(Instant.now());
                 try (PreparedStatement statement = holder.prepareStatement(
                         "SELECT id FROM ledger_accounts WHERE id = ? FOR UPDATE")) {
                     statement.setObject(1, first);
@@ -228,17 +234,27 @@ class LedgerDatabaseFailureIntegrationTest {
         Thread.sleep(STATS_FLUSH_WAIT.toMillis());
         long deadlockIncrease = deadlocks() - deadlocksBefore;
         String chain = chain(thrown.get(referenceId));
-        boolean appWasVictim = call.status() != 201;
+        boolean appVictim = call.status() == 503 && chain.contains("SQLState=40P01");
+        boolean externalVictim = external.contains("SQLState=40P01");
+        String victim = appVictim ? "app" : externalVictim ? "external" : "none";
+        String timeline = "appWaitDetected=" + appWaitDetected + " deadlockFormed(externalLockRequested)="
+                + externalLockRequestedAt.get() + " appResponded=" + call.respondedAt();
         System.out.println("[db-failure] " + testName + " stats_fetch_consistency=" + fetchConsistency
-                + " deadlock_timeout=" + deadlockTimeout + " appVictim=" + appWasVictim + " external=" + external
+                + " deadlock_timeout=" + deadlockTimeout + " victim=" + victim + " external=" + external
                 + " status=" + call.status() + " code=" + client.errorCode(call.body()) + " clientElapsed="
                 + call.elapsedMs() + "ms exception=" + chain + " deadlockIncrease=" + deadlockIncrease
-                + " sqlErrors=" + sqlErrorLines(output));
+                + " " + timeline + " sqlErrors=" + sqlErrorLines(output));
 
-        String context = call + "\nexternal=" + external + "\n" + chain + "\n" + samples + "\n"
+        String context = call + "\nexternal=" + external + "\n" + chain + "\n" + timeline + "\n" + samples + "\n"
                 + LedgerSameReferenceIntegrationTest.appLog(output);
         assertServiceUnavailableIf5xx(call, chain, context);
-        if (appWasVictim) {
+        if (!appVictim && !externalVictim) {
+            // 앱이 교착 전에 트랜잭션 제한(3초) 등 다른 이유로 끝난 경우
+            fail("교착이 형성되기 전에 끝남(희생자 없음): " + timeline + "\n" + context);
+        }
+        // 교착이 실제로 일어났는지: 별도 트랜잭션, 통계 반영을 기다린 뒤 읽은 증가량
+        assertTrue(deadlockIncrease >= 1, "deadlocks 증가량 ≥ 1\n" + context);
+        if (appVictim) {
             assertEquals(0, transactionRows("TRANSFER", referenceId), context);
             assertEquals(10_000, balance(walletA), context);
             assertEquals(10_000, balance(walletB), context);
@@ -246,7 +262,8 @@ class LedgerDatabaseFailureIntegrationTest {
             System.out.println("[db-failure] " + testName + " retryAfterRelease status=" + retried.statusCode());
             assertEquals(201, retried.statusCode(), retried.body());
         } else {
-            // 외부 연결이 희생됨: 앱 요청은 그대로 반영된다
+            // 외부 연결이 희생됨: 외부 연결에서 40P01, 앱 요청은 그대로 반영된다
+            assertEquals(201, call.status(), context);
             assertEquals(1, transactionRows("TRANSFER", referenceId), context);
             assertEquals(9_000, balance(walletA), context);
         }
@@ -319,6 +336,14 @@ class LedgerDatabaseFailureIntegrationTest {
         for (Call call : calls) {
             assertServiceUnavailableIf5xx(call, chain(thrown.get(referenceIds.get(call.index()))), context);
         }
+        // 고갈이 실제로 일어났는지: 커넥션을 기다린 스레드가 있었고, 커넥션 획득 실패로 끝난 503이 있다
+        assertTrue(max(poolSamples, "awaiting=") > 0, "threadsAwaitingConnection 최대값 > 0\n" + context);
+        long acquireFailures = calls.stream()
+                .filter(call -> call.status() == 503
+                        && thrown.get(referenceIds.get(call.index())) instanceof CannotCreateTransactionException)
+                .count();
+        assertTrue(acquireFailures >= 1, "커넥션 획득 실패(CannotCreateTransactionException)로 끝난 503이 1건 이상\n"
+                + context);
         long posted = 0;
         for (UUID referenceId : referenceIds) {
             int rows = transactionRows("CHARGE", referenceId);
