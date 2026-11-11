@@ -33,6 +33,8 @@ Gateway는 브라우저 요청을 받아 User에 세션 검증을 요청하고, 
 
 프런트의 Vercel 배포 여부와 백엔드의 EC2·ECS 선택은 API 코드와 분리합니다. 현재 실제 DNS·인증서·AWS 리소스는 연결하지 않았습니다.
 
+Swagger UI는 없습니다(Gateway에는 자체 업무 API가 없음). API 문서는 각 서비스의 `/swagger-ui.html`에서 봅니다: User `8081`, Wallet `8082`, Payment `8083`, Exchange `8084`.
+
 ## 로컬 실행
 
 1. `.env.example`을 개인 `.env`로 복사하고 DB·Redis 값을 준비합니다. Compose는 `.env`를 읽고, Spring Boot에는 실행 환경변수로 전달합니다.

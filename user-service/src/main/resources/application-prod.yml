@@ -75,6 +75,13 @@ server:
         same-site: lax
         secure: true
 
+# 운영에서는 API 문서를 노출하지 않습니다.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
+
 eureka:
   instance:
     hostname: user-service
