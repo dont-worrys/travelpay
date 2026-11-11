@@ -143,8 +143,7 @@ k6_started=$(date +%s)
 docker compose run --rm -e VUS="${VUS}" -e LABEL="${LABEL}" -e WARMUP="${WARMUP_SECONDS}s" \
     -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet "/scripts/${SCRIPT}"
 k6_ended=$(date +%s)
-pc_after=$(bash pc-state.sh)
-if ! (require_pc_state "$pc_after"); then
+if ! pc_after=$(bash pc-state.sh) || ! (require_pc_state "$pc_after"); then
     rm -f "results/${LABEL}-vus${VUS}.json"
     exit 1
 fi
