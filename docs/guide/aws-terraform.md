@@ -2,7 +2,7 @@
 
 Terraform 코드는 `infra/aws/`에서 관리합니다. Spring Boot Run과 별개이며 실제 리소스 생성은 Terraform의 `apply`로 실행합니다.
 
-현재 첫 PR의 구현 범위는 **State S3 부트스트랩, VPC·서브넷·라우팅, 역할별 SG**입니다. **S3와 네트워크·SG의 실제 apply·AWS 설정 대조·재실행 plan 검증을 완료**했습니다. 데이터·앱·AWS 모니터링 배치와 실제 업무 통신 검증은 후속 단계입니다.
+**State S3와 네트워크·SG에 이어 IAM·SSM·OIDC, ECS 실행 기반, RDS·Data EC2·Redis·Kafka의 실제 적용과 기동 검증을 완료**했습니다. 앱 Task·이미지·운영 YAML 정교화, ALB·ACM과 중앙 모니터링 배치는 후속 단계입니다.
 
 설계·구현 기준은 [Terraform 설계·구현 원칙](https://app.notion.com/p/413530b4fe5980cf9edbc37ec93b957e)에 모으고, 이 문서는 인프라 담당자의 실행·이전 절차만 다룹니다.
 
@@ -29,9 +29,18 @@ infra/aws/
 ├── variables.tf             # 계정·CIDR·AZ 검증, DB 초기화 접속 옵션
 ├── network.tf               # VPC·서브넷·IGW·NAT·라우팅
 ├── security.tf              # 역할별 SG·통신 규칙·규칙 소유권
-├── outputs.tf               # 네트워크·SG 식별자 출력
+├── runtime-contract.tf      # 서비스 이름·DB 계정·Secret ARN 공통 계약
+├── iam-hosts.tf / iam-tasks.tf # 호스트·서비스별 최소 권한
+├── github-oidc.tf            # production 환경 신뢰, 배포 권한은 기본 비활성
+├── compute.tf               # ECS·빈 ASG·Capacity Provider
+├── rds.tf                   # 사설 RDS·관리형 관리자 암호·복구 보호
+├── data-ec2.tf / private-dns.tf # Data EC2·별도 EBS·공유 사설 DNS
+├── host-observability.tf    # 호스트 메모리·디스크·초기화 로그
+├── templates/               # EC2 기동·Data Compose·systemd 설정
+├── scripts/                 # 적용 순서·비밀값 준비·디스크·DB 초기화 도구
+├── outputs.tf               # 식별자·실행 계약 출력, 비밀값 제외
 ├── .terraform.lock.hcl      # Provider 버전·패키지 체크섬
-├── tests/                   # 네트워크·SG 구성/참조 테스트 13개
+├── tests/                   # Terraform 모의 검증·Python 핵심 동작 검사
 ├── backend.hcl.example      # 개인 Backend 설정 예시
 ├── terraform.tfvars.example # 개인 입력 예시
 └── bootstrap/               # State S3를 처음 만드는 독립 root
@@ -212,7 +221,53 @@ VPC의 원래 Main Route Table도 local만 유지합니다. Public 여부는 IGW
 
 SG 본체와 개별 규칙을 분리해 상호 참조에 따른 생성 순환을 피합니다. `aws_vpc_security_group_rules_exclusive`가 선언한 규칙 전체를 관리하고 VPC 기본 SG는 닫습니다. 다른 도구·수동 규칙을 같은 SG에 섞으면 다음 apply에서 제거될 수 있으므로 보존할 변경을 먼저 코드에 반영합니다.
 
-DB 계정·스키마 초기화 때만 `enable_database_bootstrap_access=true`로 Data → RDS 5432를 추가합니다. 완료 후 `false`로 되돌립니다. RDS 관리자 Secret의 임시 조회 권한은 후속 IAM 구현에서 별도로 제한합니다. 이번 코드는 SG ID까지 출력하며 실제 EC2·Task ENI에 연결하는 작업과 허용/차단 통신 검증은 후속 배치에서 수행합니다.
+DB 계정·스키마 초기화 때만 `enable_database_bootstrap_access=true`로 Data → RDS 5432와 해당 RDS 관리자 Secret 조회 권한, 앱 DB 암호 조회를 엽니다. 완료 후 `false`로 되돌려 plan/apply합니다. 평상시 Data는 Redis 암호 두 개만 조회합니다. EC2에는 역할별 SG를 연결하며 앱 Task 연결과 실제 허용·차단 검증은 배치 단계에서 확인합니다.
+
+## 실행 기반 적용 순서
+
+같은 PR의 코드도 순서대로 적용합니다. 아래 명령은 저장한 계획과 계정·비용을 검토하고 생성이 승인된 경우에만 실행합니다. `travelpay` 프로필과 `123456789012`는 실제 값으로 바꿉니다.
+
+활성화 옵션을 앱 기반과 데이터 기반으로 분리했습니다. 이미 켠 앞 단계의 옵션은 유지하고 해당 단계만 추가로 켭니다. 초기 작성 코드가 한 PR에 있어도 실제 적용·검증은 한 단계씩 마칩니다.
+
+| 단계 | 설정 | 적용 후 확인 |
+|---|---|---|
+| 4 · IAM·SSM·OIDC | 두 기반 옵션 `false`, `app_host_count=0` | 역할·정책 범위, 임시 권한 비활성, 필요한 SSM 경로 |
+| 5 · ECS·앱 호스트 | `enable_app_foundation=true`, `enable_data_foundation=false`, ECS AMI 고정 | 빈 ASG·Capacity Provider 연결 → 새 plan으로 2대 기동 → SSM·ECS Agent·등록 메모리 |
+| 6 · RDS·Data | 앞 단계 설정과 호스트 수를 유지하고 `enable_data_foundation=true`, Data AMI 고정 | 사설 RDS·TLS·디스크 마운트·Redis 인증·Kafka 응답·재기동 보존 |
+
+각 단계에서 **새 plan → 검토 → 승인된 apply → 실제 확인 → 변경 없음 확인** 순서로 진행합니다. 단계 5에서 ASG와 Capacity Provider를 처음 만들 때는 호스트를 0대로 둡니다. AWS 연결 확인 후 `app_host_count=2`의 새 plan을 만들고 검사 도구를 통과시켜 적용합니다. EC2의 running 상태만으로 기동 완료를 판단하지 않습니다.
+
+아래는 최초 4단계의 예시입니다. 이후에는 단계에 맞는 입력과 별도의 plan 파일을 사용합니다. `check-runtime-plan.py`는 ASG 초기 연결 순서만 검사하므로 전체 변경 검토를 대신하지 않습니다.
+
+```bash
+terraform -chdir=infra/aws plan -out=stage-4.tfplan
+python3 infra/aws/scripts/check-runtime-plan.py infra/aws/stage-4.tfplan --profile travelpay
+python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profile travelpay --account 123456789012
+```
+
+비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가해 DB 6개·Redis 2개의 SecureString을 준비합니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. 외부 API 키와 Wallet 암호화 키는 대상이 아니며 앱 배포 전에 별도로 준비합니다.
+
+```bash
+terraform -chdir=infra/aws apply stage-4.tfplan
+```
+
+4~6단계는 이미 적용됐으므로 위 최초 생성 절차를 그대로 반복하지 않습니다. 실제 운영 입력은 Git에서 제외한 개인 파일에 유지하고 매번 최신 State로 새 plan을 만듭니다. 다음 단계는 앞 단계의 옵션·호스트 수를 유지합니다. 분리 전 또는 적용 전 State로 만든 plan을 재사용하지 않습니다.
+
+DB 계정 초기화는 별도 작업입니다. `enable_database_bootstrap_access=true`의 plan/apply 후 SSM으로 Data에 접속해 아래 명령을 실행합니다. 암호는 출력하지 않으며 DB 역할·스키마를 한 트랜잭션으로 준비합니다. Flyway는 이후 앱 기동 시 실행합니다.
+
+```bash
+sudo python3 /opt/travelpay/data/bootstrap-database.py
+```
+
+초기화 성공과 앱 계정의 자기 스키마 접근·타 스키마 차단을 확인한 뒤 옵션을 `false`로 되돌려 새 plan/apply합니다. 공용 namespace는 Kafka 주소 때문에 먼저 만들며, 후속 Eureka·Mock Bank도 같은 `travelpay.internal`을 재사용합니다.
+
+`data.travelpay.internal`은 Cloud Map의 서비스·인스턴스 등록으로 생성합니다. Cloud Map 소유 영역에 Route 53 레코드를 직접 쓰는 방식은 AWS에서 거절됩니다. RDS는 비밀번호 DDL이 오류의 문맥에 남지 않도록 `log_statement=none`, `log_min_error_statement=panic`, `log_error_verbosity=terse`를 사용합니다. 오류의 상세·문맥 대신 기본 오류와 애플리케이션의 안전한 진단 정보를 확인합니다.
+
+현재 확인한 TLS는 **Data EC2 → RDS**이며 RDS 서버 인증서와 AWS CA 번들을 사용합니다. 클라이언트의 `verify-full` 접속과 평문 접속 거절을 실제로 확인했습니다. ACM 인증서를 사용하는 **브라우저 → ALB HTTPS**와 구분합니다. `rds.force_ssl`은 AWS 제어면의 설정과 실제 접속 거절로 검증하며, 이 환경에서는 PostgreSQL의 `current_setting()`에 같은 이름이 노출되지 않았습니다.
+
+Data는 16GiB root, Kafka 30GiB, 향후 모니터링용 20GiB의 별도 암호화 gp3를 사용합니다. Kafka 3072MiB·Redis 두 개 512MiB의 컨테이너 상한을 두고, 모니터링 배치 때 전체 RAM을 다시 검증합니다. 두 EBS와 Data EC2·RDS에는 `prevent_destroy`가 있으며, RDS에는 추가 삭제 보호와 최종 스냅샷을 설정합니다. 삭제·교체는 데이터 보존과 중단 영향을 검토한 별도 작업입니다. 반복 종료 시 최종 스냅샷 이름 충돌도 확인합니다.
+
+기동 코드 변경은 Data EC2 교체 계획을 만들 수 있고 삭제 보호가 이를 차단합니다. 자동 교체를 강행하거나 User Data만 바꾸고 적용됐다고 보지 않습니다. 승인된 유지보수에서 중단·디스크 재부착·검증 절차를 먼저 정합니다. Redis는 현재 로컬 정책처럼 영속 저장하지 않아 재시작 시 세션·견적이 사라집니다. Kafka EBS와 DB의 영속 데이터와 구분합니다.
 
 ## AWS에 접속하지 않는 코드 검증
 
@@ -224,11 +279,14 @@ terraform -chdir=infra/aws/bootstrap test
 terraform -chdir=infra/aws init -backend=false
 terraform -chdir=infra/aws validate
 terraform -chdir=infra/aws test
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s infra/aws/tests -p 'test_*.py'
 ```
 
 `-backend=false`는 이 검증에서 S3 Backend 초기화를 생략하는 옵션입니다. 실제 운영 명령에 계속 붙이는 설정이 아닙니다. `test`는 AWS Provider 경계를 mock으로 바꾸고 Terraform이 평가한 리소스 설정·정책을 검사합니다. 모의 입력과 식별자는 실제 AWS 리소스가 아닙니다.
 
-Terraform test의 run은 기본적으로 apply입니다. 기본 구성 테스트는 `mock_provider "aws"`와 `command = plan`을 명시합니다. 계산된 SG 규칙 ID의 참조를 확인하는 `security_ownership.tftest.hcl` 한 파일은 모든 AWS 동작을 mock 처리한 `command = apply`를 명시합니다. 이 경우에도 실제 AWS 리소스는 생성하지 않습니다. 새 Provider나 실제 AWS 시험을 추가할 때는 모의 처리 범위와 실행·정리 대상을 별도로 검토합니다.
+Terraform test의 run은 기본적으로 apply입니다. 기본 구성 테스트는 `mock_provider "aws"`와 `command = plan`을 명시합니다. SG 규칙 ID 참조와 OIDC 역할 신뢰 등 적용 후 계산값이 필요한 일부 검사는 AWS 동작 전체를 mock 처리한 `command = apply`를 명시합니다. 이 경우에도 실제 AWS 리소스는 생성하지 않습니다. 새 Provider나 실제 AWS 시험을 추가할 때는 모의 처리 범위와 실행·정리 대상을 별도로 검토합니다.
+
+DB 초기화 SQL은 별도 경계 검사로도 확인합니다. 로컬에 `postgres:18.6-bookworm` 이미지가 준비된 경우 `TRAVELPAY_TEST_POSTGRES=1`을 위 Python 검사 명령 앞에 추가합니다. 포트·호스트 볼륨·외부 네트워크 없는 임시 컨테이너에서 비슈퍼유저 초기화·재실행·스키마 격리를 검사하고 제거합니다. 실제 RDS의 확장 권한 동작과 접속 검증은 적용 후 확인합니다.
 
 첫 PR의 구성 테스트는 총 16개입니다. State 보안·IAM 범위 3개, 네트워크 파생·입력·라우팅 7개, SG 허용 행렬·공개 범위·초기화 옵션·규칙 소유권 6개를 확인합니다. 넓은 공개 CIDR·불필요한 DB 연결·HTTPS 포트 확대·규칙 관리 목록 누락을 넣은 임시 복사본에서 해당 테스트가 실패하는 것도 확인했습니다.
 
@@ -250,6 +308,21 @@ Terraform test의 run은 기본적으로 apply입니다. 기본 구성 테스트
 
 NAT Gateway 1개와 공인 IPv4 1개가 실제로 실행 중입니다. 서울 리전 기본 요금 합계는 약 USD0.064/h(24시간 약 USD1.54)이며 NAT 처리량·전송·세금은 별도입니다. 앱 배치 전에도 켜둔 기간의 요금이 발생합니다.
 
-이번에는 현재 IAM 사용자의 S3·네트워크·SG 생성 및 AWS API 설정과 State의 일치를 확인했습니다. 최소 권한 역할별 요청 허용·거절, EC2/ECS·앱 배치 후 실제 패킷 접속·차단·외부 송신, 앱·데이터·Prometheus·Alloy·Loki·Grafana 배치는 후속 단계에 남아 있습니다. 설정 대조를 실제 업무 통신 시험으로 대신했다고 보지 않습니다.
+2026-11-11에는 4~6단계를 차례로 적용하고 다음을 확인했습니다.
+
+| 대상 | 실제 확인 결과 |
+|---|---|
+| IAM·OIDC | 허용·차단 시뮬레이션 19건 통과, 일반 Task 8개와 GitHub 역할의 정책 비어 있음, GitHub 배포 권한 비활성 |
+| SSM | DB 6개·Redis 2개의 SecureString 생성, 값은 Terraform State·코드·로그에 넣지 않음 |
+| ECS on EC2 | m7i.large 2대·두 AZ·Capacity Provider 연결·SSM/ECS Agent 정상, Trunk ENI 실제 부착, ECS 등록 메모리 각 6759MiB |
+| Data EC2 | m7i.large 1대·실제 메모리 7779MiB, Redis 두 개·Kafka 정상, 사설 바인딩·암호화 EBS·메모리 상한 확인 |
+| RDS | PostgreSQL 18.6·db.t4g.medium·사설·암호화·백업 7일·삭제 보호, TLS·평문 거절·max_connections=100 확인 |
+| DB 초기화 | 배포된 스크립트 최초 실행·재실행 성공, 6개 계정 자기 스키마 쓰기·타 스키마 거절, SCRAM 인증 설정 확인 |
+| 임시 권한 회수 | Data → RDS TCP 차단, 관리자 Secret·앱 DB 암호 조회 AccessDenied 실제 확인 |
+| Data 재기동 | Boot ID 변경, Kafka cluster ID·시험 메시지·두 EBS UUID 유지, Redis 임시 키 초기화·인증 복구, 시험 토픽 삭제 |
+| 기본 관측 | 호스트 메모리 3개·디스크 5개 지표 수집, 호스트 초기화 로그 스트림 3개·보관 7일 확인 |
+| 적용 후 재검사 | 본 root plan `No changes`, 구성 테스트 33개·Python 검사 22개 통과 |
+
+EC2·RDS·Data 기반은 실행 중이며 ECS의 애플리케이션 Task는 아직 0개입니다. 외부 환율 API 키와 Wallet 암호화 키는 앱 배포 전 별도로 준비합니다. 앱 Task의 실제 업무 통신·전체 업무 흐름과 Prometheus·Alloy·Loki·Grafana 배치는 후속 단계에서 검증합니다.
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).

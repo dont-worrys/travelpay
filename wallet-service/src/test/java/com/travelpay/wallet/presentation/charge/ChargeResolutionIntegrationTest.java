@@ -2,6 +2,7 @@ package com.travelpay.wallet.presentation.charge;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.wallet.application.charge.BankClient;
+import com.travelpay.wallet.application.charge.ChargeRecoveryGroup;
 import com.travelpay.wallet.application.charge.ChargeRecoveryScheduler;
 import com.travelpay.wallet.application.charge.ChargeRecoverySteps;
 import com.travelpay.wallet.application.charge.ChargeSagaExecutor;
@@ -23,6 +24,7 @@ import com.travelpay.wallet.domain.charge.BankAccount;
 import com.travelpay.wallet.domain.charge.ChargeRequest;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
 import com.travelpay.wallet.domain.resolution.ResolutionAction;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -293,7 +295,7 @@ class ChargeResolutionIntegrationTest {
         // 대기 시간이 충분히 지난 것으로 둔다
         jdbcTemplate.update("UPDATE charge_requests SET updated_at = now() - interval '1 day'");
 
-        assertTrue(recoverySteps.findTargets(10).isEmpty());
+        assertTrue(recoverySteps.findTargets(ChargeRecoveryGroup.allStatuses(), 10).isEmpty());
     }
 
     @Test
@@ -470,7 +472,7 @@ class ChargeResolutionIntegrationTest {
         jdbcTemplate.update("UPDATE charge_requests SET updated_at = now() - interval '31 seconds' WHERE id = ?",
                 chargeId);
 
-        new ChargeRecoveryScheduler(recoverySteps, executor, 10, "10s").recover();
+        new ChargeRecoveryScheduler(recoverySteps, executor, new SimpleMeterRegistry(), 10, "10s").recover();
 
         Map<String, Object> row = chargeRow(chargeId);
         assertEquals("COMPLETED", row.get("status"));
@@ -513,7 +515,7 @@ class ChargeResolutionIntegrationTest {
         jdbcTemplate.update("UPDATE charge_requests SET updated_at = now() - interval '31 seconds' WHERE id = ?",
                 chargeId);
 
-        new ChargeRecoveryScheduler(recoverySteps, executor, 10, "10s").recover();
+        new ChargeRecoveryScheduler(recoverySteps, executor, new SimpleMeterRegistry(), 10, "10s").recover();
 
         verify(bankClient, times(1)).refund(anyString(), any(), anyLong());
         verify(bankClient).refund(refundRequestId, bankTxId, AMOUNT);

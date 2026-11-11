@@ -1,0 +1,28 @@
+#!/bin/bash
+set -euo pipefail
+
+install -d -m 0755 /etc/ecs
+cat > /etc/ecs/ecs.config <<'ECSCONFIG'
+ECS_CLUSTER=${cluster_name}
+ECS_RESERVED_MEMORY=1024
+ECS_AWSVPC_BLOCK_IMDS=true
+ECS_ENABLE_TASK_IAM_ROLE=true
+ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=false
+ECS_ENABLE_AWSLOGS_EXECUTIONROLE_OVERRIDE=true
+ECS_CONTAINER_STOP_TIMEOUT=60s
+ECS_LOGLEVEL=info
+ECSCONFIG
+
+# 기동 실패는 cloud-init에 남기며 패키지 설치가 무한 대기하지 않게 합니다.
+timeout 300 dnf install -y amazon-ssm-agent amazon-cloudwatch-agent
+systemctl enable --now amazon-ssm-agent
+
+install -d -m 0755 /opt/aws/amazon-cloudwatch-agent/etc
+cat > /opt/aws/amazon-cloudwatch-agent/etc/travelpay.json <<'CWCONFIG'
+${cloudwatch_agent}
+CWCONFIG
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/travelpay.json -s
+
+# ECS의 cloud-final 의존성과 user-data 실행이 서로 기다리지 않도록 비동기로 시작합니다.
+systemctl enable --now --no-block ecs

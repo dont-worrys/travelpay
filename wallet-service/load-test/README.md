@@ -34,6 +34,18 @@
    docker compose --profile app up -d --wait     # 인프라 → user·ledger·mock-bank → wallet 순서로 뜸. 모두 health UP까지 기다림
    ```
 
+   이미 떠 있는 상태에서 지갑 jar를 다시 빌드했다면 지갑을 다시 만듭니다.
+
+   ```bash
+   docker compose --profile app up -d --wait --force-recreate wallet
+   ```
+
+   **지갑을 다른 설정이나 새 jar로 다시 띄울 때는 항상 `--force-recreate`를 붙입니다.** 같은 경로에 jar를 다시 빌드해도 compose 설정이 같으면 컨테이너를 다시 만들지 않아 예전 코드가 계속 돕니다. 측정 전에 새 코드에만 있는 지표(예: `charge_recovery_stuck`)나 로그로 새 코드가 떴는지 확인합니다.
+
+   ```bash
+   curl -s 127.0.0.1:19082/actuator/prometheus | grep charge_recovery_stuck
+   ```
+
 3. `measure.py`·`prepare.py`를 실행할 셸에서 아래 환경 변수를 둡니다. 주소는 반드시 `localhost`가 아니라 **`127.0.0.1`**로 둡니다. compose가 포트를 `127.0.0.1`(IPv4)에만 열어서, `localhost`로 부르면 Python이 IPv6(`::1`)를 먼저 시도하다 요청마다 약 2초씩 늦어집니다(서비스 지표 표본이 7초 간격으로 벌어지고 대사 소요 시간에도 2초가 붙음).
 
    ```bash
@@ -60,7 +72,7 @@
 
 - 업무 포트는 PC 스택과 같은 번호지만, 위 3번처럼 `127.0.0.1` 주소로 export 합니다(기본값 `localhost`는 요청마다 약 2초 지연). k6는 Docker 네트워크 안에서 `wallet:8082`로 요청합니다.
 - 지표(Actuator)는 업무 포트와 따로 엽니다. 같은 포트면 지표 요청이 부하 요청 뒤에 줄 섭니다.
-- 앱은 Dockerfile 없이 `eclipse-temurin:21.0.13_9-jdk`에 jar를 마운트해 `java -jar`로 실행합니다(환전 측정과 같은 이미지). 다른 커밋의 jar로 잴 때는 `WALLET_JAR=<경로>`처럼 바꿔 끼웁니다(이 폴더 기준 상대 경로 또는 절대 경로).
+- 앱은 Dockerfile 없이 `eclipse-temurin:21.0.13_9-jdk`에 jar를 마운트해 `java -jar`로 실행합니다(환전 측정과 같은 이미지). 다른 커밋의 jar로 잴 때는 `WALLET_JAR=<경로> docker compose --profile app up -d --wait --force-recreate wallet`처럼 바꿔 끼웁니다(이 폴더 기준 상대 경로 또는 절대 경로).
 - 네 앱 모두 `--eureka.client.enabled=false`(mock-bank는 Eureka 의존성이 없어 생략), 프로필 지정 없음(prod 아님)입니다.
 - 힙은 네 앱 모두 `APP_JAVA_OPTS`(기본 `-Xmx1g`)입니다. JVM 기본 최대 힙은 Docker 메모리의 25%라 PC마다 달라지기 때문입니다.
 - 측정 중 수집하는 1초 서비스 지표는 PC의 `measure.py`가 지표 포트로 읽으므로 포트 전달을 지납니다(앱↔DB·Kafka, k6↔앱, DB 표본은 Docker 안). 표본이 빠지면 아래 실패 조건(구간 경계 표본 없음)으로 드러납니다.
@@ -85,7 +97,7 @@
 - 동시성·batch-size는 환경 변수로 바꾸고 지갑 컨테이너를 다시 만듭니다. `measure.py --concurrency`는 결과에 남기는 값일 뿐 실제 설정을 바꾸지 않으므로 두 값을 맞춥니다.
 
   ```bash
-  CHARGE_CONCURRENCY=3 OUTBOX_BATCH_SIZE=200 docker compose --profile app up -d --wait wallet
+  CHARGE_CONCURRENCY=3 OUTBOX_BATCH_SIZE=200 docker compose --profile app up -d --wait --force-recreate wallet
   ```
 
   값을 바꾸지 않은 다른 서비스는 그대로 둡니다. 같은 셸에서 이어 잴 때는 `export`로 값을 유지합니다(값 없이 `up`하면 기본값 1·50으로 다시 만들어짐).
@@ -195,6 +207,45 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 4. 장애 측정 뒤에는 Mock 은행의 유실 비율을 **0으로 되돌리고 다시 만듭니다**(`unset MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE` 후 `docker compose --profile app up -d --wait mock-bank`). 남아 있으면 다음 기준선 측정이 종료 코드 1이 됩니다(아래 실패 조건).
 
 장애 측정에서 `charges.completionTps`는 복구 대기 시간이 구간에 포함되어 처리량으로 해석하지 않습니다. 볼 값은 `fault` 블록과 출금 정합성입니다. 예: 출금 호출 26번, 은행 출금 성공 20건이면 재시도 6번이 중복 출금으로 이어지지 않은 것입니다.
+
+### 은행 장애 측정 (꺼짐·멈춤)
+
+측정 도중 Mock 은행 자체를 60초 동안 장애 상태로 둡니다. 장애는 두 종류입니다.
+
+| 장애 | 정지 / 재개 | 동작 |
+| --- | --- | --- |
+| 꺼짐 | `docker compose stop mock-bank` / `docker compose start mock-bank` | 연결을 즉시 거부. 재개 뒤 앱이 다시 뜨는 시간만큼 장애가 약 10초 더 김 |
+| 멈춤 | `docker compose pause mock-bank` / `docker compose unpause mock-bank` | 연결은 받고 응답 없이 붙잡음 |
+
+**실행.** 셸 창 두 개를 씁니다(둘 다 이 폴더, 환경 변수는 1번 절처럼).
+
+1. 창 1: `python measure.py <LABEL> --count 2400 --rate 20 --concurrency 1 --drain-timeout 3600`
+2. 창 2: 창 1에 `[2/6] k6 실행`이 찍힌 뒤 실행합니다(꺼짐 예시, 멈춤은 `pause`·`unpause`).
+
+   ```bash
+   sleep 30 && docker compose stop mock-bank && date -u && sleep 60 && docker compose start mock-bank && date -u
+   ```
+
+**확인.**
+
+- 결과 metrics 파일의 `window`(`from` ~ `to`) 안에 창 2가 찍은 정지·재개 시각이 모두 있어야 유효한 측정입니다.
+- 볼 값은 `fault.recoveredCharges`와 `fault.recoveredLatencyMs`입니다.
+- 꺼짐에서는 Mock 은행이 재시작되며 카운터가 0이 되므로 은행 호출 수(`fault.bankWithdrawalCalls`, `services.mock-bank`)는 쓰지 않습니다.
+
+**결과 (2026-11-11, 각 1회).** 기준선은 개선 전 지갑 jar, 개선 후는 복구 스케줄러가 쌓인 만큼 처리하고 장애 단계만 멈추는 지갑 jar입니다. 두 경우 모두 지갑은 기본값(동시성 1, Outbox batch-size 50), 초당 20건 2,400건, 접수 시작 30초 뒤 60초 장애입니다. 기준선의 꺼짐은 정리에 약 24분 걸려 `--drain-timeout 3600`이 필요합니다.
+
+| 장애 | 기준선 | 개선 후 |
+| --- | --- | --- |
+| 꺼짐: 접수 끝 → 모두 종결 | 1,441초 | 35.8초 |
+| 꺼짐: 복구 충전 수, 완료 지연 P50/P95 | 1,418건, 754.6/1,383.1초 | 1,457건, 57.8/73.1초 |
+| 멈춤: 완료 지연 P50/P95 | 19.9/59.1초 | 12.1/57.8초 |
+| 멈춤: 복구 스케줄러가 처리한 충전 | 23건 | 358건 |
+
+모든 측정이 2,400건 `COMPLETED`, 중복 출금 0, 대사 어긋남 0, `MANUAL_REVIEW` 0입니다.
+
+- 꺼짐은 결과 모름이 쌓이는 장애라 개선의 주 효과가 나타납니다.
+- 멈춤은 컨슈머가 은행 응답을 기다리며 묶이는 장애라 P95는 그대로입니다. Mock 은행은 은행망 전체를 서비스 하나로 흉내 내므로, 특정 은행만 멈추는 장애는 재현하지 못합니다(은행별 서킷 브레이커는 다음 단계).
+- 개선 후 복구 스케줄러는 30초 넘게 기다린 `REQUESTED` 충전도 집어 가므로, 밀린 큐를 컨슈머와 나란히 처리합니다(멈춤에서 358건). 같은 충전은 선점으로 한쪽만 처리합니다.
 
 ### measure.py가 하는 일
 

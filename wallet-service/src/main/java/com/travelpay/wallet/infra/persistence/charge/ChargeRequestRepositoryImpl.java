@@ -92,11 +92,17 @@ public class ChargeRequestRepositoryImpl implements ChargeRequestRepository {
     }
 
     @Override
-    public List<ChargeRecoveryTarget> findRecoveryTargets(int limit) {
-        return jpaRepository.findRecoveryTargets(limit).stream()
+    public List<ChargeRecoveryTarget> findRecoveryTargets(Collection<ChargeStatus> statuses, int limit) {
+        List<String> names = statuses.stream().map(ChargeStatus::name).toList();
+        return jpaRepository.findRecoveryTargets(names, limit).stream()
                 .map(row -> new ChargeRecoveryTarget(row.getId(), ChargeStatus.valueOf(row.getStatus()),
                         row.getUpdatedAt()))
                 .toList();
+    }
+
+    @Override
+    public long countByStatusInAndCreatedBefore(Collection<ChargeStatus> statuses, Instant createdBefore) {
+        return jpaRepository.countByStatusInAndCreatedAtBefore(statuses, createdBefore);
     }
 
     @Override
