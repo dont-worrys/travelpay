@@ -150,19 +150,23 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
     int findAttemptCount(@Param("id") UUID id);
 
     /**
-     * 복구 대상: 처리 중 상태이고 대기 시간(30초 × 2^min(max(attempt_count-1, 0), 5))이 지난 건. 시간은 DB now() 기준.
+     * 복구 대상: 상태가 statuses(처리 중 상태 중 한 단계 묶음) 중 하나이고 대기 시간(30초 × 2^min(max(attempt_count-1, 0), 5))이 지난 건. 시간은 DB now() 기준.
      * 첫 번째 updated_at 조건은 대기 시간의 하한으로, (status, updated_at) 인덱스 범위 스캔을 쓰게 하려는 중복 조건이다.
      */
     @Query(nativeQuery = true, value = """
             select id, status, updated_at as "updatedAt"
               from charge_requests
-             where status in ('REQUESTED', 'BANK_PROCESSING', 'CREDIT_PROCESSING', 'REFUND_PROCESSING')
+             where status in (:statuses)
                and updated_at < now() - interval '30 seconds'
                and updated_at < now() - interval '30 seconds' * power(2, least(greatest(attempt_count - 1, 0), 5))
              order by updated_at
              limit :limit
             """)
-    List<ChargeRecoveryRow> findRecoveryTargets(@Param("limit") int limit);
+    List<ChargeRecoveryRow> findRecoveryTargets(@Param("statuses") Collection<String> statuses,
+                                                @Param("limit") int limit);
+
+    /** 멈춘 충전 지표. 생성 시각 기준 (updated_at은 재시도마다 갱신되어 오래 멈춘 건이 빠짐) */
+    long countByStatusInAndCreatedAtBefore(Collection<ChargeStatus> statuses, Instant createdAt);
 
     /** 복구 선점: 조회 이후 아무도 바꾸지 않았을 때만 updated_at을 DB now()로 갱신한다 */
     @Modifying(flushAutomatically = true, clearAutomatically = true)
