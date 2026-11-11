@@ -349,7 +349,9 @@ def main():
     parser.add_argument("label")
     parser.add_argument("vus", type=int)
     parser.add_argument("--script", default="transfer-request.js", choices=["transfer-request.js", "transfer-query.js"])
-    parser.add_argument("--mode", default="spread", choices=["spread", "hot", "sender-hot"])
+    parser.add_argument("--mode", default="spread", choices=["spread", "hot", "sender-hot", "bidirectional", "mixed"])
+    parser.add_argument("--hot-vus", type=int, default=None,
+                        help="mixed에서 집중 수취인에게 보내는 가상 사용자 수 (기본 VUS/2, 0이면 spread 그룹만)")
     parser.add_argument("--amount", type=int, default=1)
     parser.add_argument("--query", default="mixed", choices=["list", "detail", "mixed"])
     parser.add_argument("--warmup", type=int, default=15)
@@ -391,7 +393,7 @@ def main():
     run_started = datetime.now(timezone.utc)
     env = {"VUS": str(args.vus), "LABEL": args.label, "WARMUP": f"{args.warmup}s", "DURATION": f"{args.duration}s",
            "MODE": args.mode, "AMOUNT": str(args.amount), "QUERY": args.query,
-           "GATEWAY": "1" if args.gateway else "0"}
+           "GATEWAY": "1" if args.gateway else "0", "HOT_VUS": "" if args.hot_vus is None else str(args.hot_vus)}
     if args.gateway:
         env["BASE_URL"] = "http://host.docker.internal:8080"
     command = ["docker", "compose", "run", "--rm"]
@@ -413,7 +415,7 @@ def main():
     db_sampler.join(timeout=args.warmup + args.duration + 120)
     metrics = {
         "label": args.label, "vus": args.vus, "script": args.script,
-        "mode": args.mode if is_request else None, "query": None if is_request else args.query,
+        "mode": args.mode if is_request else None, "hotVus": args.hot_vus, "query": None if is_request else args.query,
         "gateway": args.gateway, "extraServices": args.extra_service,
         "measureWindow": {"from": iso(datetime.fromtimestamp(measure_from, timezone.utc)),
                           "to": iso(datetime.fromtimestamp(measure_to, timezone.utc))},
