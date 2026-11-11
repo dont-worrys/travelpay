@@ -1,0 +1,91 @@
+# TRAVELPAY 로컬 Grafana 알림 규칙 - 송금 복구 상태
+#
+# 송금 복구 스케줄러가 10초마다 갱신하는 게이지(payment-service)를 봅니다.
+#   transfer_manual_review    : MANUAL_REVIEW 송금 수. 자동 처리가 끝나 운영자 확정(resolve)이 필요한 건
+#   transfer_processing_stuck : 생성 후 30분이 지났는데도 PROCESSING인 송금 수. 정상이면 결과 모름 5회(약 7.5분) 안에
+#                               끝나므로, 0보다 크면 복구 주기가 송금을 확정하지 못하고 있다는 뜻(복구 주기 실패 반복 등).
+#                               게이지는 복구 스케줄러가 갱신하므로 스케줄러 정지 자체는 이 규칙으로 감지하지 못합니다.
+# 두 게이지 모두 DB 값이라 인스턴스마다 같은 값이 나오므로 max로 묶습니다.
+#
+# 알림 채널(contact point)은 정하지 않았습니다. 로컬에서는 Grafana 기본 채널로 가고 SMTP가 없어 실제 발송은 되지 않으며,
+# Alerting 화면과 API에서 상태(Normal / Firing)만 확인합니다. 실제 채널(Slack 등)은 인프라 담당과 정합니다.
+# 서비스가 꺼져 지표가 없을 때(NoData)는 송금 상태 알림이 아니므로 OK로 둡니다(서비스 다운 알림은 별도 규칙의 몫).
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: transfer-recovery
+    folder: TRAVELPAY
+    interval: 30s
+    rules:
+      - uid: transfer-manual-review
+        title: 송금 MANUAL_REVIEW 발생
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus-local
+            model:
+              refId: A
+              expr: max by (environment, service) (transfer_manual_review{job="spring-jvm"})
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: warning
+          domain: transfer
+        annotations:
+          summary: 운영자 확정이 필요한 송금이 {{ $values.A.Value }}건 있습니다.
+          description: >-
+            원장 결과를 자동으로 확정하지 못한 송금(MANUAL_REVIEW)입니다. 관리자 API로 확정 미리보기
+            (GET /api/v1/admin/transfers/{transferId}/resolution) 후 resolve로 확정합니다.
+            절차는 docs/guide/payment-transfer.md 「MANUAL_REVIEW 확정」.
+
+      - uid: transfer-processing-stuck
+        title: 송금 30분 넘게 PROCESSING
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus-local
+            model:
+              refId: A
+              expr: max by (environment, service) (transfer_processing_stuck{job="spring-jvm"})
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: critical
+          domain: transfer
+        annotations:
+          summary: 생성 후 30분이 지난 PROCESSING 송금이 {{ $values.A.Value }}건 있습니다.
+          description: >-
+            정상이면 결과 모름 5회(약 7.5분) 안에 COMPLETED·FAILED·MANUAL_REVIEW로 끝나야 합니다.
+            복구 스케줄러 동작(transfer.recovery.enabled, 스케줄러 스레드), payment DB 쓰기 오류, 원장 장애를 확인합니다.
+            payment-service ERROR 로그에 오래된 송금 ID 10개가 남습니다.
