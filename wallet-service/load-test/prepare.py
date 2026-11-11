@@ -68,12 +68,13 @@ def main():
     parser.add_argument("--users", type=int, default=50)
     parser.add_argument("--holder", default="유재석")
     parser.add_argument("--bank-codes", default="004",
-                        help="쉼표로 구분한 은행 코드(숫자 3자리). 회원 순번대로 돌아가며 배정. 예: 004,088")
+                        help="쉼표로 구분한 은행 코드(ASCII 숫자 3자리, 지갑 충전 검증과 같음). 회원 순번대로 돌아가며 배정. 예: 004,088")
     parser.add_argument("--bank-balance", type=int, default=1_000_000_000_000)
     args = parser.parse_args()
     bank_codes = [code.strip() for code in args.bank_codes.split(",")]
-    if not all(re.fullmatch(r"\d{3}", code) for code in bank_codes) or len(set(bank_codes)) != len(bank_codes):
-        raise SystemExit("--bank-codes는 겹치지 않는 숫자 3자리 은행 코드를 쉼표로 구분합니다. 예: 004,088")
+    # \d는 전각·아랍 숫자 등 유니코드 숫자도 받으므로 ASCII만 허용(ChargeCreateRequest의 ^[0-9]{3}$와 같게)
+    if not all(re.fullmatch(r"[0-9]{3}", code) for code in bank_codes) or len(set(bank_codes)) != len(bank_codes):
+        raise SystemExit("--bank-codes는 겹치지 않는 ASCII 숫자(0-9) 3자리 은행 코드를 쉼표로 구분합니다. 예: 004,088")
     if not 1 <= args.users <= 9999 or args.bank_balance < 0:
         raise SystemExit("--users는 1~9999, --bank-balance는 0 이상입니다.")
 
