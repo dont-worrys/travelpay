@@ -76,7 +76,7 @@ export default function () {
     }
     const user = DATA.users[iteration % DATA.users.length];
     const response = http.post(`${BASE_URL}/api/v1/charges`,
-        JSON.stringify({ amount: AMOUNT, currency: 'KRW', bankCode: DATA.bankCode, accountNumber: user.accountNumber }), {
+        JSON.stringify({ amount: AMOUNT, currency: 'KRW', bankCode: user.bankCode || DATA.bankCode, accountNumber: user.accountNumber }), {
             headers: {
                 'Content-Type': 'application/json',
                 'User-Id': user.userId,

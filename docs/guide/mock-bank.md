@@ -45,6 +45,9 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 | `POST /internal/v1/bank/refunds` | 환불(플랫폼 계좌 → 원출금 계좌) | 201(새로 성공)·200(업무 거절 또는 같은 `requestId` 재요청) |
 | `GET /internal/v1/bank/transactions/{requestId}` | `requestId`로 거래 단건 조회 | 200 |
 | `GET /internal/v1/bank/transactions?from=&to=&page=&size=` | 기간 거래 목록(페이지) | 200 |
+| `GET /internal/v1/bank/faults/withdrawal-holds` | 은행별 출금 붙잡기 상태(측정용, [장애 재현](#은행별-출금-붙잡기)이 켜졌을 때만) | 200 |
+| `PUT /internal/v1/bank/faults/withdrawal-holds/{bankCode}` | 그 은행 출금 붙잡기 켜기·대기 시간 바꾸기 | 200 |
+| `DELETE /internal/v1/bank/faults/withdrawal-holds/{bankCode}` | 그 은행 출금 붙잡기 끄기 | 200 |
 
 - 모두 `/internal/**` 경로입니다. Gateway 외부 라우트에 없으므로 브라우저에서 부를 수 없고, 직접 주소(`http://localhost:8090`)로 호출합니다.
 - 응답 본문은 `success`·`data`·`error` 공통 형식입니다([common 가이드](common.md)). 금액은 원 단위 정수, 시각은 UTC ISO-8601입니다.
@@ -260,14 +263,14 @@ Swagger UI는 없습니다(mock-bank에 springdoc 의존성이 없음). API 계�
 
 ## 장애 재현
 
-`Mock-Fault` 요청 헤더로 응답 장애를 흉내 냅니다. 장애 주입(헤더, [출금 응답 유실 비율](#출금-응답-유실-비율))은 **기본 꺼짐**이고 두 조건을 모두 만족할 때만 동작합니다.
+`Mock-Fault` 요청 헤더로 응답 장애를 흉내 냅니다. 장애 주입(헤더, [출금 응답 유실 비율](#출금-응답-유실-비율), [은행별 출금 붙잡기](#은행별-출금-붙잡기))은 **기본 꺼짐**이고 두 조건을 모두 만족할 때만 동작합니다.
 
 | 조건 | 내용 |
 |---|---|
 | 켜기 | `mock-bank.fault.enabled=true` (실행 인자 `--mock-bank.fault.enabled=true` 또는 환경 변수 `MOCK_BANK_FAULT_ENABLED=true`). `application.yml` 기본 `false`, 키가 없어도 꺼짐 |
 | prod 아님 | prod 프로필(`SPRING_PROFILES_ACTIVE=prod`)이면 `enabled=true`여도 꺼짐 |
 
-꺼져 있으면 장애 주입 필터·유실 비율 설정 빈을 만들지 않습니다. 헤더가 와도 무시하고 정상 응답하며, 유실 비율 값이 있어도 읽지도 검증하지도 않습니다(범위 밖이어도 기동). 유실 카운터도 등록되지 않습니다.
+꺼져 있으면 장애 주입 필터·유실 비율 설정·출금 붙잡기 빈을 만들지 않습니다(붙잡기 API 경로도 없어 404). 헤더가 와도 무시하고 정상 응답하며, 유실 비율 값이 있어도 읽지도 검증하지도 않습니다(범위 밖이어도 기동). 유실 카운터도 등록되지 않습니다.
 
 | 헤더 값 | 동작 |
 |---|---|
@@ -320,14 +323,63 @@ curl -i -X POST http://localhost:8090/internal/v1/bank/withdrawals \
 
 측정 절차와 비율이 실제로 적용됐는지 확인하는 방법은 [충전 부하 측정 README](../../wallet-service/load-test/README.md#장애-측정-출금-응답-유실)에 있습니다.
 
+### 은행별 출금 붙잡기
+
+한 은행의 출금만 응답 없이 붙잡는 장애를 실행 중에 켜고 끕니다(측정용). 은행이 연결은 받고 응답하지 않는 상황을 은행 하나에만 만들어, 다른 은행 충전이 함께 늦어지는지 봅니다. 헤더 방식과 같은 [이중 조건](#장애-재현)(`mock-bank.fault.enabled=true` + prod 아님)일 때만 API·필터가 있습니다.
+
+| 항목 | 동작 |
+|---|---|
+| 대상 | `POST /internal/v1/bank/withdrawals` 중 본문 `bankCode`가 붙잡기 켜진 은행인 요청. **환불·조회는 대상 아님** |
+| 붙잡는 방식 | **처리 전에** 대기 시간만큼 기다린 뒤 원래대로 처리·응답. 호출 쪽이 읽기 시간 초과로 먼저 끊으면 결과를 받지 못하지만 거래는 그 뒤에 처리·커밋됨(`docker compose pause` 후 재개와 같음). 같은 `requestId`로 다시 보내면 기존 결과 |
+| 대기 시간 | API로 받음(`delaySeconds` 1~600초). 결과 모름을 만들려면 지갑 읽기 시간 초과(5초)보다 길게 씀 |
+| 끄기 | 그 은행의 새 출금은 바로 처리. **기다리던 출금도 바로 풀려** 처리됨(대기 시간을 바꾸기 전부터 기다리던 출금 포함) |
+| 보관 | 메모리. Mock 은행을 다시 띄우면 모두 꺼짐. 인스턴스가 여러 개면 인스턴스마다 따로 켬 |
+| 다른 장애 주입과 함께 | 붙잡은 뒤 처리할 때 `Mock-Fault` 헤더·유실 비율이 그대로 적용됨 |
+| 본문 이상 | 본문이 JSON이 아니거나 `bankCode`가 없으면 붙잡지 않고 원래 처리(검증 오류 400) |
+| 본문 크기 | 붙잡기가 하나라도 켜져 있으면 출금 본문을 읽어 담으므로 8KiB를 넘으면 413(`Content-Length`가 없는 chunked도 읽으면서 끊음). 검증을 통과하는 가장 큰 출금 본문은 약 1.3KB |
+
+API(세 API 모두 현재 붙잡기 목록을 은행 코드 순으로 돌려줌):
+
+| API | 요청 | 비고 |
+|---|---|---|
+| `GET /internal/v1/bank/faults/withdrawal-holds` | | 켜진 은행이 없으면 `data: []` |
+| `PUT /internal/v1/bank/faults/withdrawal-holds/{bankCode}` | `{"delaySeconds": 30}` | 이미 켜져 있으면 대기 시간만 바꿈(이후 출금부터 적용, 이미 기다리던 출금은 이전 대기 시간 그대로이며 끄면 함께 풀림) |
+| `DELETE /internal/v1/bank/faults/withdrawal-holds/{bankCode}` | | 켜져 있지 않은 은행이어도 200 |
+
+목록 항목:
+
+| 필드 | 뜻 |
+|---|---|
+| `bankCode` | 은행 코드 |
+| `delaySeconds` | 대기 시간(초) |
+| `since` | 처음 켠 시각(UTC). 대기 시간을 바꿔도 그대로이고, 끄고 다시 켜면 새 시각 |
+| `heldCount` | 처음 켠 뒤 붙잡은 출금 요청 수. 대기 시간을 바꿔도 이어서 세고, 끄고 다시 켜면 0부터 |
+
+- `bankCode`가 숫자 3자리가 아니거나 `delaySeconds`가 없거나 범위 밖이면 400 `COMMON_INVALID_REQUEST`이고 상태는 바뀌지 않습니다.
+- 켜진 채로 대기 시간을 바꾸면 이후 출금부터 새 대기 시간을 따르고, 이미 기다리던 요청은 이전 대기 시간대로 기다립니다(끄면 함께 풀림).
+- 켤 때(`출금 붙잡기 켬`, 은행 코드·대기 시간), 끌 때(`출금 붙잡기 끔`, 은행 코드), 붙잡을 때(`출금 붙잡기`, 은행 코드·대기 시간), 본문이 한도를 넘을 때(`출금 붙잡기 본문 크기 초과`, 한도) WARN 로그를 남깁니다.
+- 붙잡는 동안 요청마다 Tomcat 스레드를 하나씩 잡습니다(기본 최대 200).
+
+```bash
+# Mock 은행을 --mock-bank.fault.enabled=true로 띄운 상태
+curl -s -X PUT localhost:8090/internal/v1/bank/faults/withdrawal-holds/004 \
+  -H 'Content-Type: application/json' -d '{"delaySeconds":30}'
+# → 004 출금은 30초 뒤 처리·응답, 088 출금·환불은 바로
+curl -s localhost:8090/internal/v1/bank/faults/withdrawal-holds     # heldCount 확인
+curl -s -X DELETE localhost:8090/internal/v1/bank/faults/withdrawal-holds/004
+```
+
+측정 절차는 [충전 부하 측정 README](../../wallet-service/load-test/README.md#은행별-붙잡기-측정-한-은행만-멈춤)에 있습니다.
+
 ## 오류 응답
 
 | 상태 | 코드 | 상황 |
 |---|---|---|
-| 400 | `COMMON_INVALID_REQUEST` | 본문 검증 실패, 필수 파라미터 누락, 시각·숫자 형식 오류, `from > to`, `page < 0`, `size < 1`, offset 한도 초과, 시각 올림 범위 초과 |
+| 400 | `COMMON_INVALID_REQUEST` | 본문 검증 실패, 필수 파라미터 누락, 시각·숫자 형식 오류, `from > to`, `page < 0`, `size < 1`, offset 한도 초과, 시각 올림 범위 초과, 출금 붙잡기 API의 은행 코드·대기 시간 오류 |
 | 404 | `BANK_TRANSACTION_NOT_FOUND` | 단건 조회에서 `requestId` 기록 없음 |
 | 404 | `COMMON_NOT_FOUND` | 없는 경로 |
 | 409 | `BANK_REQUEST_ID_CONFLICT` | 같은 `requestId`로 다른 유형 또는 다른 내용의 거래가 이미 있음 |
+| 413 | `COMMON_PAYLOAD_TOO_LARGE` | 출금 붙잡기가 켜져 있을 때 출금 본문이 8KiB 초과 |
 | 500 | `COMMON_INTERNAL_SERVER_ERROR` | 예상하지 못한 오류, `Mock-Fault: LOST`, 출금 응답 유실 비율 |
 
 업무 거절은 이 표에 없습니다. 200 + `FAILED` + [실패 코드](#실패-코드)입니다.
@@ -373,9 +425,10 @@ Testcontainers 통합 테스트는 PostgreSQL 컨테이너(`postgres:18.6-bookwo
 | 테스트 | 범위 |
 |---|---|
 | `BankTransactionApiIntegrationTest` | `enabled=true`. 같은 `requestId` 동시 출금 1회 처리, 업무 거절 `FAILED` 기록·재요청 같은 결과, 예금주 공백 정리, `DELAY`·`LOST`(커밋 후 적용, 재요청은 기존 결과. 지연은 `1s`로 줄여 실행), 형식 오류 400, 다른 유형 `requestId` 409, 같은 `requestId` 다른 내용(출금 금액·계좌, 환불 금액·원거래, 계좌 없음·원거래 없음 거절 포함) 409·같은 내용 200, 동시 환불 1건만 성공·나머지 `ALREADY_REFUNDED`, 환불 재요청·업무 거절, 플랫폼 잔액 부족 환불 `INSUFFICIENT_BALANCE`(잔액 그대로), 같은 계좌 출금·환불 동시 처리 교착 없음, 단건 조회 |
-| `BankFaultInjectionProdProfileTest` | `application-prod.yml` + prod 프로필 + `enabled=true`에서 `Mock-Fault: LOST`를 무시하고 201, 장애 주입 필터 빈 없음 |
-| `BankFaultInjectionDisabledByDefaultTest` | `enabled` 지정 없음(`application.yml` 기본 false) + 유실 비율 1.0: `Mock-Fault: LOST`·비율 모두 무시하고 201, 필터·설정 빈 없음 |
-| `BankFaultEnabledConditionTest` | Docker 불필요. `enabled` 키 없음·`false`·그 외 값이면 빈 없음(범위 밖 비율도 기동), `true`면 빈 생성·범위 밖 비율 기동 실패 |
+| `BankFaultInjectionProdProfileTest` | `application-prod.yml` + prod 프로필 + `enabled=true`에서 `Mock-Fault: LOST`를 무시하고 201, 장애 주입 필터 빈 없음, 출금 붙잡기 빈 없음·API 404 |
+| `BankFaultInjectionDisabledByDefaultTest` | `enabled` 지정 없음(`application.yml` 기본 false) + 유실 비율 1.0: `Mock-Fault: LOST`·비율 모두 무시하고 201, 필터·설정·출금 붙잡기 빈 없음, 붙잡기 API 404 |
+| `BankFaultEnabledConditionTest` | Docker 불필요. `enabled` 키 없음·`false`·그 외 값이면 빈 없음(범위 밖 비율도 기동), `true`면 빈 생성(출금 붙잡기 포함)·범위 밖 비율 기동 실패 |
+| `BankWithdrawalHoldIntegrationTest` | `enabled=true`. 켠 은행 출금은 대기 중 응답 없음(클라이언트 1초 시간 초과)·기록 없음 → 대기 뒤 처리·커밋, 대기보다 오래 기다리면 원래 201, 다른 은행 출금·환불은 바로 201, 끄면 기다리던 출금이 풀리고 새 출금은 바로 201, 대기 시간을 바꾼 뒤 끄면 바꾸기 전부터 기다리던 출금도 풀림(바꾼 뒤 출금은 새 대기 시간), 8KiB 넘는 출금 본문(Content-Length·chunked) 413·정상 chunked 출금 201, 목록(은행 코드 순·대기 시간 변경·`heldCount`·끄지 않은 은행 끄기 200), 잘못된 은행 코드·대기 시간 400(상태 불변), 붙잡은 뒤에도 본문을 다시 읽어 검증 오류 400 |
 | `BankTransactionQueryApiIntegrationTest` | 단건 필드·환불 원거래·실패 코드, 404, 반복 조회해도 거래 불변, `[from, to)` 경계, 빈 목록, 같은 시각 ID 정렬, 페이지 이어 받기, 오프셋 시각 UTC 해석, `sort` 무시, 입력 오류 400, `size` 기본 20·최대 100, offset 한도, 마이크로초 올림, 목록 응답에 계좌 정보 없음 |
 | `BankWithdrawalLostRateIntegrationTest` | `enabled=true`, 비율 1.0: 성공·`FAILED` 모두 500(본문은 헤더 `LOST`와 같음), 단건 조회로 저장 확인, 같은 `requestId` 재요청도 500, 400·409는 원래 응답, 헤더 `DELAY`·`LOST`는 기존 동작이며 카운터 증가 없음, 환불 미적용, 카운터는 유실 건수만큼 증가 |
 | `BankWithdrawalLostRatePropertiesTest` | Docker 불필요. -0.1·1.1 기동 실패, 0·1.0 기동 성공, 비율 0이면 필터를 건너뜀, 헤더 요청·환불·조회에는 미적용 |

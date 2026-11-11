@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * mock-bank.fault.enabled 조건: true일 때만 장애 주입 필터·유실 비율 설정 빈을 만든다.
+ * mock-bank.fault.enabled 조건: true일 때만 장애 주입 필터·유실 비율 설정·출금 붙잡기 빈을 만든다.
  * 키가 없거나 true가 아니면 빈이 없고 유실 비율 범위도 검증하지 않는다. Docker 불필요.
  */
 class BankFaultEnabledConditionTest {
@@ -74,12 +74,16 @@ class BankFaultEnabledConditionTest {
         assertEquals(expected, context.getBeansOfType(BankFaultInjectionFilter.class).size());
         assertEquals(expected, context.getBeansOfType(BankWithdrawalLostRateFilter.class).size());
         assertEquals(expected, context.getBeansOfType(BankWithdrawalLostRateProperties.class).size());
+        assertEquals(expected, context.getBeansOfType(BankWithdrawalHolds.class).size());
+        assertEquals(expected, context.getBeansOfType(BankWithdrawalHoldFilter.class).size());
+        assertEquals(expected, context.getBeansOfType(BankWithdrawalHoldController.class).size());
     }
 
     /** 앱과 같게 등록한다: 필터는 @Import, 설정은 @ConfigurationPropertiesScan(둘 다 클래스의 @Conditional을 평가함). */
     @Configuration(proxyBeanMethods = false)
     @ConfigurationPropertiesScan(basePackageClasses = BankFaultProperties.class)
-    @Import({BankFaultInjectionFilter.class, BankWithdrawalLostRateFilter.class})
+    @Import({BankFaultInjectionFilter.class, BankWithdrawalLostRateFilter.class, BankWithdrawalHolds.class,
+            BankWithdrawalHoldFilter.class, BankWithdrawalHoldController.class})
     static class Config {
 
         @Bean

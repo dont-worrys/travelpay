@@ -42,5 +42,9 @@ interface ExchangeRateJpaRepository extends JpaRepository<ExchangeRate, UUID> {
     @Query(nativeQuery = true, value = LATEST_OF_EACH_SQL)
     List<ExchangeRate> findLatestOfEach(@Param("source") String source, @Param("currencies") String currencies);
 
+    /** 고시일이 주어진 날보다 앞선 것 중 최신 1건입니다. ix_exchange_rates_latest를 그 날 앞부터 읽습니다. */
+    Optional<ExchangeRate> findFirstBySourceAndCurrencyAndRateDateBeforeOrderByRateDateDescCollectedAtDesc(
+            RateSource source, ForeignCurrency currency, LocalDate rateDate);
+
     boolean existsBySourceAndCurrencyAndRateDate(RateSource source, ForeignCurrency currency, LocalDate rateDate);
 }
