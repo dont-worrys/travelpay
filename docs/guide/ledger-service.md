@@ -109,10 +109,19 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 
 1. 같은 reference 거래가 이미 있으면 [멱등성](#멱등성) 규칙으로 응답합니다.
 2. 항목마다 계정을 찾습니다. 없으면 `ACCOUNT_NOT_FOUND`로 거절합니다.
-3. 계정을 ID 순으로 잠급니다(`FOR UPDATE`, 데드락 방지).
+3. 계정을 ID 순으로 잠급니다(`FOR NO KEY UPDATE`, 데드락 방지). [계정 잠금 순서](#계정-잠금-순서) 참고.
 4. 하나라도 `ACTIVE`가 아니면 `WALLET_SUSPENDED`로 거절합니다.
 5. 계정별 순변동(대변 합 − 차변 합)을 더해 `USER` 계정 잔액이 음수가 되면 `INSUFFICIENT_BALANCE`로 거절합니다. `SYSTEM` 계정은 음수를 허용합니다. 항목 순서와 관계없이 순변동으로 판단합니다.
 6. 거래·항목·잔액을 한 트랜잭션으로 저장합니다(제한 시간 3초).
+
+### 계정 잠금 순서
+
+`LedgerOppositeTransferIntegrationTest`로 확인한 결과입니다.
+
+- 거래마다 항목 계정을 DB 계정 ID 오름차순(`ORDER BY id`)으로 한 번에 잠급니다.
+- 테스트 중 `pg_stat_activity`에서 관측한 실제 SQL의 잠금 절은 `FOR NO KEY UPDATE`였습니다.
+- 같은 두 지갑 사이의 반대 방향 송금(A→B, B→A) 두 건이 모두 앞 계정에서 대기하는 동안, 다른 연결이 뒤 계정에 `FOR NO KEY UPDATE NOWAIT`를 걸어 바로 성공했습니다. 대기 중인 요청이 뒤 계정을 먼저 잠그지 않았다는 실행 근거입니다.
+- 반대 방향 동시 송금을 50회 반복한 검증에서 송금 형태(`TRANSFER_OUT`/`TRANSFER_IN`) 원장 거래 100건이 모두 `POSTED`되었고, DB 교착 횟수(`pg_stat_database.deadlocks`) 증가량은 0이었습니다.
 
 ### entry_type 허용 값
 
@@ -164,6 +173,16 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 - 거절된 reference는 다시 쓸 수 없습니다. 잔액을 채운 뒤 다시 시도하려면 새 reference가 필요합니다.
 - 중복 방지는 DB `UNIQUE(reference_type, reference_id)`로 보장합니다.
 
+같은 reference 동시 요청은 `LedgerSameReferenceIntegrationTest`로 확인했습니다. 계정 잠금을 외부 연결로 쥔 채 6건을 동시에 보내, 6건 모두 기존 거래가 없다고 읽고 잠금 대기에 들어간 것을 확인한 뒤 풀었습니다.
+
+| 경우 | 결과 |
+|---|---|
+| 같은 내용, 반영(`POSTED`) | 201 1건, 200 5건. 거래 행 1건과 원장 항목 2건만 생성되고 잔액은 한 번만 변경 |
+| 같은 내용, 거절(`REJECTED`) | 422 6건. `REJECTED` 거래 행 1건만 생성되고 원장 항목·잔액 변경 없음 |
+| 다른 내용 | 먼저 등록된 내용이 반영되고(201·200), 다른 내용 요청은 409 `LEDGER_REFERENCE_CONFLICT` |
+
+- 경합에서 진 요청은 거래 INSERT의 UNIQUE 제약 충돌 뒤 새 트랜잭션에서 기존 거래를 다시 조회해 위 규칙으로 응답합니다.
+
 ### 응답 코드와 호출 쪽 처리 권장
 
 | 응답 | 의미 | 호출 쪽 처리 |
@@ -178,6 +197,28 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 | 읽기 타임아웃·연결 실패 | 원장이 처리했을 수 있음 | 실패로 단정하지 않음. 같은 내용 재전송(한 번만 반영됨) 또는 단건 조회 |
 
 재전송 요청은 처음과 같은 값(저장된 값)으로 만듭니다. 내용이 바뀌면 409가 됩니다.
+
+### DB 장애 응답 (테스트로 확인)
+
+`LedgerDatabaseFailureIntegrationTest`로 관측한 결과입니다. 시간은 요청 시작(또는 트랜잭션 시작)부터 응답까지입니다.
+
+| 상황 | 관측 결과 | HTTP 응답 |
+|---|---|---|
+| 커넥션 획득 실패 | 약 2.0초, `CannotCreateTransactionException` → `JDBCConnectionException` → `SQLTransientConnectionException` | 503 |
+| 잠금 대기 중 트랜잭션 제한 초과 | 약 3.0초, `QueryTimeoutException` → SQLState `57014` | 503 |
+| 교착 | 약 1.0초, `CannotAcquireLockException` → SQLState `40P01` | 503 |
+
+- 트랜잭션 제한 초과 때 PostgreSQL 메시지는 `canceling statement due to user request`였습니다. `57014`는 실제 SQL이 실행 중에 취소된 결과입니다.
+- 교착 테스트에서 `deadlock_timeout`은 1초였고, 외부 연결과 교착이 나 앱 요청이 희생됐습니다.
+- 트랜잭션 제한 초과와 교착 테스트에서는 거래 행 0건, 잔액 불변이었습니다. 잠금 해제 뒤 같은 요청을 재시도하면 201이었습니다.
+- 풀 고갈 테스트(같은 계정을 잠근 채 12건 동시): 커넥션을 얻은 10건은 약 3.0초에 트랜잭션 제한 초과, 못 얻은 2건은 약 2.0초에 커넥션 획득 실패로 모두 503이었습니다. 단언은 reference당 거래 행 1건 이하와 잔액 = 시작 잔액 + `POSTED` 순변동이며, 이번 실행은 `POSTED` 0건이라 잔액 불변을 확인한 것입니다. 이 테스트에서는 재시도하지 않았습니다.
+
+**미확인** (확인된 사실이 아님)
+
+- 트랜잭션 제한 시간을 실제로 적용한 계층: Hibernate의 초 단위 제한인지 Spring의 밀리초 단위 힌트인지 확정하지 않았습니다. 약 3.0초에 취소되어 밀리초 단위 적용 가능성과 부합하지만 추정입니다.
+- 다음 SQL을 보내기 전에 제한 시간이 이미 지난 경우의 예외 변환과 HTTP 응답: 미확인입니다. 500 가능성을 배제하지 않습니다.
+  - 원장을 부르는 다섯 경로(결제·환불·정산·송금·충전)는 모두 4xx가 아닌 응답을 결과 모름으로 받아 같은 reference로 재전송합니다(`FeignErrors.isRejected` 기준). 그래서 원장이 500을 돌려줘도 돈이 어긋나지 않고, 500과 503의 차이는 응답 의미와 모니터링에만 영향을 줍니다.
+- 커밋 플러시 또는 COMMIT 중 실패했을 때의 예외 변환과 HTTP 응답: 미확인입니다. 결과를 모르는 경우(커밋됐는지 알 수 없음)도 남아 있습니다.
 
 ## 조회
 
@@ -340,7 +381,7 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 ```
 
 - `LedgerRequestHasherTest`는 DB 없이 실행됩니다.
-- DB 통합 테스트(`LedgerEntryTypeIntegrationTest`, `LedgerTransactionQueryIntegrationTest`, `LedgerTransactionPeriodIntegrationTest`)는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `.env`나 로컬 compose DB는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
+- DB 통합 테스트(`LedgerEntryTypeIntegrationTest`, `LedgerTransactionQueryIntegrationTest`, `LedgerTransactionPeriodIntegrationTest`, `LedgerSameReferenceIntegrationTest`, `LedgerOppositeTransferIntegrationTest`, `LedgerDatabaseFailureIntegrationTest`)는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `.env`나 로컬 compose DB는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
 
 ### 성능 측정
 
@@ -366,3 +407,4 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 | `CHARGE_SOURCE` 잠금 | 모든 충전이 같은 계정을 잠금(핫 계정) | 성능 측정 후 개선 |
 | DB 장애 503 처리 위치 | `LedgerDatabaseExceptionHandler`(원장 전용) | common 처리기로 이전 |
 | 계정 상태 변경 | `SUSPENDED`·`CLOSED` 값은 있으나 바꾸는 API 없음 | 정지·해지 절차 |
+| 같은 reference 충돌 로그 | 동시 요청의 정상 UNIQUE 충돌 처리 중 Hibernate `SqlExceptionHelper`(로거 `org.hibernate.orm.jdbc.error`)가 충돌 1건당 WARN 두 줄(`SQLState: 23505`, `duplicate key value violates unique constraint "uk_ledger_transactions_reference"`)을 남김. 동시성 테스트 3개 시나리오에서 관측. 정상 처리 과정의 로그라 버그로 단정하지 않음 | 로그 노이즈를 줄일지(운영 개선 후보) |
