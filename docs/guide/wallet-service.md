@@ -268,9 +268,12 @@ reference가 원장의 멱등 키라 같은 충전을 다시 보내도 한 번�
 | 항목 | 값 |
 |---|---|
 | 주기 | `travelpay.wallet.charge.recovery.fixed-delay` 기본 `10s`(이전 주기 종료 후). 1초 미만이거나 형식이 틀리면 기동 실패 |
-| 건수 | `travelpay.wallet.charge.recovery.batch-size` 기본 `10`. 1 미만이면 기동 실패 |
+| 건수 | `travelpay.wallet.charge.recovery.batch-size` 기본 `10`(배치 하나의 크기). 1 미만이면 기동 실패 |
 | 켜기·끄기 | `travelpay.wallet.charge.recovery.enabled` 기본 `true`(테스트용 끔) |
-| 대상 | `REQUESTED`·`BANK_PROCESSING`·`CREDIT_PROCESSING`·`REFUND_PROCESSING` 중 대기 시간이 지난 건, `updated_at` 오래된 순 |
+| 대상 | `REQUESTED`·`BANK_PROCESSING`·`CREDIT_PROCESSING`·`REFUND_PROCESSING` 중 대기 시간이 지난 건, `updated_at` 오래된 순. 단계 묶음별로 따로 조회 |
+| 단계 묶음 | 은행: `REQUESTED`·`BANK_PROCESSING`·`REFUND_PROCESSING` / 원장: `CREDIT_PROCESSING` |
+| 한 주기 처리 | 묶음마다 배치 하나씩 번갈아 처리. 배치가 가득 차면 같은 주기에서 이어서 조회하고, 덜 찬 배치가 나오거나 **8초 마감**이 지나면 끝. 첫 바퀴는 시간과 관계없이 두 묶음 모두 한 번씩 |
+| 장애 판단 | 한 묶음에서 결과 모름이 연달아 3번이면 그 묶음은 이번 주기에 더 처리하지 않고 다음 주기에 다시 시도 |
 | 대기 시간 | `30초 × 2^min(max(attempt_count − 1, 0), 5)`, DB `now()` 기준 |
 | 선점 | 건마다 짧은 트랜잭션으로 `updated_at = now()` 조건부 UPDATE(`status`·`updated_at`이 조회 때와 같을 때만). 실패하면 건너뜀 |
 | 실행 | 선점 커밋 후 트랜잭션 밖에서 실행기 호출. 이력 `trace_id`는 `recovery-{UUID}` |
@@ -280,9 +283,23 @@ reference가 원장의 멱등 키라 같은 충전을 다시 보내도 한 번�
 | 다음 실행까지 | 30초 | 30초 | 60초 | 120초 | 240초 |
 
 - 5회째 결과 모름이면 `MANUAL_REVIEW`가 되므로 처리 중 상태의 `attempt_count`는 최대 4입니다.
-- 한 건의 예외가 같은 배치의 다른 건을 멈추지 않습니다. 배치마다 `found`·`claimed`·`claimMissed`·`failed`·`elapsedMs`를 INFO로 남깁니다.
+- 8초는 **추가 배치를 시작하지 않는 마감**이며 실행 시간 상한이 아닙니다. 이미 시작한 배치는 끊지 않습니다. 은행이 응답 없이 붙잡으면 호출당 약 6초(연결 1초 + 읽기 5초)가 걸려, 결과 모름 3연속으로 은행 묶음이 멈추기까지만 한 주기가 18초 이상 걸릴 수 있습니다. 실제 소요 시간은 배치 안 건들의 처리 경로(출금 뒤 원장 적립·환불까지 이어지는지 등)에 따라 달라집니다.
+- 결과 모름 연속 횟수는 대상의 묶음이 아니라 **외부 호출이 끝난 단계의 묶음**으로 셉니다. 은행 묶음 대상이 출금 성공 뒤 원장에서 결과 모름이면 은행은 0으로, 원장은 +1입니다. 실행기(`ChargeSagaExecutor.execute`)가 단계별 확실한 응답·결과 모름을 돌려줍니다.
+  - 결과 모름으로 세는 것: 결과 모름 기록이 반영됐든(`attempt_count` +1, 한도 도달로 `MANUAL_REVIEW`) 다른 실행기가 먼저 상태를 바꿔 반영되지 않았든 모두. 외부 의존성 상태를 보는 것이라 DB 반영 여부와 무관합니다.
+  - 실행기 예외는 어느 단계에서 났는지 모르므로 대상 묶음의 결과 모름으로 셉니다. 선점 실패는 세지 않습니다.
+  - 확실한 응답(성공·업무 거절·응답 이상)이 나오면 그 묶음의 횟수는 0으로 돌아갑니다.
+- 한계: 원장 묶음이 멈춘 주기에도 은행 묶음 대상은 출금 뒤 원장을 부릅니다. SAGA 컨슈머와 같은 동작이고, 출금 성공 뒤 `CREDIT_PROCESSING` 전이가 원장 호출 전에 커밋되므로 정합성 문제는 없습니다. 장애 감지는 복구 스케줄러 안에서만 하며 SAGA 컨슈머의 은행·원장 호출은 막지 않습니다.
+- 한 건의 예외가 같은 배치의 다른 건을 멈추지 않습니다. 배치마다 `group`·`found`·`claimed`·`claimMissed`·`failed`·`unknownStop`·`elapsedMs`를 INFO로 남기고, 결과 모름 연속으로 묶음을 멈추면 WARN을 남깁니다.
 - 스케줄러 스레드 풀은 2입니다(`spring.task.scheduling.pool.size`). 복구 배치가 길어도 Outbox 발행이 막히지 않게 하기 위해서입니다.
 - 컨슈머와 스케줄러가 같은 충전을 동시에 실행해도 조건부 UPDATE로 한쪽만 전이합니다.
+
+| 지표 | 의미 |
+|---|---|
+| `charge.recovery.stuck` | 처리 중 상태(`REQUESTED`·`BANK_PROCESSING`·`CREDIT_PROCESSING`·`REFUND_PROCESSING`)이면서 **생성 시각(`created_at`)** 이 30분보다 오래된 충전 수 |
+
+- 복구 주기마다 갱신합니다. 조회에 실패하면 ERROR 로그만 남기고 이전 값을 유지합니다.
+- `updated_at`은 재시도·선점마다 갱신돼 오래 멈춘 충전이 오히려 빠지므로 쓰지 않습니다(결제 `payment.settlement.stuck`도 생성 시각 기준).
+- `/actuator/prometheus`에서 `charge_recovery_stuck`으로 볼 수 있습니다.
 
 ### MANUAL_REVIEW로 가는 경우
 
@@ -500,7 +517,7 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 ./gradlew :wallet-service:test
 ```
 
-- DB 없이 실행: `BankAccountTest`, `AesGcmAccountNumberCipherTest`, `BankClientAdapterTest`, `BankFaultInjectionTest`, `BankFeignClientFaultHeaderTest`, `LedgerAccountClientAdapterTest`, `LedgerTransactionClientAdapterTest`, `UserFundingIdentityClientAdapterTest`, `ChargeRecoverySchedulerConfigTest`, `WalletServiceInternalBalancesTest`.
+- DB 없이 실행: `BankAccountTest`, `AesGcmAccountNumberCipherTest`, `BankClientAdapterTest`, `BankFaultInjectionTest`, `BankFeignClientFaultHeaderTest`, `LedgerAccountClientAdapterTest`, `LedgerTransactionClientAdapterTest`, `UserFundingIdentityClientAdapterTest`, `ChargeRecoverySchedulerConfigTest`, `ChargeRecoverySchedulerTest`(한 주기 처리·8초 마감·묶음별 중단·지표 갱신), `WalletServiceInternalBalancesTest`.
 - 통합 테스트는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `OutboxPublisherIntegrationTest`는 Kafka 컨테이너(`apache/kafka:4.2.2`)도 띄웁니다. `.env`나 로컬 compose는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
 
 | 통합 테스트 | 범위 |
@@ -508,7 +525,7 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 | `ChargeSagaIntegrationTest` | SAGA 실행기(은행·원장은 대역, 컨슈머는 끄고 리스너 메서드 직접 호출) |
 | `ChargeSagaFeignIntegrationTest` | Feign 실패가 실제 어댑터를 거쳐 환불·`MANUAL_REVIEW`·결과 모름으로 이어지는지(대역은 Feign 클라이언트) |
 | `ChargeStatusTransitionerIntegrationTest` | 조건부 상태 전이(접수 단계로 만든 `REQUESTED`부터) |
-| `ChargeRecoverySchedulerIntegrationTest` | 복구 대상 대기 시간·선점·재실행(은행·원장은 대역, `recover()` 직접 호출) |
+| `ChargeRecoverySchedulerIntegrationTest` | 복구 대상 대기 시간·선점·재실행·단계 묶음별 조회·한 주기 이어서 처리·결과 모름 3연속 중단·멈춘 충전 지표(은행·원장은 대역, `recover()` 직접 호출) |
 | `OutboxPublisherIntegrationTest` | 실제 Kafka로 발행, Outbox 상태, Kafka 중단 시 동작 |
 | `OutboxPublishOrderIntegrationTest` | `PENDING` 조회 순서(재시도 적은 순 → 오래된 순) |
 | `ChargeQueryIntegrationTest` | 충전 내역 조회 API(회원·관리자) |
