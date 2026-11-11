@@ -36,17 +36,29 @@ check_run() {
     #   성공 < 저장 ≤ 보낸 요청: 실패로 답했는데 저장된 견적. 유실이 아니라 기록만 한다.
     #     Redis 견적 jar는 명령을 200ms(spring.data.redis.timeout)까지만 기다려 503으로 답하지만, Redis는 늦게라도 저장한다.
     #     앱을 막 띄운 직후 동시 300이 몰린 예열 첫 1~2초에 생겼다(2026-11-10, #250). 측정 구간의 실패는 위 검사가 따로 막는다
+    #   개수 비교로 "유실 없음"을 증명할 수 있는 건 실패 응답이 0건일 때뿐이다. 요청 하나는 견적을 많아야 하나 저장하므로
+    #   실패 0건이면 성공 = 보낸 요청이고, 저장이 그 사이에 있으려면 모든 요청이 저장된 것이다.
+    #   실패 응답이 있으면 "실패했는데 저장됨"과 "성공했는데 유실됨"이 같은 수만큼 생겨도 개수가 맞으므로 증명하지 못한다고 알린다
+    #   (측정 구간 실패는 따로 무효라, 여기 남는 실패는 예열 구간의 것). 응답별 견적 ID 대조는 하지 않는다(회차당 약 200만 건)
     if [ "${SCRIPT:-rate-query.js}" = quote-issue.js ]; then
-        local ok_all requests_all saved
+        local ok_all requests_all saved failed_all
         ok_all=$(value "$run" okAll)
         requests_all=$(value "$run" requestsAll)
         saved=$(nested "results/$1-vus$2-db.json" quoteRows all)
+        # 값이 없거나 숫자가 아니면 아래 비교가 오류로 거짓이 되어 검산을 그냥 통과하므로 먼저 막는다
+        for count in "$ok_all" "$requests_all" "$saved"; do
+            if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+                echo "견적 검산 실패: 성공 응답(okAll)·보낸 요청(requestsAll)·저장 수(quoteRows.all) 중 숫자가 아닌 값이 있습니다: '${ok_all}' '${requests_all}' '${saved}' (${run})" >&2
+                return 1
+            fi
+        done
         if [ "$saved" -lt "$ok_all" ] || [ "$saved" -gt "$requests_all" ]; then
             echo "견적 검산 실패: 성공 응답 ${ok_all}건 ≤ 저장된 견적 ${saved}건 ≤ 보낸 요청 ${requests_all}건이 아닙니다 (${run})" >&2
             return 1
         fi
-        if [ "$saved" -gt "$ok_all" ]; then
-            echo "    참고: 실패로 답했지만 저장된 견적 $((saved - ok_all))건 (예열 포함, 보낸 요청 ${requests_all} / 성공 ${ok_all} / 저장 ${saved})"
+        failed_all=$((requests_all - ok_all))
+        if [ "$failed_all" -gt 0 ]; then
+            echo "    참고: 예열 중 실패 응답 ${failed_all}건 중 저장된 견적 $((saved - ok_all))건. 실패 응답이 있어 개수만으로는 유실 없음을 증명하지 못함 (보낸 요청 ${requests_all} / 성공 ${ok_all} / 저장 ${saved})"
         fi
     fi
 }

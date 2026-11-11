@@ -17,7 +17,12 @@ fi
 
 # 한글이 깨지지 않게 영문 값만 출력한다
 powershell.exe -NoProfile -Command '
-$k = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" -ErrorAction SilentlyContinue
+# 읽기에 실패하면 오류를 숨기지 않고 unknown으로 남긴다. measure.sh가 unknown이면 측정을 시작하지 않는다
+try {
+    $k = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" -ErrorAction Stop
+} catch {
+    $k = $null
+}
 $mode = switch ($k.ActiveOverlayAcPowerScheme) {
     "ded574b5-45a0-4f42-8737-46345c09c238" { "best-performance" }
     "961cc777-2547-4f9d-8174-7d86181b8a7a" { "best-efficiency" }

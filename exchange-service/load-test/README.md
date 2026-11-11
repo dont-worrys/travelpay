@@ -64,7 +64,7 @@ docker compose --profile app up -d --wait app   # 측정 DB도 함께 뜸. 준�
 | --- | --- |
 | `--management.server.port=18085` | Actuator(지표)를 별도 포트로 띄움. 같은 포트면 지표 요청이 부하 요청 뒤에 줄 서서, 바쁠 때 지표를 못 읽음 |
 | `--server.tomcat.max-keep-alive-requests=-1` | 톰캣은 기본으로 연결 하나에 요청 100번을 받으면 끊음. 초당 수백 번 새 연결이 생기며 Docker 네트워크에서 가끔 연결 시간 초과(`dial: i/o timeout`)가 남. 측정 중 연결을 계속 재사용하게 함 |
-| `--management.metrics.distribution.percentiles-histogram.http.server.requests=${MEASURE_HISTOGRAM:-true}` | HTTP 응답 시간을 구간별 개수(히스토그램)로도 내보내 Grafana가 p95·p99를 계산하게 함. 비교하는 옛 jar에는 이 설정이 없어 실행 옵션으로 켬. **처리량을 낮추므로 공식 측정은 `MEASURE_HISTOGRAM=false`로 끄고, Grafana 캡처용 측정만 켬**(아래 "모니터링 연결") |
+| `--management.metrics.distribution.percentiles-histogram.http.server.requests=${MEASURE_HISTOGRAM:-false}` | HTTP 응답 시간을 구간별 개수(히스토그램)로도 내보내 Grafana가 p95·p99를 계산하게 함. 비교하는 옛 jar에는 이 설정이 없어 실행 옵션으로 정함. **처리량을 낮추므로 기본은 끔**(변수를 빠뜨려도 공식 측정 조건). Grafana 캡처용 측정만 `MEASURE_HISTOGRAM=true`로 켬(아래 "모니터링 연결") |
 
 ### 측정 전 PC 조건 (같은 날 비교할 측정끼리 반드시 같게)
 
@@ -84,7 +84,7 @@ docker compose --profile app up -d --wait app   # 측정 DB도 함께 뜸. 준�
 | 전원 모드나 충전기 연결이 k6 직전과 직후에 다름 | `pc-state.sh` 두 번 비교 | PC 성능이 바뀌어 처리량이 흔들림 |
 | k6가 도는 동안 PC가 대기 모드(Modern Standby)에 들어감 | `standby-events.sh`: Windows 시스템 로그의 Kernel-Power 506(대기 모드 진입) 수 | CPU가 제한되다가 Docker까지 멈춤. 얕은 대기면 숫자가 나와 다른 검사를 통과할 수 있음 |
 
-Windows가 아니면 PC 상태는 `null`로 남고 위 두 검사는 건너뜁니다.
+Windows가 아니면 PC 상태는 `null`로 남고 위 두 검사는 건너뜁니다. Windows인데 **확인 자체를 못 하면 측정하지 않거나 무효**로 끝냅니다: 전원 모드·충전기를 읽지 못함(`unknown`, 빈 출력), 시스템 로그를 읽지 못함(`standby-events.sh`가 `error`). 읽기 실패를 "변화 없음", "대기 모드 0번"으로 보면 검사가 조용히 사라지기 때문입니다.
 
 실제로 겪은 일 (2026-11-10, 견적 발급): "측정 중 PC를 쓰지 않기"를 지키자 **5분 뒤 화면이 꺼지며 대기 모드**에 들어갔습니다(충전 시 화면 끄기·절전 5분). 2·3회차는 CPU가 제한된 채 숫자가 나와 검사를 통과했고, 4회차에서 Docker가 멈춰 표본이 8초만 남아 무효로 멈췄습니다. 그래서 3번 조건과 대기 모드 검사를 넣고 18회를 처음부터 다시 쟀습니다. 또 이전 측정(2026-11-09)의 전원 모드를 기록하지 않아, 다른 날 환율 결과와 비교할 때 조건을 맞출 수 없었습니다(자동 기록을 넣은 이유).
 
@@ -255,6 +255,8 @@ SCRIPT=quote-issue.js ./measure-all.sh quote-db   # 견적 발급: 같은 단계
   - 저장 < 성공: 성공이라고 답한 견적이 저장되지 않음(유실). 이 검산이 막으려는 것
   - 저장 > 보낸 요청: 보내지 않은 요청이 저장됨(앞 측정의 키가 남는 등)
   - 성공 < 저장: **실패로 답했는데 저장된 견적.** 멈추지 않고 건수를 출력합니다. Redis 견적 jar는 Redis 명령을 200ms(`spring.data.redis.timeout`)까지만 기다려 503으로 답하지만, Redis는 늦게라도 저장합니다. 2026-11-10 측정에서 앱을 막 띄운 직후 동시 300이 몰린 예열 첫 1~2초에 38건 생겼습니다. 처음에는 "성공 = 저장"을 요구해 이 경우에도 멈췄는데, 유실이 아니라서 위처럼 바꿨습니다. 측정 구간의 실패는 실패 요청 검사가 따로 막습니다.
+  - **개수로 "유실 없음"을 증명하는 건 실패 응답이 0건일 때뿐입니다.** 요청 하나는 견적을 많아야 하나 저장하므로, 실패가 없으면 성공 = 보낸 요청이고 저장이 그 사이라면 모든 요청이 저장된 것입니다. 실패 응답이 있으면 "실패했는데 저장됨"과 "성공했는데 유실됨"이 같은 수만큼 생겨도 개수가 맞으므로, 검산은 통과시키되 "개수만으로는 증명하지 못함"을 출력합니다. 응답별 견적 ID 대조는 하지 않습니다(회차당 약 200만 건).
+  - 성공 응답·보낸 요청·저장 수 중 하나라도 비었거나 숫자가 아니면 실패로 멈춥니다(비교가 오류로 거짓이 되어 그냥 통과하지 않게).
   - 측정 구간 행 수는 시각 경계가 1초 안에서 어긋나 이 검산에 쓰지 않습니다.
 
 - 결과: 회차별 `results/db-r1-vus50.json` … 과 중앙값 표 `results/db-summary.md`(마크다운, 실패율·실패 건수와 회차별 TPS도 함께 적어 흔들림을 확인)
@@ -346,8 +348,10 @@ SUMMARY_ONLY=1 SCRIPT=quote-issue.js ./measure-compare.sh quote250 quote-db=../.
 
 | 측정 | 모니터링(Prometheus 수집) | 히스토그램 | 용도 |
 | --- | --- | --- | --- |
-| 공식 | 끔 | `MEASURE_HISTOGRAM=false` | 결과 표의 수치 |
-| 캡처용 | 켬 | 켬(기본) | Grafana 그래프 (버전당 1회, 동시 300) |
+| 공식 | 끔 | 끔 (기본, `MEASURE_HISTOGRAM` 없음 또는 `false`) | 결과 표의 수치 |
+| 캡처용 | 켬 | `MEASURE_HISTOGRAM=true` | Grafana 그래프 (버전당 1회, 동시 300) |
+
+캡처용 측정 예: `MEASURE_HISTOGRAM=true SCRIPT=quote-issue.js APP_JAR=../../../travelpay-quote-redis/$J ./measure.sh capture250-quote-redis 300`
 
 모니터링 영향 (2026-11-10, 환율 조회 v0, 동시 300, 같은 날 같은 PC): 모니터링·히스토그램 **끔 6,073 TPS / 켬 5,809 TPS → 약 4% 낮음**. 같은 날 다른 버전도 켠 채로 11/9 결과보다 4~10% 낮았습니다(그중 약 6%는 그날 PC 상태, 끔으로 재도 11/9보다 낮음). 병목 모양(연결 대기·캐시 hit)은 켜든 끄든 같았습니다.
 

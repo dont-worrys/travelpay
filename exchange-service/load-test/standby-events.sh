@@ -17,6 +17,12 @@ fi
 powershell.exe -NoProfile -Command "
 \$from = [DateTimeOffset]::FromUnixTimeSeconds(${FROM}).LocalDateTime
 \$to = [DateTimeOffset]::FromUnixTimeSeconds(${TO}).LocalDateTime
-\$events = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 506; StartTime = \$from; EndTime = \$to } -ErrorAction SilentlyContinue
-@(\$events).Count
+try {
+    \$events = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Power'; Id = 506; StartTime = \$from; EndTime = \$to } -ErrorAction Stop
+    @(\$events).Count
+} catch {
+    # 조건에 맞는 이벤트가 없으면 Get-WinEvent는 NoMatchingEventsFound 오류를 낸다. 이것만 0이고,
+    # 로그를 읽지 못한 다른 오류(권한 등)는 error로 알려 measure.sh가 대기 모드를 확인하지 못한 측정을 무효로 한다
+    if (\$_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { 0 } else { 'error' }
+}
 " | tr -d '\r'

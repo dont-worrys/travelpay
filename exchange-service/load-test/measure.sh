@@ -95,7 +95,20 @@ prometheus=off
 if docker ps --filter "network=${app_network}" --format '{{.Image}}' | grep -q 'prom/prometheus'; then
     prometheus=on
 fi
+# PC 상태를 읽지 못하면(빈 출력, Windows인데 전원 모드·충전기 unknown) 직전·직후 비교가 "둘 다 unknown이라 같음"으로
+# 통과해 전원 검사가 사라지므로 측정을 시작하지 않는다(직후 상태도 아래에서 같은 검사)
+require_pc_state() {
+    if [ -z "$1" ]; then
+        echo "PC 상태를 읽지 못했습니다(pc-state.sh 출력 없음). 측정하지 않습니다." >&2
+        exit 1
+    fi
+    if echo "$1" | grep -q '"os": "windows"' && echo "$1" | grep -q '"powerMode": "unknown"\|"charger": "unknown"'; then
+        echo "PC 전원 모드나 충전기 상태를 읽지 못했습니다: $1. 측정하지 않습니다." >&2
+        exit 1
+    fi
+}
 pc_before=$(bash pc-state.sh)
+require_pc_state "$pc_before"
 echo "      측정 조건: 히스토그램 ${histogram}, Prometheus ${prometheus}, PC ${pc_before}"
 
 echo "[3/4] k6 실행 (${SCRIPT}, VUS=${VUS}), DB 지표 1초 간격 기록"
@@ -131,9 +144,18 @@ docker compose run --rm -e VUS="${VUS}" -e LABEL="${LABEL}" -e WARMUP="${WARMUP_
     -e DURATION="${MEASURE_SECONDS}s" k6 run --quiet "/scripts/${SCRIPT}"
 k6_ended=$(date +%s)
 pc_after=$(bash pc-state.sh)
-# k6가 도는 동안 PC가 대기 모드에 들어간 횟수(Windows가 아니면 null). 하나라도 있으면 아래에서 무효로 끝낸다
+if ! (require_pc_state "$pc_after"); then
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
+# k6가 도는 동안 PC가 대기 모드에 들어간 횟수. Windows가 아니면 null(확인 안 함), 로그를 읽지 못하면 error.
+# 빈 출력이나 error는 "대기 모드 0번"이 아니라 확인하지 못한 것이라 무효로 끝낸다
 standby=$(bash standby-events.sh "$k6_started" "$k6_ended")
-standby=${standby:-null}
+if [ "$standby" != null ] && ! [[ "$standby" =~ ^[0-9]+$ ]]; then
+    echo "무효 측정: k6 구간의 대기 모드 진입 여부를 확인하지 못했습니다(standby-events.sh 결과 '${standby}'). Windows 시스템 로그 읽기 권한을 확인합니다." >&2
+    rm -f "results/${LABEL}-vus${VUS}.json"
+    exit 1
+fi
 if [ "$standby" != null ] && [ "$standby" != 0 ]; then
     echo "무효 측정: k6가 도는 동안 PC가 대기 모드에 ${standby}번 들어갔습니다(CPU 제한·Docker 일시 정지)." >&2
     echo "  Windows 설정 > 전원 > 전원에 연결된 경우 화면 끄기·절전을 '안 함'으로 두고 다시 잽니다 (README \"측정 전 PC 조건\")." >&2
