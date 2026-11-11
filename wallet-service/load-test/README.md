@@ -154,9 +154,12 @@ docker compose -f compose.monitoring.yaml -f compose.monitoring.load-test.yaml u
 cd wallet-service/load-test
 python prepare.py                 # 회원 50명(실명 유재석) + 지갑 + 회원마다 mock-bank 계좌
 python prepare.py --users 100 --bank-balance 1000000000000
+python prepare.py --bank-codes 004,088   # 회원을 두 은행에 번갈아 배정 (은행별 붙잡기 측정용)
 ```
 
-- 계좌는 `mock_bank.bank_accounts`에 직접 INSERT합니다: 예금주 `유재석`, 은행 `004`, 계좌번호 `77` + 실행 시각(UTC `yyMMddHHmmss`) + 순번 4자리(실행끼리 겹치지 않음), 잔액 기본 1조 원. Flyway 시드 계좌는 건드리지 않습니다.
+- 은행은 `--bank-codes`(쉼표 구분, 기본 `004`)를 회원 순번대로 돌아가며 배정합니다(u1=004, u2=088, u3=004 …). 회원별 은행은 `data/users.json`의 `users[].bankCode`에 남고, k6는 회원의 은행 코드로 충전을 요청합니다. k6도 회원을 순번대로 쓰므로 회원 수를 은행 수의 배수로 두면 충전이 은행별로 같은 수로 나뉩니다(기본 50명, 두 은행이면 25명씩).
+- 회원별 은행 코드가 없는 이전 `data/users.json`(최상위 `bankCode` 하나)도 그대로 쓸 수 있습니다.
+- 계좌는 `mock_bank.bank_accounts`에 직접 INSERT합니다: 예금주 `유재석`, 은행 `--bank-codes`, 계좌번호 `77` + 실행 시각(UTC `yyMMddHHmmss`) + 순번 4자리(실행끼리 겹치지 않음), 잔액 기본 1조 원. Flyway 시드 계좌는 건드리지 않습니다.
 - 충전은 하지 않습니다. 회원 수(`--users`)와 충전 건수(`measure.py --count`)는 별개이며, 충전은 회원을 돌아가며 씁니다.
 - 다시 실행하면 새 회원·계좌로 `data/users.json`을 덮어씁니다(이전 계좌는 DB에 남음).
 
@@ -244,8 +247,54 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 모든 측정이 2,400건 `COMPLETED`, 중복 출금 0, 대사 어긋남 0, `MANUAL_REVIEW` 0입니다.
 
 - 꺼짐은 결과 모름이 쌓이는 장애라 개선의 주 효과가 나타납니다.
-- 멈춤은 컨슈머가 은행 응답을 기다리며 묶이는 장애라 P95는 그대로입니다. Mock 은행은 은행망 전체를 서비스 하나로 흉내 내므로, 특정 은행만 멈추는 장애는 재현하지 못합니다(은행별 서킷 브레이커는 다음 단계).
+- 멈춤은 컨슈머가 은행 응답을 기다리며 묶이는 장애라 P95는 그대로입니다. `pause`는 Mock 은행 전체를 멈추므로, 특정 은행만 멈추는 장애는 아래 [은행별 붙잡기 측정](#은행별-붙잡기-측정-한-은행만-멈춤)으로 잽니다.
 - 개선 후 복구 스케줄러는 30초 넘게 기다린 `REQUESTED` 충전도 집어 가므로, 밀린 큐를 컨슈머와 나란히 처리합니다(멈춤에서 358건). 같은 충전은 선점으로 한쪽만 처리합니다.
+
+### 은행별 붙잡기 측정 (한 은행만 멈춤)
+
+한 은행의 출금만 응답 없이 붙잡을 때 **다른 은행 충전이 얼마나 늦어지는지** 봅니다. Mock 은행 [출금 붙잡기 API](../../docs/guide/mock-bank.md#은행별-출금-붙잡기)를 측정 도중 켜고 끕니다. 붙잡힌 출금은 대기 시간이 지난 뒤 처리되므로(지갑은 읽기 시간 초과 5초로 이미 포기) `docker compose pause`와 같은 장애를 은행 하나에만 만듭니다. 환불·조회는 붙잡지 않습니다.
+
+**준비.**
+
+1. Mock 은행 jar를 다시 빌드하고 다시 만듭니다(붙잡기 API는 새 jar에만 있음).
+
+   ```bash
+   ./gradlew :mock-bank:bootJar   # 저장소 루트
+   cd wallet-service/load-test
+   docker compose --profile app up -d --wait --force-recreate mock-bank
+   curl -s 127.0.0.1:8090/internal/v1/bank/faults/withdrawal-holds   # {"success":true,"data":[],...}이면 새 jar
+   ```
+
+2. 두 은행으로 데이터를 준비합니다: `python prepare.py --bank-codes 004,088`
+
+**실행.** 셸 창 두 개를 씁니다(둘 다 이 폴더, 환경 변수는 1번 절처럼).
+
+1. 창 1: `python measure.py <LABEL> --count 2400 --rate 20 --concurrency 1 --drain-timeout 3600`
+2. 창 2: 창 1에 `[2/6] k6 실행`이 찍힌 뒤 실행합니다. 접수 시작 30초 뒤 은행 `004`의 출금을 60초 동안 붙잡습니다(요청마다 10초 대기).
+
+   ```bash
+   HOLDS=127.0.0.1:8090/internal/v1/bank/faults/withdrawal-holds
+   sleep 30 && curl -s -X PUT $HOLDS/004 -H 'Content-Type: application/json' -d '{"delaySeconds":10}' && date -u \
+     && sleep 60 && curl -s -X DELETE $HOLDS/004 && date -u
+   ```
+
+   PowerShell:
+
+   ```powershell
+   $holds = "http://127.0.0.1:8090/internal/v1/bank/faults/withdrawal-holds"
+   Start-Sleep 30; Invoke-RestMethod -Method Put "$holds/004" -ContentType 'application/json' -Body '{"delaySeconds":10}'; (Get-Date).ToUniversalTime()
+   Start-Sleep 60; Invoke-RestMethod -Method Delete "$holds/004"; (Get-Date).ToUniversalTime()
+   ```
+
+- `delaySeconds`는 지갑 읽기 시간 초과(5초)보다 길고 복구 첫 재시도 대기(30초)보다 짧게 둡니다(이 절의 측정은 10초). 5초 이하면 늦을 뿐 정상 응답이라 장애가 아니고, 30초 이상이면 복구 재시도가 원래 요청이 아직 붙잡혀 있을 때 같은 `requestId`로 도착할 수 있어, 이번에 확인하려는 것과 다른 경합이 섞입니다(같은 `requestId` 동시 요청의 처리는 확인하지 않음). API는 1~600초를 받습니다.
+- 끄면(`DELETE`) 기다리던 출금도 바로 풀려 처리됩니다. 측정이 끝난 뒤에도 켜져 있으면 다음 측정이 오염되므로 `GET $HOLDS`로 `data`가 `[]`인지 확인합니다. Mock 은행을 다시 띄워도 꺼집니다(메모리 보관).
+- 켜는 동안 `GET $HOLDS`의 `heldCount`가 붙잡은 출금 요청 수입니다. 0이면 그 은행으로 출금이 오지 않은 것입니다(은행 코드·`users.json` 확인).
+
+**확인.**
+
+- 결과 metrics 파일의 `window`(`from` ~ `to`) 안에 창 2가 찍은 켜기·끄기 시각이 모두 있어야 유효한 측정입니다.
+- 볼 값은 `charges.byBank`의 은행별 `completionLatencyMs`(P50·P95·건수)입니다. 붙잡은 은행(`004`)은 늦어지는 것이 맞고, **붙잡지 않은 은행(`088`)이 얼마나 늦어지는지**가 장애 격리 정도입니다. 요약 출력의 `은행 088: … 완료 지연 P50 …ms P95 …ms` 줄로도 봅니다.
+- 출금 정합성은 은행별로도 맞아야 합니다(`bankConsistency.byBank`). 붙잡힌 출금은 지갑이 포기한 뒤 처리되므로, 재시도가 같은 `requestId`로 기존 결과를 받아 중복 출금이 없어야 합니다.
 
 ### measure.py가 하는 일
 
@@ -253,10 +302,11 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 2. **k6 실행**. 그동안 1초마다 네 서비스 `/actuator/prometheus`와 Postgres(`pg_stat_activity`, `pg_stat_database`, `outbox_events`)를 읽습니다. 종결 대기가 끝날 때까지 계속 읽습니다.
 3. **종결 대기**: 이번 측정 충전(측정 회원 + `created_at ≥ k6 시작 − 5초`)이 모두 `COMPLETED`·`FAILED`·`REFUNDED`·`MANUAL_REVIEW`가 될 때까지 5초 간격.
 4. **지표** (아래 표).
-5. **출금 정합성** (mock-bank DB, 측정 계좌·같은 기간의 `SUCCEEDED` 거래):
+5. **출금 정합성** (mock-bank DB, 측정 계좌·같은 기간의 `SUCCEEDED` 거래). 측정 계좌는 회원별 (은행, 계좌번호) 쌍과 정확히 맞는 계좌입니다:
    - DEBIT 건수·합계 = `COMPLETED`+`REFUNDED` 충전 건수·합계
    - REFUND 건수·합계 = `REFUNDED` 충전 건수·합계
    - 측정 계좌 잔액 감소 = DEBIT 합계 − REFUND 합계
+   - 은행별로도 위 두 등식(DEBIT·REFUND)을 확인합니다. 거래의 은행은 계좌의 `bank_code`, 충전의 은행은 `charge_requests.bank_code`
 6. **대사**: 마지막 종결 후 10초가 넘게 지난 뒤 `POST /api/v1/admin/charges/reconciliations?from=<첫 created_at>&to=<지금 − 10초>`(`User-Role: MASTER`, 동기). 요약·소요 시간을 남기고, 어긋남·판정 보류가 있으면 결과 목록(최대 100건)을 붙입니다.
 
 ### 결과
@@ -276,13 +326,14 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 | `charges.accepted`, `statuses` | `charge_requests` | 실제 접수 건수(DB), 상태별 건수·금액 |
 | `charges.completionTps` | `charge_requests.created_at`, `charge_status_history` | 접수 건수 ÷ (첫 `created_at` ~ 마지막 종결 시각) |
 | `charges.completionLatencyMs` | `charge_status_history` | `COMPLETED` 기록 시각 − `created_at`의 P50·P95 |
+| `charges.byBank.<은행 코드>` | `charge_requests.bank_code` | 은행별 `accepted`(접수 건수), `statuses`(상태별 건수·금액), `completionLatencyMs`(P50·P95·`count`, 계산은 전체 값과 같음). 은행이 하나여도 남음 |
 | `services.<서비스>.<경로>.avgMs` | `http_server_requests_seconds` 합계·횟수 차이 | wallet 충전 접수, user I03, ledger 거래 등록, mock-bank 출금(·환불) 평균 처리 시간 |
 | `services.<서비스>.hikariPending` / `hikariActive` | `hikaricp_connections_*` | 커넥션 대기·사용 평균·최대 (wallet·ledger를 봄) |
 | `services.systemCpuPercent` | wallet `system_cpu_usage` | Docker 가상 머신 전체 CPU(컨테이너 CPU 한도 없음) |
 | `db.ledgerLockWaits` | `pg_stat_activity` (`ledger_app`, `wait_event_type='Lock'`) | 원장 잠금 대기 세션 수 |
 | `db.deadlocksDuringMeasure` | `pg_stat_database.deadlocks` 차이 | 측정 중 교착 수(DB 전체) |
 | `db.outboxPending` | `outbox_events.status='PENDING'` | Outbox 미발행 건수 평균·최대 |
-| `bankConsistency` | `mock_bank.bank_transactions`, `bank_accounts` | 위 세 등식과 위반 목록 |
+| `bankConsistency` | `mock_bank.bank_transactions`, `bank_accounts` | 위 세 등식과 위반 목록. `byBank.<은행 코드>`에 은행별 `debit`·`refund`·`expectedDebit`·`expectedRefund`(은행별 위반은 `violations`에 `은행 004: …`로 들어감) |
 | `reconciliation` | 대사 API | `summary`(status, targetCount, matchedCount, mismatchCount, unverifiableCount …), `elapsedSeconds`, 어긋남 목록 |
 | `fault` | 아래 표 | 장애(응답 유실) 지표. 기존 지표·실패 조건과 별개로 추가 |
 | `failures` | | 종료 코드 1의 이유 |
