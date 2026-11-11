@@ -14,6 +14,7 @@ class ChargeRecoverySchedulerConfigTest {
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withBean(ChargeRecoverySteps.class, () -> mock(ChargeRecoverySteps.class))
             .withBean(ChargeSagaExecutor.class, () -> mock(ChargeSagaExecutor.class))
+            .withBean(BankAvailability.class, () -> java.util.Set::of)
             .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withUserConfiguration(ChargeRecoveryScheduler.class);
 

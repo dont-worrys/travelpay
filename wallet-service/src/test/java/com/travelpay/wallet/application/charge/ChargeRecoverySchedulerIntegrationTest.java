@@ -27,6 +27,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -116,7 +117,7 @@ class ChargeRecoverySchedulerIntegrationTest {
         walletId = UUID.randomUUID();
         jdbcTemplate.update("INSERT INTO wallets (id, user_id, status) VALUES (?, ?, 'ACTIVE')", walletId, userId);
         meterRegistry = new SimpleMeterRegistry();
-        scheduler = new ChargeRecoveryScheduler(recoverySteps, executor, meterRegistry, 10, "10s");
+        scheduler = new ChargeRecoveryScheduler(recoverySteps, executor, Set::of, meterRegistry, 10, "10s");
     }
 
     @Test
@@ -273,7 +274,7 @@ class ChargeRecoverySchedulerIntegrationTest {
                    AND trace_id LIKE 'recovery-%'
                 """, Integer.class, chargeId);
         assertEquals(1, history);
-        verify(bankClient, never()).refund(anyString(), any(), anyLong());
+        verify(bankClient, never()).refund(anyString(), anyString(), any(), anyLong());
 
         pushBack(chargeId, 3600);
         assertTrue(allTargets(10).isEmpty());
@@ -298,8 +299,8 @@ class ChargeRecoverySchedulerIntegrationTest {
         UUID refunding = newCharge(ChargeStatus.REFUND_PROCESSING, 0, 3600);
         UUID crediting = newCharge(ChargeStatus.CREDIT_PROCESSING, 0, 3600);
 
-        List<UUID> bank = ids(recoverySteps.findTargets(ChargeRecoveryGroup.BANK.statuses(), 10));
-        List<UUID> ledger = ids(recoverySteps.findTargets(ChargeRecoveryGroup.LEDGER.statuses(), 10));
+        List<UUID> bank = ids(recoverySteps.findTargets(ChargeRecoveryGroup.BANK.statuses(), Set.of(), 10));
+        List<UUID> ledger = ids(recoverySteps.findTargets(ChargeRecoveryGroup.LEDGER.statuses(), Set.of(), 10));
 
         assertEquals(3, bank.size());
         assertTrue(bank.containsAll(List.of(requested, withdrawing, refunding)));
@@ -327,7 +328,7 @@ class ChargeRecoverySchedulerIntegrationTest {
     }
 
     @Test
-    void 은행_결과_모름이_3번_연달아_나오면_이번_주기의_은행_묶음_처리를_멈춘다() {
+    void 한_은행에서_결과_모름이_3번_연달아_나오면_이번_주기에_그_은행_처리를_멈춘다() {
         for (int i = 0; i < 5; i++) {
             newCharge(ChargeStatus.BANK_PROCESSING, 0, 3600 + i);
         }
@@ -368,7 +369,7 @@ class ChargeRecoverySchedulerIntegrationTest {
     }
 
     private List<ChargeRecoveryTarget> allTargets(int limit) {
-        return recoverySteps.findTargets(ChargeRecoveryGroup.allStatuses(), limit);
+        return recoverySteps.findTargets(ChargeRecoveryGroup.allStatuses(), Set.of(), limit);
     }
 
     /** 상태·attempt_count를 맞추고 updated_at을 DB now() 기준 secondsAgo초 전으로 둔 충전 */
