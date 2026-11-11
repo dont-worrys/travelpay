@@ -39,6 +39,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -182,7 +183,7 @@ class ChargeSagaIntegrationTest {
         UUID refundTxId = UUID.randomUUID();
         givenWithdraw(new BankResult.Succeeded(bankTxId));
         givenLedger(new LedgerPostResult.Rejected("LEDGER_REJECTED_ACCOUNT_NOT_FOUND"));
-        when(bankClient.refund(anyString(), any(), anyLong())).thenReturn(new BankResult.Succeeded(refundTxId));
+        when(bankClient.refund(anyString(), anyString(), any(), anyLong())).thenReturn(new BankResult.Succeeded(refundTxId));
 
         executor.execute(chargeId);
 
@@ -194,7 +195,7 @@ class ChargeSagaIntegrationTest {
         assertNull(row.get("ledger_ref"));
         assertEquals(List.of("REQUESTED", "BANK_PROCESSING", "CREDIT_PROCESSING", "REFUND_PROCESSING", "REFUNDED"),
                 historyStatuses());
-        verify(bankClient).refund(refundRequestId, bankTxId, AMOUNT);
+        verify(bankClient).refund(refundRequestId, "004", bankTxId, AMOUNT);
     }
 
     @Test
@@ -209,7 +210,7 @@ class ChargeSagaIntegrationTest {
         assertEquals("RESPONSE_INVALID", row.get("failure_code"));
         assertEquals("feign.FeignException$Conflict", row.get("last_error"));
         verify(ledgerClient, times(1)).postCharge(any(), any(), any(), anyLong());
-        verify(bankClient, never()).refund(anyString(), any(), anyLong());
+        verify(bankClient, never()).refund(anyString(), anyString(), any(), anyLong());
     }
 
     @Test
@@ -246,7 +247,7 @@ class ChargeSagaIntegrationTest {
         assertEquals(1, row.get("attempt_count"));
         assertEquals(TIMEOUT, row.get("last_error"));
         verify(ledgerClient, never()).postCharge(any(), any(), any(), anyLong());
-        verify(bankClient, never()).refund(anyString(), any(), anyLong());
+        verify(bankClient, never()).refund(anyString(), anyString(), any(), anyLong());
     }
 
     @Test
@@ -263,7 +264,7 @@ class ChargeSagaIntegrationTest {
         assertEquals("CREDIT_PROCESSING", row.get("status"));
         assertEquals(bankTxId, row.get("bank_tx_id"));
         assertEquals(1, row.get("attempt_count"));
-        verify(bankClient, never()).refund(anyString(), any(), anyLong());
+        verify(bankClient, never()).refund(anyString(), anyString(), any(), anyLong());
     }
 
     @Test
@@ -390,7 +391,7 @@ class ChargeSagaIntegrationTest {
     void 환불_결과를_모르면_환불_단계의_결과_모름으로_알린다() {
         givenWithdraw(new BankResult.Succeeded(UUID.randomUUID()));
         givenLedger(new LedgerPostResult.Rejected("LEDGER_REJECTED_ACCOUNT_NOT_FOUND"));
-        when(bankClient.refund(anyString(), any(), anyLong())).thenReturn(new BankResult.Unknown(TIMEOUT));
+        when(bankClient.refund(anyString(), anyString(), any(), anyLong())).thenReturn(new BankResult.Unknown(TIMEOUT));
 
         ChargeSagaOutcome outcome = executor.execute(chargeId);
 
@@ -411,6 +412,51 @@ class ChargeSagaIntegrationTest {
         ChargeSagaOutcome outcome = executor.execute(chargeId);
 
         assertOutcome(outcome, Set.of(), ChargeStatus.BANK_PROCESSING);
+        assertEquals(0, chargeRow().get("attempt_count"));
+    }
+
+    @Test
+    void 컨슈머_경로_출금이_NotSent로_끝나면_호출_직전_상태에서_아무것도_쓰지_않는다() {
+        // 호출 전 쓰기: REQUESTED → BANK_PROCESSING 전이(상태·updated_at·이력 1행)는 은행 호출 전에 커밋된다
+        AtomicReference<Map<String, Object>> beforeCall = new AtomicReference<>();
+        when(bankClient.withdraw(anyString(), anyString(), anyString(), anyString(), anyLong(), any(), anyInt()))
+                .thenAnswer(invocation -> {
+                    beforeCall.set(snapshot());
+                    return new BankResult.NotSent("004");
+                });
+
+        consumer.onChargeRequested(chargeEvent("event-not-sent"));
+
+        assertEquals("BANK_PROCESSING", beforeCall.get().get("status"));
+        assertEquals(List.of("REQUESTED", "BANK_PROCESSING"), historyStatuses());
+        assertEquals(beforeCall.get(), snapshot(), "NotSent 뒤 상태·attempt_count·last_error·이력·updated_at 불변");
+    }
+
+    @Test
+    void 컨슈머_경로_환불이_NotSent로_끝나면_호출_직전_상태에서_아무것도_쓰지_않는다() {
+        givenWithdraw(new BankResult.Succeeded(UUID.randomUUID()));
+        givenLedger(new LedgerPostResult.Rejected("LEDGER_REJECTED_ACCOUNT_NOT_FOUND"));
+        AtomicReference<Map<String, Object>> beforeCall = new AtomicReference<>();
+        when(bankClient.refund(anyString(), anyString(), any(), anyLong())).thenAnswer(invocation -> {
+            beforeCall.set(snapshot());
+            return new BankResult.NotSent("004");
+        });
+
+        consumer.onChargeRequested(chargeEvent("event-refund-not-sent"));
+
+        assertEquals("REFUND_PROCESSING", beforeCall.get().get("status"));
+        assertEquals(beforeCall.get(), snapshot(), "NotSent 뒤 상태·attempt_count·last_error·이력·updated_at 불변");
+    }
+
+    @Test
+    void NotSent는_확실한_응답도_결과_모름도_아니고_보내지_않은_은행으로_알린다() {
+        givenWithdraw(new BankResult.NotSent("004"));
+
+        ChargeSagaOutcome outcome = executor.execute(chargeId);
+
+        assertOutcome(outcome, Set.of(), null);
+        assertEquals(Optional.of("004"), outcome.notSent());
+        assertEquals("004", outcome.bankCode());
         assertEquals(0, chargeRow().get("attempt_count"));
     }
 
@@ -439,6 +485,15 @@ class ChargeSagaIntegrationTest {
                 SELECT status, failure_code, last_error, attempt_count, bank_tx_id, ledger_ref, refund_bank_tx_id,
                        updated_at
                   FROM charge_requests WHERE id = ?
+                """, chargeId);
+    }
+
+    /** NotSent 불변 비교용: 상태·attempt_count·last_error·updated_at과 이력 행 수 */
+    private Map<String, Object> snapshot() {
+        return jdbcTemplate.queryForMap("""
+                SELECT c.status, c.attempt_count, c.last_error, c.updated_at,
+                       (SELECT count(*) FROM charge_status_history h WHERE h.charge_id = c.id) AS history_count
+                  FROM charge_requests c WHERE c.id = ?
                 """, chargeId);
     }
 

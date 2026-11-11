@@ -154,7 +154,7 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
      * 첫 번째 updated_at 조건은 대기 시간의 하한으로, (status, updated_at) 인덱스 범위 스캔을 쓰게 하려는 중복 조건이다.
      */
     @Query(nativeQuery = true, value = """
-            select id, status, updated_at as "updatedAt"
+            select id, status, updated_at as "updatedAt", bank_code as "bankCode"
               from charge_requests
              where status in (:statuses)
                and updated_at < now() - interval '30 seconds'
@@ -164,6 +164,21 @@ public interface ChargeRequestJpaRepository extends JpaRepository<ChargeRequest,
             """)
     List<ChargeRecoveryRow> findRecoveryTargets(@Param("statuses") Collection<String> statuses,
                                                 @Param("limit") int limit);
+
+    /** findRecoveryTargets와 같고 excludedBankCodes(비어 있지 않음)의 은행 코드인 충전을 뺀다 */
+    @Query(nativeQuery = true, value = """
+            select id, status, updated_at as "updatedAt", bank_code as "bankCode"
+              from charge_requests
+             where status in (:statuses)
+               and bank_code not in (:excludedBankCodes)
+               and updated_at < now() - interval '30 seconds'
+               and updated_at < now() - interval '30 seconds' * power(2, least(greatest(attempt_count - 1, 0), 5))
+             order by updated_at
+             limit :limit
+            """)
+    List<ChargeRecoveryRow> findRecoveryTargetsExcludingBanks(@Param("statuses") Collection<String> statuses,
+                                                              @Param("excludedBankCodes") Collection<String> excludedBankCodes,
+                                                              @Param("limit") int limit);
 
     /** 멈춘 충전 지표. 생성 시각 기준 (updated_at은 재시도마다 갱신되어 오래 멈춘 건이 빠짐) */
     long countByStatusInAndCreatedAtBefore(Collection<ChargeStatus> statuses, Instant createdAt);

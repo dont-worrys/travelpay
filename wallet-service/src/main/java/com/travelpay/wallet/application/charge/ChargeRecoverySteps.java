@@ -24,8 +24,9 @@ public class ChargeRecoverySteps {
 
     @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED,
             timeout = ChargeSagaSteps.TX_TIMEOUT_SECONDS)
-    public List<ChargeRecoveryTarget> findTargets(Collection<ChargeStatus> statuses, int limit) {
-        return chargeRequestRepository.findRecoveryTargets(statuses, limit);
+    public List<ChargeRecoveryTarget> findTargets(Collection<ChargeStatus> statuses,
+                                                  Collection<String> excludedBankCodes, int limit) {
+        return chargeRequestRepository.findRecoveryTargets(statuses, excludedBankCodes, limit);
     }
 
     /** 처리 중 상태이면서 createdBefore보다 먼저 생성된 충전 수 */

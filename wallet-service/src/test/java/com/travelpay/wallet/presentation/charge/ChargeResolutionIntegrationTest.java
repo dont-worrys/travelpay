@@ -295,7 +295,7 @@ class ChargeResolutionIntegrationTest {
         // 대기 시간이 충분히 지난 것으로 둔다
         jdbcTemplate.update("UPDATE charge_requests SET updated_at = now() - interval '1 day'");
 
-        assertTrue(recoverySteps.findTargets(ChargeRecoveryGroup.allStatuses(), 10).isEmpty());
+        assertTrue(recoverySteps.findTargets(ChargeRecoveryGroup.allStatuses(), java.util.Set.of(), 10).isEmpty());
     }
 
     @Test
@@ -472,13 +472,13 @@ class ChargeResolutionIntegrationTest {
         jdbcTemplate.update("UPDATE charge_requests SET updated_at = now() - interval '31 seconds' WHERE id = ?",
                 chargeId);
 
-        new ChargeRecoveryScheduler(recoverySteps, executor, new SimpleMeterRegistry(), 10, "10s").recover();
+        new ChargeRecoveryScheduler(recoverySteps, executor, java.util.Set::of, new SimpleMeterRegistry(), 10, "10s").recover();
 
         Map<String, Object> row = chargeRow(chargeId);
         assertEquals("COMPLETED", row.get("status"));
         assertEquals(ledgerTxId, row.get("ledger_ref"));
         verify(ledgerClient).postCharge(chargeId, userId, walletId, AMOUNT);
-        verify(bankClient, never()).refund(anyString(), any(), anyLong());
+        verify(bankClient, never()).refund(anyString(), anyString(), any(), anyLong());
     }
 
     @Test
@@ -510,15 +510,15 @@ class ChargeResolutionIntegrationTest {
         String refundRequestId = jdbcTemplate.queryForObject(
                 "SELECT refund_request_id FROM charge_requests WHERE id = ?", String.class, chargeId);
         UUID refundTxId = UUID.randomUUID();
-        when(bankClient.refund(anyString(), any(), anyLong())).thenReturn(new BankResult.Succeeded(refundTxId));
+        when(bankClient.refund(anyString(), anyString(), any(), anyLong())).thenReturn(new BankResult.Succeeded(refundTxId));
         // 복구 대기 시간(30초)이 지난 것으로 둔다
         jdbcTemplate.update("UPDATE charge_requests SET updated_at = now() - interval '31 seconds' WHERE id = ?",
                 chargeId);
 
-        new ChargeRecoveryScheduler(recoverySteps, executor, new SimpleMeterRegistry(), 10, "10s").recover();
+        new ChargeRecoveryScheduler(recoverySteps, executor, java.util.Set::of, new SimpleMeterRegistry(), 10, "10s").recover();
 
-        verify(bankClient, times(1)).refund(anyString(), any(), anyLong());
-        verify(bankClient).refund(refundRequestId, bankTxId, AMOUNT);
+        verify(bankClient, times(1)).refund(anyString(), anyString(), any(), anyLong());
+        verify(bankClient).refund(refundRequestId, "004", bankTxId, AMOUNT);
         Map<String, Object> row = chargeRow(chargeId);
         assertEquals("REFUNDED", row.get("status"));
         assertEquals(refundTxId, row.get("refund_bank_tx_id"));
