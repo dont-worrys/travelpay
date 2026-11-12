@@ -354,7 +354,7 @@ flowchart TD
 - 맞지 않으면 `409 TRANSFER_RESOLUTION_MISMATCH`, `MANUAL_REVIEW`가 아니면 `409 COMMON_CONFLICT`. 형식 오류는 `400 COMMON_INVALID_REQUEST`
 - 이미 확정된 송금에 같은 운영자가 같은 본문(`targetStatus`·`reason`·`ledgerTransactionId`)으로 다시 요청하면(응답 유실 후 재시도) 원장을 다시 조회하지 않고 현재 송금 상태를 200으로 돌려줍니다. 마지막 운영자 확정 이력과 비교하며, 다른 운영자·다른 내용이면 `409 COMMON_CONFLICT`입니다. `Idempotency-Key`는 받지 않습니다(자금을 직접 옮기지 않고 조건부 UPDATE로 한 번만 반영됨)
 - 원장 `POSTED`이면 원장 조회 응답의 `entries`를 이 송금의 원장 요청 항목(송금인 지갑 DEBIT `TRANSFER_OUT`, 수취인 지갑 CREDIT `TRANSFER_IN`, 같은 통화·금액)과 비교합니다. 순서는 보지 않고, 항목이 빠지거나 더 있거나 값이 하나라도 다르면 `409 TRANSFER_RESOLUTION_MISMATCH`입니다(`reviewReason`과 관계없이). `POSTED`인데 항목이 없거나 값이 비어 있으면 `502`
-- `reviewReason=LEDGER_REQUEST_NOT_ACCEPTED`(원장 409·400) 송금도 원장 `POSTED`이고 항목이 같으면 `COMPLETED`로 확정합니다(409는 `userId` 등 항목 밖의 값 차이로도 나며, 잔액은 항목으로만 바뀜). 원장 `REJECTED`이면 `FAILED`로 확정합니다. 자금은 이동하지 않았고 다시 보내도 계속 409라서입니다. 다만 원장 거절 기록은 이전에 들어온 다른 요청의 것일 수 있어 그 거절 사유를 쓰지 않고, 실패 사유를 `NOT_PROCESSED`로 정해 확정 이력과 같은 트랜잭션에 저장합니다
+- `reviewReason=LEDGER_REQUEST_NOT_ACCEPTED`(원장 409·400) 송금도 원장 `POSTED`이고 항목이 같으면 `COMPLETED`로 확정합니다(원장 요청 해시는 reference·`originalTransactionId`·항목만 비교하고 `userId`·`description`은 빼므로, 송금에서 409가 났는데 항목이 같은 경우는 사실상 없습니다. 그래도 확정은 서버가 항목을 직접 대조한 결과를 따릅니다). 원장 `REJECTED`이면 `FAILED`로 확정합니다. 자금은 이동하지 않았고 다시 보내도 계속 409라서입니다. 다만 원장 거절 기록은 이전에 들어온 다른 요청의 것일 수 있어 그 거절 사유를 쓰지 않고, 실패 사유를 `NOT_PROCESSED`로 정해 확정 이력과 같은 트랜잭션에 저장합니다
 - 원장 조회 실패는 상태를 바꾸지 않고 503·504·502로 응답합니다
 - 상태 변경은 `MANUAL_REVIEW`일 때만 바꾸는 조건부 UPDATE이며, 같은 트랜잭션에서 이력(`transfer_status_history`: 이전·이후 상태, 사유, 운영자 ID, 원장 거래 ID, 시각)을 저장합니다. 동시에 확정하면 한 건만 성공합니다
 - 확정 뒤 송금인의 같은 키 재요청은 확정된 상태로 응답합니다(`COMPLETED` 201, `FAILED` 처음과 같은 사유의 422)
@@ -418,7 +418,7 @@ stateDiagram-v2
 | 409·400·알 수 없는 422 코드·그 밖의 4xx | `MANUAL_REVIEW` | 202 |
 
 - 타임아웃이나 5xx는 원장이 이미 처리했을 수 있으므로 실패로 단정하지 않습니다.
-- 원장이 바쁠 때(커넥션 대기 2초 초과, 거래 트랜잭션 3초 초과)는 원장이 트랜잭션을 롤백하고 503 `COMMON_SERVICE_UNAVAILABLE`로 응답합니다(원장 담당 확인, 2026-11-06). 잠금 대기 중 교착·잠금 실패가 503인지 500인지는 원장 테스트가 없어 미확인입니다(2026-11-11 원장 담당). 어느 쪽이든 원장에 아무것도 남지 않고, 송금은 5xx를 모두 결과 모름(202 `PROCESSING`)으로 두므로 복구 스케줄러가 같은 reference로 다시 보내도 안전합니다.
+- 원장이 바쁠 때(커넥션 대기 2초 초과, 거래 트랜잭션 3초 초과)는 원장이 트랜잭션을 롤백하고 503 `COMMON_SERVICE_UNAVAILABLE`로 응답합니다(원장 담당 확인, 2026-11-06). 교착도 원장 테스트로 확인했습니다(2026-11-12 원장 담당, `LedgerDatabaseFailureIntegrationTest`). 커넥션 대기 초과·트랜잭션 제한 초과(`57014`)·교착(`40P01`) 모두 503이고, 트랜잭션 제한 초과와 교착은 거래 행 0건·잔액 불변이며 잠금이 풀린 뒤 재시도하면 201이었습니다. 다음 SQL을 보내기 전에 제한 시간이 이미 지난 경우와 커밋 중 실패의 응답은 아직 미확인이라 500일 수 있습니다. 어느 쪽이든 송금은 5xx를 모두 결과 모름(202 `PROCESSING`)으로 두므로 복구 스케줄러가 같은 reference로 다시 보내도 안전합니다.
 - 409는 같은 reference의 원장 거래가 이미 있다는 뜻일 수 있어 `FAILED`로 끝내지 않습니다. 400·409는 송금 요청을 잘못 만든 버그나 계약 불일치로 보고 ERROR 로그를 남깁니다.
 - 원장 Feign 호출은 자동 재시도를 끕니다. 타임아웃은 연결 1초, 읽기 6초입니다(원장 최대 응답 약 5초).
 
@@ -529,7 +529,7 @@ flowchart TD
 | user-service | `GET /internal/v1/users/{userId}/real-name` (I02) | 200이면 `ACTIVE` 회원. 404 + `USER_RECIPIENT_NOT_FOUND`일 때만 회원 아님. 응답 `userId`가 요청과 다르면 502 |
 | ledger-service | `POST /internal/v1/ledger/transactions` | [원장 거래 등록](#원장-거래-등록) |
 
-지갑·회원 호출은 결제와 같은 Feign 클라이언트(`WalletFeignApi`·`UserFeignApi`)를 쓰며 타임아웃은 연결 2초, 읽기 3초입니다. 사용자 요청 중의 호출에는 common `InternalHeaderRelayInterceptor`가 요청자의 `User-Id`·`User-Role`을 붙입니다. 지갑·회원 호출 실패는 common `FeignErrors.toCommonException()` 규칙을 따릅니다.
+지갑·회원 호출은 결제와 같은 Feign 클라이언트(`WalletFeignApi`·`UserFeignApi`)를 쓰며 타임아웃은 연결 0.5초, 읽기 1초입니다(2026-11-12 조정, [타임아웃 조정안](#타임아웃-조정안)). 원장은 연결 0.5초, 읽기 6초입니다. 사용자 요청 중의 호출에는 common `InternalHeaderRelayInterceptor`가 요청자의 `User-Id`·`User-Role`을 붙입니다. 지갑·회원 호출 실패는 common `FeignErrors.toCommonException()` 규칙을 따릅니다.
 
 | 지갑·회원 호출 실패 | 송금 응답 |
 |---|---|
@@ -618,6 +618,7 @@ flowchart TD
 | 요청 검증, 멱등성(같은 키·다른 본문), 조회·취소 권한 | `TransferServiceTest`, `TransferControllerTest`, `TransferRequestHasherTest`, `RecipientNameMaskerTest` |
 | 원장 응답별 상태, 재전송 시 잔액 1회 변경, 복구 백오프·한도 | `TransferLedgerFlowTest`, `TransferRecoverySchedulerTest` |
 | 다른 서비스 응답 해석(오류 코드·5xx·타임아웃·429 매핑) | `TransferLedgerClientAdapterTest`, `TransferWalletReaderTest`, `TransferUserReaderTest` |
+| 지갑·회원 Feign 타임아웃이 실제 HTTP에서 걸리는 시간(yml 값·조정안 값, DB·Docker 불필요) | `TransferFeignTimeoutTest` |
 | 쿼리·DB 제약(UNIQUE, CHECK, 페이지 정렬, 복구 대상 선정) | `TransferRepositoryIntegrationTest` |
 | 상태 전이 전체(조건부 UPDATE 10종 × 시작 상태 6개) | `TransferStatusTransitionIntegrationTest` |
 | 동시 요청 정합성(아래 불변식) | `TransferConsistencyIntegrationTest` |

@@ -33,15 +33,15 @@ spring:
         config:
           # 결제·송금이 함께 쓰는 Feign 클라이언트(contextId 기준)
           paymentWalletApi:
-            connect-timeout: 2000
-            read-timeout: 3000
+            connect-timeout: 500
+            read-timeout: 1000
           # 원장 최대 응답(약 5초)보다 길게 기다리고, 넘으면 결과 모름(송금은 PROCESSING)
           paymentLedgerApi:
-            connect-timeout: 1000
+            connect-timeout: 500
             read-timeout: 6000
           paymentUserApi:
-            connect-timeout: 2000
-            read-timeout: 3000
+            connect-timeout: 500
+            read-timeout: 1000
 
 travelpay:
   client:
