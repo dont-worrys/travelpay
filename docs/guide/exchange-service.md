@@ -282,6 +282,45 @@ sequenceDiagram
 - 신청 후 **24시간**이 지나도 결과를 모르면 `MANUAL_REVIEW`(`LEDGER_UNCONFIRMED_TOO_LONG`)로 보냅니다.
 - 끄려면 `exchange.order.recovery.enabled=false`. 이때 아래 정체·대기 지표도 갱신되지 않습니다.
 
+### 서킷 브레이커 (#282)
+
+원장이 느리거나 응답하지 않을 때, 원장을 부르는 쪽이 응답(최대 약 7초)을 기다리며 스레드를 붙잡지 않게 합니다. 원장 거래 등록(`LedgerClientAdapter.post`) 한 곳에 걸려 있어 원장을 부르는 세 경로가 함께 보호됩니다.
+
+| 경로 | 붙잡히던 스레드 | 서킷이 없을 때 (개선 전 측정, 원장 시간 초과) |
+|---|---|---|
+| 환전 신청 | 요청 스레드(Tomcat 200개) | 스레드가 모두 사용 중이 되어 원장과 상관없는 환율 조회·견적도 수 초씩 기다림 |
+| 예약 체결 | 환율 수집 스레드 | 체결하는 동안 다음 수집이 늦어져 mock 환율이 30초 넘게 오래되면 견적이 503 |
+| 복구 스케줄러 | 스케줄러 스레드 | 원장이 죽어 있는데 주문마다 원장을 다시 부름 |
+
+**동작**
+
+- 닫힘(평소): 원장을 부르고, 걸린 시간과 결과를 기록합니다.
+- 열림: 최근 10초 동안 20건 이상 불렀고, 그중 절반 이상이 실패했거나 2초 이상 걸렸으면 엽니다. 10초 동안 원장을 부르지 않고 바로 결과 모름(`Unknown`)으로 처리합니다. 주문은 시간 초과 때와 같이 `PROCESSING`(202)으로 남고, 원장이 회복되면 복구 스케줄러가 확정합니다.
+- 반열림: 10초가 지나면 다음 호출 5건을 시험으로 보냅니다. 괜찮으면 닫고, 아니면 다시 엽니다.
+
+**무엇을 실패로 세나**
+
+- 실패: 결과 모름(시간 초과·연결 실패·5xx·본문 해석 실패)만.
+- 세지 않음: 거절(422, 잔액 부족 등)은 원장이 제대로 답한 것이고, `Invalid`(400·409 등)는 원장 장애가 아니라 요청 문제라서입니다.
+- 느린 호출: 결과와 상관없이 2초 이상 걸리면 셉니다. 원장이 3초씩 걸리며 성공하기만 해도 예약 체결이 환율 수집을 멈췄기 때문입니다(개선 전 측정).
+- 관리자 처리의 원장 단건 조회(`findByOrderId`)는 감싸지 않습니다. 사람이 가끔 하는 일이고, 원장의 실제 상태가 보여야 합니다.
+
+**설정** (`exchange.ledger.circuit-breaker`, 값이 없으면 같은 기본값)
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `sliding-window` | `10s` | 최근 몇 초의 호출로 판단할지 |
+| `minimum-calls` | `20` | 이보다 적게 불렀으면 판단하지 않음 |
+| `failure-rate-percent` | `50` | 실패 비율 기준 |
+| `slow-call-duration` | `2s` | 이보다 오래 걸리면 느린 호출 |
+| `slow-call-rate-percent` | `50` | 느린 호출 비율 기준 |
+| `wait-in-open` | `10s` | 열린 뒤 시험 호출까지 기다리는 시간 |
+| `half-open-calls` | `5` | 시험으로 보내는 호출 수 |
+
+기준값은 결제 서비스의 원장 서킷과 같습니다. 상태가 바뀌면 WARN 로그(`원장 서킷 상태 변경 ...`, 바뀌기 전·후 상태)를 남깁니다. 열린 동안 막힌 호출마다는 남기지 않고(DEBUG), 수는 지표로 봅니다.
+
+**감수한 점:** 열린 동안 복구 스케줄러가 고른 주문도 원장에 보내지 않고 결과 모름이 되어 확인 횟수가 올라갑니다. 그만큼 다음 재시도 간격이 늘어나, 원장이 회복된 뒤 확정이 늦어질 수 있습니다(시간 초과일 때와 같은 동작). 원장 회복 뒤 확정 속도는 후속 이슈에서 다룹니다.
+
 ### 지표
 
 `/actuator/prometheus`로 내보냅니다.
@@ -292,6 +331,9 @@ sequenceDiagram
 | `exchange_order_manual_review` | 관리자 처리를 기다리는 주문 수 |
 | `exchange_rate_cache_lookups_total{result=hit/miss/error}` | 환율 캐시 조회 결과 |
 | `hikaricp_connections_*` | DB 커넥션 풀 (사용 중·대기·획득 시간) |
+| `resilience4j_circuitbreaker_state{name="exchangeLedger",state=...}` | 원장 서킷 상태 (지금 상태만 1) |
+| `resilience4j_circuitbreaker_not_permitted_calls_total{name="exchangeLedger"}` | 서킷이 열려 원장에 보내지 않은 호출 수 |
+| `resilience4j_circuitbreaker_failure_rate`, `..._slow_call_rate` | 최근 창의 실패·느린 호출 비율 (판단 전이면 -1) |
 
 정체·대기 수는 복구 스케줄러가 30초마다 세어 두고, 지표는 그 값만 읽습니다. 세기에 실패하면 0이 아니라 이전 값을 유지합니다.
 
@@ -475,6 +517,7 @@ Redis 키
 | 주문은 견적의 스냅샷 | 견적이 사라져도 주문만으로 금액·환율 근거를 증빙 | 주문 행이 넓음 |
 | 원장 호출은 트랜잭션 밖 | 원장 응답(최대 수 초)을 기다리는 동안 DB 연결을 잡지 않음 | 주문 저장과 원장 반영 사이에 `PROCESSING` 상태가 생김 → 복구 스케줄러 |
 | 결과 모름은 재전송, 다시 보내도 안 풀리면 `MANUAL_REVIEW` | 원장이 reference로 멱등이라 재전송이 안전. 장애가 풀리면 자동으로 끝남 | 24시간 넘게 모르면 사람이 확인 |
+| 원장 거래 등록에 서킷 브레이커, 열리면 결과 모름 | 원장이 느리면 신청이 요청 스레드를, 예약 체결이 환율 수집 스레드를 붙잡아 원장과 상관없는 환율 조회·견적까지 막힘(개선 전 측정). 열렸을 때를 결과 모름으로 두면 기존 `PROCESSING` → 복구 흐름을 그대로 씀 | 열린 동안 복구 대상도 확인 횟수가 올라 원장 회복 뒤 재시도가 늦어질 수 있음 |
 | 같은 키 재요청은 원장을 부르지 않음 | 원장 호출을 첫 신청과 복구 스케줄러 두 곳으로 줄여 경쟁과 부하를 막음 | 재요청한 사용자는 스케줄러 확정까지 202 |
 | 관리자 처리 결과는 서버가 원장 조회로 정함 | 돈의 원본은 원장. 사람이 상태를 고르면 원장과 어긋날 수 있음 | 원장 항목이 다르면 처리 못 함(원장 보정 필요) |
 | 최신 환율 Redis 캐시 | DB 연결 대기가 병목이었음(쿼리를 줄인 v0.5도 대기 159) | 캐시 장애 시 DB로 읽어 느려짐 |
@@ -493,13 +536,14 @@ Redis 키
 - 단위 테스트는 DB 없이 돕니다. 원장·지갑은 가짜 객체로 바꿔 응답별 주문 상태, 재요청, 복구 대기 시간, 관리자 처리 규칙을 확인합니다.
 - 통합 테스트(`*IntegrationTest`)는 Testcontainers로 PostgreSQL(`postgres:18.6-bookworm`)과 Redis(`redis:8.2.11-bookworm`)를 띄웁니다. Docker만 실행 중이면 되고, 없으면 건너뜁니다.
   - 견적을 쓰는 테스트는 공용 Redis 컨테이너(`TestRedis`)를 함께 씁니다.
-- 2026-11-10 기준(#254 브랜치) 656건이 모두 통과합니다.
+- 2026-11-12 기준(#282 브랜치) 695건이 모두 통과합니다.
 
 | 확인 대상 | 테스트 |
 |---|---|
 | 금액 계산·통화·견적 규칙 | `MoneyTest`, `ExchangeQuoteTest`, `QuotePolicyTest`, `FeeRateTest`, `QuoteCurrenciesTest` |
 | 환전 신청·재요청·원장 결과별 상태 | `ExchangeOrderServiceTest`, `ExchangeOrderLedgerProcessorTest`, `ExchangeOrderIntegrationTest` |
 | 원장 HTTP 응답 해석, 실제 Feign | `LedgerClientAdapterTest`, `ExchangeOrderLedgerHttpIntegrationTest` |
+| 원장 서킷 브레이커 (설정, 열림·복구) | `LedgerCircuitBreakerConfigurationTest`, `LedgerClientAdapterTest`, `ExchangeOrderLedgerCircuitIntegrationTest` |
 | 복구 스케줄러·정체 지표 | `ExchangeOrderRecoveryServiceTest`, `ExchangeOrderBacklogMonitorTest`, `ExchangeOrderPersistenceIntegrationTest` |
 | 관리자 처리 (원장 흉내 HTTP 서버) | `ManualReviewResolutionTest`, `ExchangeAdminServiceTest`, `AdminExchangeManualReviewHttpIntegrationTest` |
 | 환율 수집·캐시·Redis 장애 | `ExchangeRateCollectorTest`, `KoreaEximRateProviderTest`, `ExchangeRateCacheIntegrationTest`, `ExchangeRateCacheOutageIntegrationTest`, `ExchangeRatePartialCollectionIntegrationTest` |

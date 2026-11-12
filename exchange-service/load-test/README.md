@@ -7,6 +7,7 @@ DB만 쓸 때와 Redis를 쓸 때를 같은 방법으로 재서 비교합니다(
 | --- | --- | --- |
 | 환율 조회 | `rate-query.js` (기본) | 읽기만 하는 API. 최신 환율 읽기 (v0: SELECT 2번 / v0.5: LATERAL 1번 / v1: Redis MGET 1번) |
 | 견적 발급 | `quote-issue.js` | 외화 한 통화의 최신 환율 읽기 + 견적 저장 (quote-db: DB INSERT + 커밋 / quote-redis: Redis SET, DB 연결 안 씀) |
+| 원장 장애 영향 (#282) | `exchange-order.js`, `quote-freshness.js` | 가짜 원장을 느리게 해 환전 신청이 요청 스레드를 붙잡는지, 예약 체결이 환율 수집을 늦추는지 (아래 "원장 장애 측정") |
 
 견적 발급은 견적 저장소 전환(#223) 하나의 효과만 봅니다: #223 머지 직전(quote-db, 환율은 Redis·견적은 DB) → #223 머지 커밋(quote-redis, 둘 다 Redis).
 환율을 Redis에서 읽는 효과는 환율 조회 측정(v0 → v0.5 → v1)으로 이미 검증했으므로, 견적은 바뀐 변수 하나만 비교합니다.
@@ -16,7 +17,8 @@ DB만 쓸 때와 Redis를 쓸 때를 같은 방법으로 재서 비교합니다(
 
 | 파일 | 하는 일 |
 | --- | --- |
-| `compose.yaml` | 측정 전용 Postgres(5439, pg_stat_statements 켬), 캐시 Redis(measure-redis, 팀 redis-cache와 같은 설정), 환전 서비스(app, mock 모드), k6(부하 생성기)를 같은 Docker 네트워크에 띄움 |
+| `compose.yaml` | 측정 전용 Postgres(5439, pg_stat_statements 켬), 캐시 Redis(measure-redis, 팀 redis-cache와 같은 설정), 환전 서비스(app, mock 모드), k6(부하 생성기)를 같은 Docker 네트워크에 띄움. 원장 장애 측정 때만 가짜 지갑·원장(ledger-stub, `stub` 프로필)도 띄움 |
+| `wiremock/mappings/` | 가짜 지갑·원장(WireMock) 응답: 지갑 잔액은 고정 지갑 하나, 원장 거래 등록은 항상 POSTED(지연은 `measure-ledger.sh`가 바꿈) |
 | `init/01-extensions.sql` | 측정 DB를 처음 만들 때 pg_stat_statements 확장 생성 |
 | `seed-rate-history.sql` | 측정 전에 환율 테이블을 표준 상태로 맞춤 (공식 30일 + 가짜 이력, 쿼리 통계 초기화) |
 | `k6-common.js` | 두 k6 스크립트가 함께 쓰는 부분: 예열·측정 한 시나리오 설정, 응답 집계, 결과 표·JSON |
@@ -26,6 +28,10 @@ DB만 쓸 때와 Redis를 쓸 때를 같은 방법으로 재서 비교합니다(
 | `measure-all.sh` | 50 / 100 / 300 단계를 3번씩 측정하고 단계별 중앙값 표를 만듦 |
 | `measure-compare.sh` | 버전(jar) 여러 개를 회차·단계·버전 순서를 섞어 같은 날 비교 측정 |
 | `measure-common.sh` | 위 두 스크립트가 함께 쓰는 결과 검사(실패 요청, 견적 검산)와 요약 표 |
+| `exchange-order.js` | k6 스크립트(열린 모델): 환전 신청(견적 → 신청) 초당 60건 + 환율 조회 초당 100건을 함께 보냄 |
+| `quote-freshness.js` | k6 스크립트(열린 모델): 견적 발급 초당 10건. 환율이 오래돼 503(`EXCHANGE_RATE_UNAVAILABLE`)이 난 수와 시각을 셈 |
+| `measure-ledger.sh` | 원장 장애 한 회차: 가짜 원장 지연 설정 → 앱 재시작 → 이력 적재 → (예약 넣기) → k6 실행(그동안 요청 스레드·커넥션 풀 1초 기록) → 주문·예약 상태 집계 |
+| `measure-ledger-compare.sh` | 원장 정상·느림·시간 초과를 회차마다 순서를 돌려 3번씩(9회) 측정 |
 | `pc-state.sh` | 측정하는 PC의 전원 모드·충전기·팀 서비스 포트·IntelliJ 상태를 JSON 한 줄로 (Windows) |
 | `standby-events.sh` | 두 시각 사이 Windows 대기 모드 진입 횟수 (Windows 시스템 로그) |
 | `results/` | 측정 결과 JSON (커밋하지 않음. 비교에 쓴 값은 측정 기록 문서에 옮겨 적음) |
@@ -341,6 +347,57 @@ SUMMARY_ONLY=1 SCRIPT=quote-issue.js ./measure-compare.sh quote250 quote-db=../.
 ```
 
 다시 잰 회차의 `-db.json`에서 `conditions.histogram`이 `"false"`, `conditions.prometheus`가 `"off"`인지 확인합니다.
+
+### 원장 장애 측정 (#282 서킷 브레이커 전후)
+
+원장이 느리거나 응답하지 않을 때 환전 서비스가 어떻게 되는지 잽니다. 원장 자리에 가짜 원장(WireMock)을 두고, 응답 지연만 바꿔 세 시나리오를 만듭니다.
+
+| 시나리오 | 원장 지연 | 뜻 |
+| --- | --- | --- |
+| `normal` | 0ms | 정상 |
+| `slow` | 3000ms | 느리지만 성공 (앱의 원장 응답 대기 5초 안) |
+| `timeout` | 6000ms | 앱이 5초에 포기 → 결과 모름 → 주문 `PROCESSING`(202) |
+
+두 가지를 따로 봅니다.
+
+| 측정 | 부하 | 보는 것 |
+| --- | --- | --- |
+| 신청 부하 (`ledger-*`) | 환전 신청 초당 60건 + 환율 조회 초당 100건 (`exchange-order.js`) | 요청 스레드(200개)가 원장 응답을 기다리느라 바닥나는지, 원장과 상관없는 환율 조회까지 느려지는지 |
+| 예약 체결 영향 (`resv-*`) | 바로 체결될 대기 예약 60건 + 견적 발급 초당 10건 (`quote-freshness.js`) | 환율 수집 스레드에서 도는 예약 체결이 원장을 기다리느라 다음 수집이 늦어져, 견적이 503이 되는지 |
+
+**열린 모델**(constant-arrival-rate)로 잽니다. 응답과 상관없이 초당 정해진 수만큼 요청을 시작합니다. 동시 N명(닫힌 모델)으로 재면 서버가 느려질 때 가상 사용자도 같이 기다려 요청이 저절로 줄어서, 스레드가 바닥나는 상황이 가려집니다. 신청 초당 60건은 원장이 5초씩 걸릴 때 스레드 200개가 감당하는 양(200 ÷ 5 = 초당 40건)보다 많고, 원장이 정상이면 여유 있게 처리하는 양입니다.
+
+```bash
+# 1. 저장소 루트에서: 개선 전·후 커밋으로 jar 빌드 (측정 끝나도 지우지 않음)
+git worktree add ../travelpay-ledger-pre282 <개선 전 커밋> && (cd ../travelpay-ledger-pre282 && ./gradlew :exchange-service:bootJar)
+git worktree add ../travelpay-ledger-282 <개선 후 커밋> && (cd ../travelpay-ledger-282 && ./gradlew :exchange-service:bootJar)
+
+# 2. 측정 폴더에서: 신청은 견적(Redis 키)을 읽으므로 측정 Redis를 noeviction으로. 같은 셸에서 끝까지 잽니다
+cd exchange-service/load-test
+export MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction
+docker compose up -d --force-recreate --wait measure-redis
+J=exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar
+
+# 신청 부하: 시나리오 3개 × 3회 (회차마다 순서를 한 칸씩 돌림)
+APP_JAR=../../../travelpay-ledger-pre282/$J ./measure-ledger-compare.sh ledger-pre
+APP_JAR=../../../travelpay-ledger-282/$J ./measure-ledger-compare.sh ledger-post
+
+# 예약 체결 영향: 같은 시나리오, k6 스크립트와 예약 수만 바꿈
+RESERVATIONS=60 K6_SCRIPT=quote-freshness.js WARMUP_SECONDS=0 APP_JAR=../../../travelpay-ledger-pre282/$J ./measure-ledger-compare.sh resv-pre
+RESERVATIONS=60 K6_SCRIPT=quote-freshness.js WARMUP_SECONDS=0 APP_JAR=../../../travelpay-ledger-282/$J ./measure-ledger-compare.sh resv-post
+
+# 한 회차만: APP_JAR=... ./measure-ledger.sh <이름> <원장 지연 ms>
+# 중간에 멈추면 results/<PREFIX>-progress.log의 번호부터: START_AT=5 APP_JAR=... ./measure-ledger-compare.sh ledger-post
+```
+
+- 결과는 `results/<이름>.json`(k6: 응답 시간·상태별 수·응답 못 받음)과 `results/<이름>-server.json`(요청 스레드 사용 수·커넥션 풀·CPU, 주문·예약 상태별 수, 환율 수집 횟수와 가장 긴 수집 간격, 측정 조건)입니다.
+- 가짜 원장은 회차마다 새로 만들고(`--force-recreate`), 관리 API로 지연을 바꾼 뒤 다시 읽어 확인합니다. 틀린 지연으로 재면 결과가 무의미하기 때문입니다.
+- 앱은 이 측정에서만 가짜 지갑·원장 주소와 요청 스레드 지표(`server.tomcat.mbeanregistry.enabled`)를 켭니다. 환경 변수가 없으면 꺼져 있어, 다른 측정 조건은 바뀌지 않습니다.
+- k6 컨테이너가 가끔 1~5분 늦게 시작합니다(원인 못 찾음, 2026-11-12). 그래서 예약은 k6가 실제로 견적 요청을 보내기 시작한 뒤(Actuator prometheus에 견적 카운터가 생긴 뒤) 넣고, 서버 지표 기록은 정해진 시간이 아니라 k6가 끝났다는 표시 파일을 보고 멈춥니다. 견적 503 구간은 상대 시간이 아니라 시각(epoch)으로 남깁니다.
+- 앞 측정과 같이 PC 조건(전원 모드·충전기·대기 모드)을 측정 전후에 기록하고, 맞지 않으면 그 회차는 무효입니다.
+- 결과(개선 전, 2026-11-12): 원장 시간 초과면 요청 스레드 200개가 120초 중 118초 동안 모두 사용 중이고, 환율 조회 p50이 0.93ms → 8.1초, 약 28%는 10초 안에 응답을 못 받았습니다. 커넥션 풀 대기는 거의 0이었습니다(원장 호출이 트랜잭션 밖이라). 예약 체결은 원장이 3초로 느리기만 해도 측정 구간에 환율 수집이 0번이 되어 견적의 약 77%가 503이었습니다.
+
+**Grafana 캡처**(아래 "모니터링 연결"): 공식 숫자는 모니터링을 끄고 재고, 캡처용은 따로 잽니다(개선 전 정상·시간 초과, 개선 후 시간 초과). 대시보드에 Tomcat 패널이 없어 Explore에서 `tomcat_threads_busy_threads{name="http-nio-18084"}`와 uri별 p95를 봅니다. 캡처가 끝나면 **측정 앱을 먼저 내리고 15초 기다린 뒤** Prometheus 설정을 되돌립니다. 반대로 하면 끝 표시(staleness)가 남지 않아 마지막 값이 5분 동안 이어져 그려집니다.
 
 ## 모니터링 연결 (Grafana 캡처)
 
