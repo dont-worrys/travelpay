@@ -74,15 +74,20 @@ locals {
       }
     } : {},
     # 요청이 적은 서비스라 5분에 5건이면 일시 오류가 아니라 장애로 봅니다. ELB 5xx는 정상 Target이 없거나 응답 시간 초과입니다.
+    # ALB가 만든 5xx는 Target Group 차원이 없어 Grafana Target 문제도 함께 셉니다. Target 5xx는 Gateway Target Group만 셉니다.
     var.enable_app_runtime ? {
       alb_5xx = {
         namespace   = "AWS/ApplicationELB", metric = "HTTPCode_ELB_5XX_Count", statistic = "Sum", comparison = "GreaterThanOrEqualToThreshold",
         threshold   = 5, periods = 1, missing = "notBreaching", dimensions = { LoadBalancer = aws_lb.api[0].arn_suffix },
-        description = "ALB가 5분 동안 5xx를 5건 이상 반환했습니다(정상 Gateway 없음·시간 초과)."
+        description = "ALB가 5분 동안 5xx를 5건 이상 반환했습니다(정상 Gateway·Grafana Target 없음·시간 초과)."
       }
       gateway_5xx = {
-        namespace   = "AWS/ApplicationELB", metric = "HTTPCode_Target_5XX_Count", statistic = "Sum", comparison = "GreaterThanOrEqualToThreshold",
-        threshold   = 5, periods = 1, missing = "notBreaching", dimensions = { LoadBalancer = aws_lb.api[0].arn_suffix },
+        namespace = "AWS/ApplicationELB", metric = "HTTPCode_Target_5XX_Count", statistic = "Sum", comparison = "GreaterThanOrEqualToThreshold",
+        threshold = 5, periods = 1, missing = "notBreaching",
+        dimensions = {
+          LoadBalancer = aws_lb.api[0].arn_suffix
+          TargetGroup  = aws_lb_target_group.gateway[0].arn_suffix
+        }
         description = "Gateway가 5분 동안 5xx를 5건 이상 응답했습니다."
       }
     } : {},

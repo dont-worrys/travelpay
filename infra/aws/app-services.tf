@@ -53,6 +53,13 @@ resource "aws_ecs_service" "application" {
   # 배포가 실패하거나 되돌려지면 apply가 그 이유와 함께 실패하도록 안정 상태까지 기다립니다.
   wait_for_steady_state = true
 
+  # 실행할 리비전은 CD(scripts/deploy-services.py)가 정합니다. 무시하지 않으면 다음 apply가 CD가 배포한 리비전을
+  # Terraform이 만든 리비전(이전 이미지)으로 되돌립니다. Terraform이 바꾼 Task 설정은 새 리비전으로 등록되고,
+  # CD가 그 패밀리의 최신 리비전에서 다음 배포를 만들 때 반영됩니다.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
   # 참조로 드러나지 않는 실행 조건입니다. Target Group은 리스너 규칙으로 ALB에 연결돼야 Service에 붙일 수 있고, Task는 실행 역할 권한·SG 규칙이
   # 있어야 이미지·비밀값을 받고 DB 등에 연결합니다. 삭제 때 provider는 Task가 종료를 시작할 때(INACTIVE)까지만 기다리므로,
   # 전체를 내릴 때는 먼저 enable_app_services=false로 Task를 모두 멈춘 뒤 나머지를 지웁니다.
