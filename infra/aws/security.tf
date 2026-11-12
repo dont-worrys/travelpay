@@ -54,6 +54,10 @@ locals {
     var.enable_database_bootstrap_access ? {
       data_rds_bootstrap = { source = "data", target = "rds", port = 5432 }
     } : {},
+    # 공개 진입점을 켠 뒤에만 ALB가 Data 호스트의 Grafana(모니터링 역할)로 보냅니다(public-ingress.tf).
+    var.enable_public_entry ? {
+      alb_grafana = { source = "alb", target = "monitoring", port = 3000 }
+    } : {},
   )
 
   # NAT는 통신 경로이고 SG는 통신 허용입니다. 필요한 HTTPS 포트만 열어 둡니다.

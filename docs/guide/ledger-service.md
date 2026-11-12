@@ -43,6 +43,7 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 | `POST /internal/v1/ledger/accounts` | 지갑의 통화별 계정 개설 | 201(새로 만듦)·200(이미 모두 있음) |
 | `GET /internal/v1/ledger/accounts?walletId=` | 지갑의 통화별 계정·잔액 조회 | 200 |
 | `POST /internal/v1/ledger/transactions` | 거래 등록 | 201(새 기록)·200(같은 내용 재요청) |
+| `POST /internal/v1/ledger/transactions/cancel` | 거래 취소(같은 reference를 취소 기록으로 막음) | 201(취소 기록)·200(이미 거래 있음) |
 | `GET /internal/v1/ledger/transactions?referenceType=&referenceId=` | reference로 거래 단건 조회 | 200 |
 | `GET /internal/v1/ledger/transactions/period?referenceType=&from=&to=` | 기간 거래 목록(커서) | 200 |
 
@@ -220,6 +221,74 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
   - 원장을 부르는 다섯 경로(결제·환불·정산·송금·충전)는 모두 4xx가 아닌 응답을 결과 모름으로 받아 같은 reference로 재전송합니다(`FeignErrors.isRejected` 기준). 그래서 원장이 500을 돌려줘도 돈이 어긋나지 않고, 500과 503의 차이는 응답 의미와 모니터링에만 영향을 줍니다.
 - 커밋 플러시 또는 COMMIT 중 실패했을 때의 예외 변환과 HTTP 응답: 미확인입니다. 결과를 모르는 경우(커밋됐는지 알 수 없음)도 남아 있습니다.
 
+## 거래 취소
+
+`POST /internal/v1/ledger/transactions/cancel`
+
+결과를 모르는 등록 요청을 호출 쪽이 실패로 확정하기 전에, 같은 reference를 취소 기록으로 먼저 차지합니다. 호출 쪽이 기다리기를 그만둔 등록 요청은 원장 서버에서 스레드를 기다리다 늦게 커밋될 수 있는데, 이 대기 시간은 설정으로 묶여 있지 않습니다. 단건 조회의 404는 읽기라 이후 커밋을 막지 못하므로, 취소 기록을 먼저 남기고 그 응답으로 확정합니다.
+
+### 요청
+
+```json
+{
+  "referenceType": "PAYMENT",
+  "referenceId": "6dda1ae2-…",
+  "userId": "8f0c…",
+  "description": "결제 시간 초과 취소"
+}
+```
+
+| 필드 | 필수 | 설명 |
+|---|---|---|
+| `referenceType`·`referenceId` | 필수 | 취소할 등록 요청과 같은 값 |
+| `userId` | 선택 | 요청자. 등록 요청과 같은 의미(기록용) |
+| `description` | 선택 | 255자 이하 |
+
+금액·항목은 받지 않습니다.
+
+### 응답
+
+응답 `data`는 [단건 조회](#단건-조회)와 같은 형식입니다.
+
+| 그 reference의 상태 | 처리 | 응답 |
+|---|---|---|
+| 거래 없음 | `REJECTED` + `rejectReason: CANCELLED_BY_REQUESTER` 저장. 항목·계정 잠금·잔액 변화 없음 | 201, 빈 `entries` |
+| 이미 `POSTED` | 바꾸지 않음 | 200, 기존 거래(항목 포함) |
+| 이미 `REJECTED`(원장 거절 또는 앞선 취소) | 바꾸지 않음 | 200, 기존 거래와 원래 사유 |
+| 형식 오류(`referenceType`·`referenceId` 없음 등) | 기록 없음 | 400 `COMMON_INVALID_REQUEST` |
+| DB 연결 불가·커넥션 획득 실패·트랜잭션 시간 초과 | 롤백 | 503 `COMMON_SERVICE_UNAVAILABLE` (같은 요청으로 재전송) |
+
+등록 API와 다른 점:
+
+- `REJECTED`(취소 기록)도 성공 결과라 201·200 본문으로 돌려줍니다. 422로 바꾸지 않습니다.
+- 같은 reference에 다른 내용의 거래가 있어도 409가 아니라 그 거래를 200으로 돌려줍니다. 호출 쪽은 응답의 `status`·`entries`로 등록이 먼저 반영됐는지 판단합니다.
+
+### 등록과의 관계
+
+- 취소 뒤 같은 reference로 등록이 오면 기존 규칙대로 409 `LEDGER_REFERENCE_CONFLICT`이고, 잔액과 취소 기록은 그대로입니다. 취소 기록의 요청 해시는 `cancel-v1` + referenceType + referenceId로 따로 계산해 어떤 등록 해시와도 같지 않습니다.
+- 등록과 동시에 들어오면 reference UNIQUE로 먼저 커밋된 쪽만 남습니다. 취소는 계정을 잠그지 않아, 등록이 계정 잠금을 기다리는 동안 먼저 커밋됩니다. 취소가 지면(등록이 먼저 저장) 새 트랜잭션에서 그 거래를 다시 읽어 200으로 돌려줍니다.
+- 같은 취소를 반복해도 거래는 하나이고, 같은 `transactionId`를 200으로 돌려줍니다.
+- `reject_reason`은 값 제약이 없는 `VARCHAR(50)`이고 제약은 "`REJECTED`일 때만 사유 있음"뿐이라 마이그레이션은 없습니다.
+
+### 테스트로 확인
+
+`LedgerCancelIntegrationTest`(실제 Postgres·실제 HTTP):
+
+| 상황 | 결과 |
+|---|---|
+| 거래 없음 | 201, `REJECTED`·`CANCELLED_BY_REQUESTER`, 거래 행 1건·항목 0건 |
+| 같은 취소 3회(설명만 다른 요청 포함) | 201·200·200, 같은 `transactionId`, 거래 행 1건 |
+| 취소 뒤 같은 reference로 충전 등록 | 409 `LEDGER_REFERENCE_CONFLICT`, 잔액 0, 취소 기록 유지 |
+| 이미 `POSTED`(충전) | 200, `POSTED`·항목 2개, 잔액 그대로 |
+| 이미 `REJECTED`(잔액 부족 송금) | 200, `INSUFFICIENT_BALANCE` 그대로 |
+| 등록이 계정 잠금을 기다리는 중 취소(`LedgerLockProbe`) | 취소 201, 등록 409, 거래는 취소 1건·항목 0건·잔액 0. 등록 대기 확인 뒤 취소하고 65ms 만에 잠금 해제 |
+| 등록이 거래 행을 INSERT했지만 커밋 전일 때 취소 → 등록 커밋 | 취소가 reference UNIQUE에서 기다린 뒤 200, 등록 거래(`POSTED`, 같은 ID) 반환, 거래 행 1건·취소 기록 없음 |
+| 같은 상황에서 등록 롤백 | 취소가 기다린 뒤 201, `CANCELLED_BY_REQUESTER`, 거래 행 1건 |
+| 같은 reference로 취소 6건 동시 | 201 1건·200 5건, 모두 같은 `transactionId`, 거래 행 1건 |
+| `referenceId` 없음 | 400, 거래 행 변화 없음 |
+
+커밋 전 행은 앱 풀 밖 연결이 같은 reference 행을 INSERT만 하고 쥔 채로 재현했습니다. 취소가 잠금을 기다리는 것을 `pg_stat_activity`(`wait_event_type = 'Lock'`)로 확인한 뒤 커밋·롤백했고, 이 대기도 취소의 트랜잭션 제한 3초 안입니다.
+
 ## 조회
 
 ### 단건 조회
@@ -244,7 +313,7 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 }
 ```
 
-- `rejectReason`은 `REJECTED`일 때만 값이 있습니다(`INSUFFICIENT_BALANCE`·`WALLET_SUSPENDED`·`ACCOUNT_NOT_FOUND`).
+- `rejectReason`은 `REJECTED`일 때만 값이 있습니다(`INSUFFICIENT_BALANCE`·`WALLET_SUSPENDED`·`ACCOUNT_NOT_FOUND`, [거래 취소](#거래-취소)로 남긴 기록은 `CANCELLED_BY_REQUESTER`).
 - `entries`는 저장된 계정 값을 그대로 보여 줍니다. `USER` 항목은 `walletId` + `accountType: "WALLET"`, `SYSTEM` 항목은 `walletId: null` + `accountType`입니다. 요청 때 `USER`에 `accountType`을 비웠어도 응답에는 `WALLET`이 나오므로, 요청과 비교할 때 이 차이를 고려합니다.
 - 항목 순서는 항목 ID 순으로 고정이며 요청 순서와 다를 수 있습니다. 비교는 순서 없이 합니다.
 - `balanceAfter`는 내보내지 않습니다.
@@ -313,6 +382,7 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 | 422 | `LEDGER_REJECTED_INSUFFICIENT_BALANCE` | `USER` 계정 잔액 부족 거절 |
 | 422 | `LEDGER_REJECTED_WALLET_SUSPENDED` | 항목 계정 중 `ACTIVE`가 아닌 계정이 있어 거절 |
 | 422 | `LEDGER_REJECTED_ACCOUNT_NOT_FOUND` | 항목 계정이 없어 거절 |
+| 422 | `LEDGER_REJECTED_CANCELLED_BY_REQUESTER` | 취소 기록이 있는 reference에 같은 요청 해시로 등록. 취소 해시는 등록 해시와 달라 실제로는 409가 됨 |
 | 500 | `COMMON_INTERNAL_SERVER_ERROR` | 예상하지 못한 오류 |
 | 503 | `COMMON_SERVICE_UNAVAILABLE` | DB 연결 불가·커넥션 획득 실패·쿼리/트랜잭션 시간 초과 |
 

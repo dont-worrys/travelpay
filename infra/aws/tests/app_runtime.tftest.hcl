@@ -66,6 +66,76 @@ override_resource {
 
 override_resource {
   override_during = plan
+  target          = aws_subnet.network["app_a"]
+  values          = { id = "subnet-00000000000000010" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_subnet.network["app_b"]
+  values          = { id = "subnet-00000000000000011" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_ecs_task_definition.application["wallet"]
+  values          = { arn = "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-wallet-service:1" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_ecs_task_definition.application["user"]
+  values          = { arn = "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-user-service:1" }
+}
+
+# Eureka·Mock Bank가 서로의 Cloud Map 이름에 등록되지 않는지 서로 다른 값으로 구분합니다.
+override_resource {
+  override_during = plan
+  target          = aws_service_discovery_service.application["eureka"]
+  values          = { arn = "arn:aws:servicediscovery:ap-northeast-2:123456789012:service/srv-eureka000000000" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_service_discovery_service.application["mock_bank"]
+  values          = { arn = "arn:aws:servicediscovery:ap-northeast-2:123456789012:service/srv-mockbank00000000" }
+}
+
+# 원본 인증 값은 SSM에서 읽으므로 알려진 값으로 바꿔 ALB 규칙에 그대로 들어가는지 봅니다.
+override_data {
+  override_during = plan
+  target          = data.aws_ssm_parameter.origin_auth[0]
+  values          = { value = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" }
+}
+
+# Grafana 인증서·Target Group이 API 쪽 자원과 섞이지 않는지 서로 다른 값으로 구분합니다.
+override_resource {
+  override_during = plan
+  target          = aws_acm_certificate.grafana[0]
+  values          = { arn = "arn:aws:acm:ap-northeast-2:123456789012:certificate/11111111-1111-1111-1111-111111111111" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_lb_target_group.grafana[0]
+  values          = { arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/travelpay-production-grafana/1111111111111111" }
+}
+
+# Service마다 자기 SG를 쓰는지 서로 다른 값으로 구분합니다.
+override_resource {
+  override_during = plan
+  target          = aws_security_group.boundary["gateway"]
+  values          = { id = "sg-000000000000000a1" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_security_group.boundary["wallet"]
+  values          = { id = "sg-000000000000000a2" }
+}
+
+override_resource {
+  override_during = plan
   target          = aws_iam_role.task_execution["wallet"]
   values          = { arn = "arn:aws:iam::123456789012:role/travelpay-production-wallet-service-execution" }
 }
@@ -95,6 +165,8 @@ variables {
   enable_app_foundation            = true
   enable_data_foundation           = true
   enable_app_runtime               = true
+  enable_app_services              = true
+  enable_public_entry              = true
   app_host_count                   = 2
   ecs_ami_id                       = "ami-0123456789abcdef0"
   data_ami_id                      = "ami-0123456789abcdef1"
@@ -369,9 +441,18 @@ run "public_entry_accepts_only_the_api_host_over_tls" {
     error_message = "HTTPS만 열고 발급 확인을 거친 인증서를 쓰며 기본 응답은 404여야 합니다."
   }
 
+  # Grafana 인증서는 쓰고 있는 API 인증서를 바꾸지 않도록 따로 발급합니다.
   assert {
     condition = (
-      one(one(aws_lb_listener_rule.api[0].condition).host_header).values == toset(["api.travelpay.store"]) &&
+      aws_acm_certificate.grafana[0].domain_name == "grafana.travelpay.store" && aws_acm_certificate.grafana[0].validation_method == "DNS" &&
+      length(aws_acm_certificate.grafana[0].subject_alternative_names) <= 1 && aws_acm_certificate.api[0].domain_name == "api.travelpay.store"
+    )
+    error_message = "Grafana는 API와 별도의 DNS 검증 인증서를 써야 합니다."
+  }
+
+  assert {
+    condition = (
+      [for condition in aws_lb_listener_rule.api[0].condition : one(condition.host_header).values if length(condition.host_header) > 0] == [toset(["api.travelpay.store"])] &&
       one(aws_lb_listener_rule.api[0].action).type == "forward" &&
       one(aws_lb_listener_rule.api[0].action).target_group_arn == aws_lb_target_group.gateway[0].arn
     )
@@ -512,6 +593,228 @@ run "runtime_contract_matches_application_configs" {
   }
 }
 
+run "services_run_each_app_once_with_rolling_and_rollback" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for key, service in local.application_services : (
+        aws_ecs_service.application[key].name == service.name && aws_ecs_service.application[key].desired_count == 1
+      )
+      ]) && (
+      aws_ecs_service.application["wallet"].task_definition == "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-wallet-service:1" &&
+      aws_ecs_service.application["user"].task_definition == "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-user-service:1"
+    )
+    error_message = "8개 앱마다 같은 이름의 Service가 자기 Task 정의로 Task 1개를 실행해야 합니다."
+  }
+
+  # CD 배포 역할은 travelpay-production 클러스터의 이 이름들만 갱신할 수 있습니다(tests/identity.tftest.hcl이 정책 ARN을 대조).
+  assert {
+    condition = aws_ecs_cluster.main[0].name == "travelpay-production" && toset([for service in aws_ecs_service.application : service.name]) == toset([
+      "gateway", "eureka-server", "user-service", "wallet-service", "payment-service", "exchange-service", "ledger-service", "mock-bank",
+    ])
+    error_message = "Service 이름과 클러스터가 CD 배포 역할이 갱신할 수 있는 대상과 같아야 합니다."
+  }
+
+  assert {
+    condition = alltrue([
+      for service in aws_ecs_service.application : (
+        service.deployment_minimum_healthy_percent == 100 && service.deployment_maximum_percent == 200 &&
+        one(service.deployment_circuit_breaker).enable && one(service.deployment_circuit_breaker).rollback &&
+        service.wait_for_steady_state
+      )
+    ])
+    error_message = "새 Task가 정상이 된 뒤 이전 Task를 내리고, 실패하면 되돌리며, apply가 그 결과를 기다려야 합니다."
+  }
+
+  # 생략하면 AWS가 클러스터 기본값을 기록해 다음 plan부터 갱신이 거절되므로 명시해야 합니다.
+  assert {
+    condition = alltrue([
+      for service in aws_ecs_service.application :
+      [for item in service.capacity_provider_strategy : [item.capacity_provider, item.weight]] == [[aws_ecs_capacity_provider.app[0].name, 1]]
+    ])
+    error_message = "Service는 앱 호스트 Capacity Provider를 명시해야 합니다."
+  }
+
+  assert {
+    condition = alltrue([
+      for service in aws_ecs_service.application : (
+        one(service.network_configuration).subnets == toset(["subnet-00000000000000010", "subnet-00000000000000011"]) &&
+        length(one(service.network_configuration).security_groups) == 1 &&
+        one(service.network_configuration).assign_public_ip != true
+      )
+      ]) && (
+      one(aws_ecs_service.application["gateway"].network_configuration).security_groups == toset(["sg-000000000000000a1"]) &&
+      one(aws_ecs_service.application["wallet"].network_configuration).security_groups == toset(["sg-000000000000000a2"])
+    )
+    error_message = "Task는 App 서브넷에 공인 IP 없이 뜨고, 자기 역할의 SG 하나만 써야 합니다."
+  }
+
+  # RDS max_connections=100이고 연결 경보는 80입니다. 모든 DB 서비스가 한꺼번에 롤링해도 풀 상한 합계가 60을 넘지 않아야 합니다.
+  assert {
+    condition = sum([
+      for key, service in aws_ecs_service.application :
+      service.desired_count * service.deployment_maximum_percent / 100 * tonumber(local.task_environment[key].SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE)
+      if local.application_services[key].db_username != null
+    ]) <= 60
+    error_message = "롤링 중 DB 커넥션 풀 상한 합계가 60을 넘으면 안 됩니다."
+  }
+}
+
+run "only_fixed_name_services_use_cloud_map_and_only_gateway_joins_the_alb" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for key, service in aws_ecs_service.application :
+      contains(["eureka", "mock_bank"], key) ? (
+        length(service.service_registries) == 1 &&
+        one(service.service_registries).registry_arn == aws_service_discovery_service.application[key].arn
+      ) : length(service.service_registries) == 0
+    ])
+    error_message = "다른 앱이 고정 이름으로 찾는 Eureka·Mock Bank만 자기 Cloud Map 이름에 등록해야 합니다."
+  }
+
+  assert {
+    condition = (
+      [for item in aws_ecs_service.application["gateway"].load_balancer : [item.target_group_arn, item.container_name, item.container_port]] ==
+      [[aws_lb_target_group.gateway[0].arn, "gateway", 8080]] &&
+      aws_ecs_service.application["gateway"].health_check_grace_period_seconds == 180 &&
+      alltrue([
+        for key, service in aws_ecs_service.application :
+        length(service.load_balancer) == 0 && service.health_check_grace_period_seconds == null if key != "gateway"
+      ])
+    )
+    error_message = "Gateway만 업무 포트로 ALB Target에 등록하고 기동 유예 180초를 둬야 합니다(다른 서비스는 Task 정의의 시작 유예가 같은 역할)."
+  }
+}
+
+run "runtime_without_service_activation_starts_no_tasks" {
+  command = plan
+  variables {
+    enable_public_entry = false
+    enable_app_services = false
+  }
+
+  assert {
+    condition     = length(aws_ecs_service.application) == 0 && length(aws_ecs_task_definition.application) == 8
+    error_message = "Service 활성화 전에는 Task 정의만 있고 상시 실행 Task가 없어야 합니다."
+  }
+}
+
+run "public_entry_accepts_only_requests_carrying_the_cloudflare_origin_header" {
+  command = plan
+
+  # 헤더 이름은 Gateway가 업무 서비스로 넘기기 전에 지우는 이름과 같아야 비밀값이 서비스 로그·요청에 남지 않습니다.
+  assert {
+    condition = alltrue([
+      for rule in [aws_lb_listener_rule.api[0], aws_lb_listener_rule.grafana[0]] :
+      [for condition in rule.condition : one(condition.http_header).http_header_name if length(condition.http_header) > 0] == [
+        regex("ORIGIN_AUTH = \"([^\"]+)\"", file("${path.module}/../../gateway/src/main/java/com/travelpay/gateway/request/InternalHeaderResetFilter.java"))[0]
+      ] &&
+      nonsensitive([for condition in rule.condition : one(condition.http_header).values if length(condition.http_header) > 0]) == [
+        toset(["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"])
+      ]
+    ])
+    error_message = "API·Grafana 규칙은 Cloudflare가 붙인 원본 인증 헤더(Gateway가 지우는 이름)와 SSM 값이 모두 맞을 때만 보내야 합니다."
+  }
+
+  assert {
+    condition = (
+      [for condition in aws_lb_listener_rule.grafana[0].condition : one(condition.host_header).values if length(condition.host_header) > 0] == [toset(["grafana.travelpay.store"])] &&
+      one(aws_lb_listener_rule.grafana[0].action).target_group_arn == "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/travelpay-production-grafana/1111111111111111" &&
+      aws_lb_listener_rule.grafana[0].priority != aws_lb_listener_rule.api[0].priority &&
+      one(aws_lb_listener.https[0].default_action).type == "fixed-response"
+    )
+    error_message = "Grafana 이름으로 온 요청만 Grafana로 보내고, 맞는 규칙이 없으면 기본 404여야 합니다."
+  }
+
+  assert {
+    condition = (
+      aws_lb_listener_certificate.grafana[0].listener_arn == aws_lb_listener.https[0].arn &&
+      aws_lb_listener_certificate.grafana[0].certificate_arn == aws_acm_certificate_validation.grafana[0].certificate_arn &&
+      aws_acm_certificate_validation.grafana[0].certificate_arn == "arn:aws:acm:ap-northeast-2:123456789012:certificate/11111111-1111-1111-1111-111111111111" &&
+      aws_lb_listener.https[0].certificate_arn == aws_acm_certificate_validation.api[0].certificate_arn
+    )
+    error_message = "같은 리스너에 발급 확인을 거친 Grafana 인증서를 추가하고, 기본 인증서는 API 인증서로 둬야 합니다."
+  }
+
+  assert {
+    condition = (
+      aws_lb_target_group.grafana[0].target_type == "ip" && aws_lb_target_group.grafana[0].protocol == "HTTP" && aws_lb_target_group.grafana[0].port == 3000 &&
+      one(aws_lb_target_group.grafana[0].health_check).path == "/api/health" && one(aws_lb_target_group.grafana[0].health_check).matcher == "200" &&
+      aws_lb_target_group_attachment.grafana[0].target_id == "10.20.20.10" && aws_lb_target_group_attachment.grafana[0].port == 3000 &&
+      local.tcp_connections.alb_grafana == { source = "alb", target = "monitoring", port = 3000 }
+    )
+    error_message = "Grafana Target은 Data 호스트 사설 IP의 3000이고, SG는 ALB에서 모니터링 역할의 3000만 열어야 합니다."
+  }
+
+  assert {
+    condition = (
+      yamldecode(local.monitoring_runtime_files["monitoring-compose.yaml"]).services.grafana.ports == ["127.0.0.1:3000:3000", "$${DATA_PRIVATE_IP:?}:3000:3000"] &&
+      yamldecode(local.monitoring_runtime_files["monitoring-compose.yaml"]).services.grafana.environment.GF_SERVER_ROOT_URL == "https://grafana.travelpay.store" &&
+      yamldecode(local.monitoring_runtime_files["monitoring-compose.yaml"]).services.grafana.environment.GF_SECURITY_COOKIE_SECURE == "true" &&
+      output.monitoring.grafana_url == "https://grafana.travelpay.store"
+    )
+    error_message = "공개한 Grafana는 사설 IP에서도 받고, 공개 주소를 기준으로 링크를 만들며 세션 쿠키를 HTTPS로만 보내야 합니다."
+  }
+}
+
+run "without_public_entry_the_api_needs_no_origin_header_and_grafana_stays_private" {
+  command = plan
+  variables {
+    enable_public_entry = false
+  }
+
+  assert {
+    condition = (
+      alltrue([for condition in aws_lb_listener_rule.api[0].condition : length(condition.http_header) == 0]) &&
+      length(aws_lb_listener_rule.grafana) == 0 && length(aws_lb_target_group.grafana) == 0 && length(aws_lb_listener_certificate.grafana) == 0 &&
+      length(data.aws_ssm_parameter.origin_auth) == 0 && !contains(keys(local.tcp_connections), "alb_grafana") &&
+      yamldecode(local.monitoring_runtime_files["monitoring-compose.yaml"]).services.grafana.ports == ["127.0.0.1:3000:3000"] &&
+      !contains(keys(yamldecode(local.monitoring_runtime_files["monitoring-compose.yaml"]).services.grafana.environment), "GF_SERVER_ROOT_URL") &&
+      output.monitoring.grafana_url == null
+    )
+    error_message = "공개 진입점을 켜기 전에는 원본 인증 값을 읽지 않고, Grafana는 루프백에만 둬야 합니다."
+  }
+}
+
+run "origin_auth_with_wildcard_characters_is_rejected" {
+  command = plan
+
+  override_data {
+    target = data.aws_ssm_parameter.origin_auth[0]
+    values = { value = "*" }
+  }
+
+  expect_failures = [data.aws_ssm_parameter.origin_auth]
+}
+
+run "public_entry_requires_running_services" {
+  command = plan
+  variables {
+    enable_app_services = false
+  }
+  expect_failures = [var.enable_public_entry]
+}
+
+run "services_require_app_hosts" {
+  command = plan
+  variables {
+    app_host_count = 0
+  }
+  expect_failures = [var.enable_app_services]
+}
+
+run "services_require_runtime" {
+  command = plan
+  variables {
+    enable_app_runtime = false
+    application_images = null
+  }
+  expect_failures = [var.enable_app_services]
+}
+
 run "app_host_metrics_roll_up_by_autoscaling_group" {
   command = plan
 
@@ -536,7 +839,9 @@ run "app_host_metrics_roll_up_by_autoscaling_group" {
 run "no_app_host_alarms_without_hosts" {
   command = plan
   variables {
-    app_host_count = 0
+    enable_public_entry = false
+    app_host_count      = 0
+    enable_app_services = false
   }
 
   assert {

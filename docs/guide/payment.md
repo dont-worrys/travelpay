@@ -804,11 +804,16 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `POSTED`, 항목이 우리 기록과 같음 | 결제 `APPROVED` / 환불 `COMPLETED` | 결제 `APPROVED` / 환불 `COMPLETED` |
 | `POSTED`, 항목이 다름 | 409 `PAYMENT_LEDGER_CORRECTION_REQUIRED` | 409 `PAYMENT_LEDGER_CORRECTION_REQUIRED` |
 | `REJECTED` | 결제 `DECLINED`(원장 거절 사유) / 환불 `DECLINED`(원장 거절 사유) | 결제 `DECLINED`("결제 처리 중 오류로 취소되었습니다.") / 환불 `DECLINED`("환불 처리 중 오류로 취소되었습니다.") |
-| 기록 없음 | 결제 `DECLINED`("결제 처리 시간이 초과되어 취소되었습니다.") / **환불 `REQUESTED`(재시도)** | 결제 `DECLINED` / 환불 `DECLINED` (위와 같은 문구) |
+| 기록 없음 | 결제: **원장 취소 뒤** `DECLINED`("결제 처리 시간이 초과되어 취소되었습니다.") / **환불 `REQUESTED`(재시도)** | 결제 `DECLINED` / 환불 `DECLINED` (위와 같은 문구) |
 
 - **항목 비교**: 원장이 `POSTED`면 거래 항목(지갑·통화·방향·금액·항목 유형)이 우리 기록으로 만든 기대 항목과 정확히 같은 묶음인지 봅니다(순서 무관). 기대 항목은 [원장 거래 등록](#원장-거래-등록)과 같은 구성이고, 가맹점 쪽은 가맹점 원장 지갑입니다. 같으면 돈이 의도대로 움직인 것이라 멈춘 사유와 상관없이 기록을 맞춥니다(송금 resolve와 같은 정책).
 - **항목이 다르면 처리하지 않습니다.** 돈이 우리 기록과 다르게 움직인 상태라 거절로 끝내면 돈과 기록이 어긋납니다. 원장 보정(되돌리는 거래)과 원인 조사가 필요합니다.
 - **결제는 기록이 없으면 재시도하지 않습니다.** 오래 멈춘 결제를 뒤늦게 처리하면 고객이 이미 다른 수단으로 냈을 수 있어(이중 결제) 취소합니다. 환불은 돌려줘야 할 돈이라 `REQUESTED`·`attempt_count` 0으로 되돌리고, 복구 스케줄러가 30초 뒤부터 다시 요청합니다.
+- **재시도를 다 쓴 결제가 원장에 없으면 원장 취소를 먼저 보냅니다.** 마지막 원장 요청은 원장 서버에서 스레드를 기다리다 늦게 커밋될 수 있고(이 대기 시간은 설정으로 묶이지 않음), 조회의 404는 읽기라 그 뒤의 커밋을 막지 못합니다. 그래서 바로 거절하지 않고 [원장 거래 취소](ledger-service.md#거래-취소)로 같은 reference를 취소 기록으로 먼저 차지한 뒤 그 응답으로 정합니다.
+  - 취소가 기록됨(또는 앞선 처리가 남긴 취소 기록): `DECLINED`. 늦게 도착한 요청은 원장에서 409로 끝나 돈이 움직이지 않습니다.
+  - 조회와 취소 사이에 거래가 먼저 반영돼 있음: 그 거래로 처리합니다(`POSTED`이고 항목이 같으면 `APPROVED`, 다르면 409 `PAYMENT_LEDGER_CORRECTION_REQUIRED`, `REJECTED`면 원장 거절 사유로 `DECLINED`).
+  - 취소 응답을 받지 못함: 503 `PAYMENT_LEDGER_LOOKUP_UNAVAILABLE`, 상태 유지. 다시 처리하면 같은 취소를 보내며 몇 번 보내도 안전합니다.
+  - 요청 거부(`LEDGER_REQUEST_NOT_ACCEPTED`)는 원장이 이미 4xx로 답해 늦은 커밋이 없으므로 취소하지 않습니다. 단건 조회는 취소를 보내지 않습니다.
 - 환불 처리 후 결제는 남은 금액이 0이면 `REFUNDED`, 아니면 `APPROVED`(부분 환불), 거절이면 `APPROVED`, 재시도면 `REFUND_PENDING`입니다.
 
 ### 처리 요청과 기록
@@ -818,7 +823,8 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 - 상태가 바뀐 처리만 `payment_review_resolutions`에 남깁니다: `payment_id`·`refund_id`(환불일 때)·`review_reason`(멈췄던 사유)·`ledger_status`·`ledger_transaction_id`·`to_status`·`actor_id`(처리한 `MASTER`)·`description`(시스템이 남기는 처리 설명)·`memo`·`created_at`. 409·503으로 끝난 시도는 남기지 않습니다.
 - 결제 상태가 바뀌면 `payment_histories`에도 `MASTER`로 남습니다. 처리 후 `review_reason`은 지워지므로(`MANUAL_REVIEW`일 때만 있음) 멈췄던 사유는 처리 기록에서 봅니다.
 - 처리 기록은 `GET /api/v1/admin/payments/resolutions`로 최신순으로 봅니다. 조건은 모두 선택입니다: `type`(`PAYMENT`·`REFUND`), `actorId`(처리한 `MASTER`), `paymentId`(그 결제와 환불의 기록), `page`·`size`(최대 100). 처리 기록 한 줄에 모든 정보가 있어 단건 조회는 따로 없습니다.
-- 원장 조회는 트랜잭션 밖에서 하고, 상태 변경·이력·처리 기록은 한 트랜잭션으로 저장합니다. 동시에 처리하면 결제는 `@Version`, 환불은 `status = MANUAL_REVIEW` 조건부 UPDATE로 하나만 반영되고 나머지는 409 `PAYMENT_NOT_MANUAL_REVIEW`입니다.
+- 원장 취소로 막은 처리는 `ledger_status`가 `NOT_FOUND`(원장에 반영된 거래 없음)이고 `description`에 "(원장 취소 기록)"이 붙습니다(예: "재시도 한도 초과, 원장 기록 없음 → 결제 시간 초과 취소(원장 취소 기록)"). 취소 기록의 원장 거래 ID는 남기지 않으며(`NOT_FOUND`면 거래 ID가 비어 있어야 하는 제약), 원장 조회로 볼 수 있습니다.
+- 원장 조회·취소는 트랜잭션 밖에서 하고, 상태 변경·이력·처리 기록은 한 트랜잭션으로 저장합니다. 동시에 처리하면 결제는 `@Version`, 환불은 `status = MANUAL_REVIEW` 조건부 UPDATE로 하나만 반영되고 나머지는 409 `PAYMENT_NOT_MANUAL_REVIEW`입니다.
 
 ### 정산 운영자 처리
 
@@ -834,10 +840,11 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `POSTED`, 항목이 우리 기록과 같음 | `PAID` (원장 거래 ID 저장) | `PAID` |
 | `POSTED`, 항목이 다름 | 409 `PAYMENT_LEDGER_CORRECTION_REQUIRED` | 409 `PAYMENT_LEDGER_CORRECTION_REQUIRED` |
 | `REJECTED` | `FAILED`(원장 거절 사유를 [정산 문구](#원장-거래-등록)로) + 항목 삭제 | `FAILED`("정산 처리 중 오류로 취소되었습니다.") + 항목 삭제 |
-| 기록 없음 | `FAILED`("정산 처리 시간이 초과되어 취소되었습니다.") + 항목 삭제 | `FAILED`("정산 처리 중 오류로 취소되었습니다.") + 항목 삭제 |
+| 기록 없음 | **원장 취소 뒤** `FAILED`("정산 처리 시간이 초과되어 취소되었습니다.") + 항목 삭제 | `FAILED`("정산 처리 중 오류로 취소되었습니다.") + 항목 삭제 |
 
 - 기대 항목은 가맹점 원장 지갑 DEBIT `SETTLEMENT_OUT`, 정산에 저장된 주인 지갑 CREDIT `SETTLEMENT_IN`(통화·금액은 정산과 같음)입니다.
 - **정산은 기록이 없으면 재시도하지 않고 `FAILED`입니다.** 환불과 달리 가맹점 주인이 언제든 다시 정산을 요청할 수 있고, 새 요청은 주인 지갑을 다시 조회하므로 그 사이 바뀐 지갑에도 안전합니다.
+- **재시도를 다 쓴 정산은 `FAILED` 전에 원장 취소를 먼저 보냅니다.** 다시 요청한 정산은 새 정산 ID(새 reference)라, 마지막 원장 요청이 늦게 커밋되면 이중 지급이 됩니다. 응답별 처리는 결제와 같습니다(취소 기록이면 `FAILED`, 거래가 먼저 반영돼 있으면 그 거래로 `PAID`·`FAILED`, 응답을 받지 못하면 503·상태 유지). 처리 기록 설명에 "(원장 취소 기록)"이 붙습니다.
 - `FAILED`면 항목을 지워 포함됐던 결제가 다음 정산 요청에서 다시 대상이 되고 환불도 가능해집니다. `PAID`면 항목을 그대로 둡니다.
 - 상태가 바뀐 처리만 `settlement_review_resolutions`에 남깁니다(`settlement_id`·`review_reason`·`ledger_status`·`ledger_transaction_id`·`to_status`·`actor_id`·`description`·`memo`·`created_at`). 처리 기록은 `GET /api/v1/admin/payments/settlements/resolutions`(조건 선택: `actorId`·`settlementId`, 최신순)로 봅니다.
 - 동시에 처리하면 정산 `@Version`으로 하나만 반영되고 나머지는 409 `PAYMENT_NOT_MANUAL_REVIEW`입니다.
@@ -850,6 +857,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 |---|---|
 | 200 `POSTED` + 거래 항목 | 반영됨(항목 비교) |
 | 200 `REJECTED` | 거절됨. `rejectReason`(`INSUFFICIENT_BALANCE` 등)을 [거절 사유 표](#원장-거래-등록)로 바꿈 |
+| 200 `REJECTED` + `rejectReason: CANCELLED_BY_REQUESTER` | 기록 없음(운영자 처리가 남긴 취소 기록). 취소 뒤 우리 DB 반영이 실패해 다시 처리해도 같은 결과가 나오게 함 |
 | 404 + `LEDGER_TRANSACTION_NOT_FOUND` | 기록 없음 |
 | 코드 없는 404(경로 오류 등), 그 밖의 4xx·5xx, 연결 실패, `POSTED`인데 항목·금액 없음, 알 수 없는 상태 | 결론을 내지 않음 → 처리 503 `PAYMENT_LEDGER_LOOKUP_UNAVAILABLE`, 상태 유지 |
 
@@ -865,6 +873,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | ledger-service | `GET /internal/v1/ledger/accounts?walletId=` | 가맹점 잔액. 가맹점 통화 계정이 없으면 502 |
 | ledger-service | `POST /internal/v1/ledger/transactions` | [원장 거래 등록](#원장-거래-등록) |
 | ledger-service | `GET /internal/v1/ledger/transactions?referenceType=&referenceId=` | 운영자 처리의 [원장 조회](#원장-조회). 송금 resolve와 같은 `LedgerFeignApi.getTransaction` |
+| ledger-service | `POST /internal/v1/ledger/transactions/cancel` | 운영자 처리에서 재시도를 다 쓴 결제·정산이 원장에 없을 때 취소 기록(`userId`는 처리한 `MASTER`). 201·200 본문을 조회와 같이 해석, 그 밖의 응답·연결 실패는 503. 서킷을 거치지 않음 |
 
 지갑·회원 호출은 송금과 같은 Feign 클라이언트(`WalletFeignApi`·`UserFeignApi`)를 쓰며 타임아웃은 연결 2초, 읽기 3초입니다. 원장 계정 호출은 거래 등록과 같은 클라이언트라 연결 1초, 읽기 6초입니다. 사용자 요청 중의 호출에는 common `InternalHeaderRelayInterceptor`가 요청자의 `User-Id`·`User-Role`을 붙입니다.
 
@@ -1000,18 +1009,18 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `RefundRequestSummaryTest` | 결제 이력으로 고객 환불 신청 요약(`REQUESTED`·`CANCELLED`·`REJECTED`·`ACCEPTED`) 판정 |
 | `PaymentHistoryRepositoryImplTest` | 결제별 가장 최근 환불 신청 사유 조회 |
 | `ManualReviewRulesTest` | 운영자 처리 규칙(멈춘 사유 × 원장 결과), 원장 항목 비교 |
-| `PaymentReviewServiceTest` | 운영자 처리·단건 조회·목록·처리 기록 목록, 예상 결과와 실제 처리 일치, 항목 불일치·동시 처리·원장 조회 실패 |
+| `PaymentReviewServiceTest` | 운영자 처리·단건 조회·목록·처리 기록 목록, 예상 결과와 실제 처리 일치, 항목 불일치·동시 처리·원장 조회 실패, 재시도 소진 결제의 원장 취소(취소 기록·늦은 커밋·취소 실패·요청 거부는 취소 안 함) |
 | `PaymentReviewRepositoryIntegrationTest` | 실제 PostgreSQL에서 목록 쿼리, 환불 조건부 UPDATE, 처리 기록 제약·조건별 조회, 승인 시각 조회, 목록 인덱스 |
 | `PaymentTest` | 결제 상태 전이(환불 신청·취소·거절 포함)와 역할별 환불 가능 여부 |
 | `MerchantServiceTest` | 가맹점 생성(주인 확인, 원장 실패 시 `PENDING`), 재시도, 잔액 권한 |
-| `PaymentLedgerFeignClientTest` | 원장 응답별 반영·거절·받아들이지 않음·결과 모름 분류, 거래 조회 결과 변환(코드 없는 404는 결론 내지 않음) |
+| `PaymentLedgerFeignClientTest` | 원장 응답별 반영·거절·받아들이지 않음·결과 모름 분류, 거래 조회 결과 변환(코드 없는 404는 결론 내지 않음), 원장 취소 응답 변환(취소 기록은 기록 없음, 실패는 503, 서킷 안 거침) |
 | `MerchantLedgerFeignClientTest`, `PaymentWalletFeignClientTest`, `MerchantUserFeignClientTest` | 다른 서비스 응답·실패 변환 |
 | `PaymentExceptionHandlerTest` | 거절 사유를 `details`에 담는지 |
 | `PendingSettlementSchedulerTest` | 스케줄러 주기 처리와 지표 |
 | `SettlementServiceTest` | 정산 요청(대상 기간·완료 환불 차감·주인 지갑), 멱등성·동시 요청, 거절 시 항목 삭제, 결과 모름·5회째 `MANUAL_REVIEW`·받아들이지 않음(`MANUAL_REVIEW`, 항목 유지), 복구, 목록·상세, 미리보기 |
 | `SettlementTest` | 정산 생성·상태 전이(결과는 한 번만 반영), 금액 검증, 같은 요청 판정 |
 | `SettlementRepositoryIntegrationTest` | 실제 PostgreSQL에서 정산 대상·미리보기 조회 조건(승인 시각 기준, 정산된·신청 중 결제 제외), 항목 유일성, 복구 조건부 UPDATE, `MANUAL_REVIEW` 전환·목록·제약, 처리 기록 조회 |
-| `SettlementReviewServiceTest` | 정산 운영자 처리 규칙(멈춘 사유 × 원장 결과), 예상 결과와 실제 처리 일치, 항목 삭제·유지, 원장 보정 필요·조회 실패·동시 처리 |
+| `SettlementReviewServiceTest` | 정산 운영자 처리 규칙(멈춘 사유 × 원장 결과), 예상 결과와 실제 처리 일치, 항목 삭제·유지, 원장 보정 필요·조회 실패·동시 처리, 재시도 소진 정산의 원장 취소 |
 | `SettlementRefundLockIntegrationTest` | 정산과 `MASTER` 직접 환불을 커밋하는 두 트랜잭션으로 동시에 실행해 이중 지급이 없는지 |
 
 `PaymentReviewRepositoryIntegrationTest`·`Settlement*IntegrationTest`는 송금 통합 테스트처럼 Testcontainers로 PostgreSQL을 띄우고 Flyway를 처음부터 적용합니다. Docker가 없으면 건너뜁니다. 나머지는 DB 없이 실행되는 단위 테스트입니다.

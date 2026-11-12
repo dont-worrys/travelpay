@@ -3,6 +3,7 @@ package com.travelpay.payment.application.payment;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerLookup;
 import com.travelpay.payment.domain.payment.PaymentStatus;
 import com.travelpay.payment.domain.payment.RefundStatus;
+import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 
 import java.util.List;
@@ -46,9 +47,20 @@ final class ManualReviewRules {
                     ? payment(PaymentStatus.DECLINED, ledger.declineReason(), reviewReason, ledger, "결제 거절")         // P2
                     : payment(PaymentStatus.DECLINED, PAYMENT_ERROR_REASON, reviewReason, ledger, "결제 취소");          // P4
             case NOT_FOUND -> exhausted
-                    ? payment(PaymentStatus.DECLINED, PAYMENT_TIMEOUT_REASON, reviewReason, ledger, "결제 시간 초과 취소") // P3
+                    ? payment(PaymentStatus.DECLINED, PAYMENT_TIMEOUT_REASON, reviewReason, ledger,
+                            "결제 시간 초과 취소(원장 취소 기록)")                                                     // P3
                     : payment(PaymentStatus.DECLINED, PAYMENT_ERROR_REASON, reviewReason, ledger, "결제 취소");          // P4
         };
+    }
+
+    /**
+     * 원장 기록 없음을 결제 시간 초과 취소로 확정하기 전에 원장 취소가 필요한지.
+     * 재시도를 다 쓴 결제는 마지막 원장 요청이 늦게 커밋될 수 있어, 원장에 취소 기록을 먼저 남기고 그 응답으로 확정한다.
+     * 요청 거부(NOT_ACCEPTED)는 원장이 이미 4xx로 답해 늦은 커밋이 없으므로 필요 없다.
+     */
+    static boolean requiresLedgerCancel(SettlementReviewReason reviewReason, PaymentLedgerLookup ledger) {
+        return reviewReason == SettlementReviewReason.RETRY_EXHAUSTED
+                && ledger.status() == ReviewLedgerStatus.NOT_FOUND;
     }
 
     static RefundDecision decideRefund(SettlementReviewReason reviewReason, PaymentLedgerLookup ledger,

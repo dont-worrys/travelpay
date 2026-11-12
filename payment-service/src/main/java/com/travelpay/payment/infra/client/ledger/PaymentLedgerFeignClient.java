@@ -10,6 +10,7 @@ import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerResu
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerSettlementCommand;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerTransactionCommand;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
+import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.CancelRequest;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.Entry;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.RegisterRequest;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi.TransactionResponse;
@@ -32,6 +33,8 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
 
     private static final String REJECTED_CODE_PREFIX = "LEDGER_REJECTED_";
     private static final String TRANSACTION_NOT_FOUND_CODE = "LEDGER_TRANSACTION_NOT_FOUND";
+    // 원장 취소 API로 남긴 기록의 거절 사유(원장이 판단한 거절이 아님)
+    private static final String CANCELLED_BY_REQUESTER = "CANCELLED_BY_REQUESTER";
 
     /** 원장 거절 코드별 결제 거절 사유. 목록에 없는 거절 코드는 기본 사유로 남긴다 */
     private static final DeclineReasons PAYMENT_DECLINE_REASONS = new DeclineReasons(Map.of(
@@ -106,6 +109,31 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
         return lookup(SETTLEMENT_REFERENCE_TYPE, settlementId, SETTLEMENT_DECLINE_REASONS);
     }
 
+    @Override
+    public PaymentLedgerLookup cancelPaymentTransaction(UUID paymentId, UUID actorId) {
+        return cancel("PAYMENT", paymentId, actorId, "결제 시간 초과 취소", PAYMENT_DECLINE_REASONS);
+    }
+
+    @Override
+    public PaymentLedgerLookup cancelSettlementTransaction(UUID settlementId, UUID actorId) {
+        return cancel(SETTLEMENT_REFERENCE_TYPE, settlementId, actorId, "정산 시간 초과 취소", SETTLEMENT_DECLINE_REASONS);
+    }
+
+    private PaymentLedgerLookup cancel(String referenceType, UUID referenceId, UUID actorId, String description,
+                                       DeclineReasons declineReasons) {
+        ApiResponse<TransactionResultResponse> response;
+        try {
+            response = ledgerFeignApi.cancel(new CancelRequest(referenceType, referenceId, actorId, description));
+        } catch (FeignException exception) {
+            // 취소됐는지 모름. 상태를 바꾸지 않고 다시 처리하게 한다(같은 취소는 몇 번 보내도 안전)
+            log.warn("원장 거래 취소 실패 referenceType={} referenceId={} status={}",
+                    referenceType, referenceId, exception.status());
+            throw new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE);
+        }
+        return toLookup(resultData(response, "취소", referenceType, referenceId), referenceType, referenceId,
+                declineReasons);
+    }
+
     private PaymentLedgerLookup lookup(String referenceType, UUID referenceId, DeclineReasons declineReasons) {
         ApiResponse<TransactionResultResponse> response;
         try {
@@ -119,11 +147,29 @@ public class PaymentLedgerFeignClient implements PaymentLedgerClient {
                     referenceType, referenceId, exception.status());
             throw new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE);
         }
+        return toLookup(resultData(response, "조회", referenceType, referenceId), referenceType, referenceId,
+                declineReasons);
+    }
 
+    // 조회·취소 응답 본문. 형식이 이상하면 결론을 내지 않는다
+    private static TransactionResultResponse resultData(ApiResponse<TransactionResultResponse> response, String action,
+                                                        String referenceType, UUID referenceId) {
         TransactionResultResponse data = response == null || !response.success() ? null : response.data();
         if (data == null || data.transactionId() == null || data.status() == null) {
-            log.error("원장 거래 조회 응답 형식 이상 referenceType={} referenceId={}", referenceType, referenceId);
+            log.error("원장 거래 {} 응답 형식 이상 referenceType={} referenceId={}", action, referenceType, referenceId);
             throw new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE);
+        }
+        return data;
+    }
+
+    private static PaymentLedgerLookup toLookup(TransactionResultResponse data, String referenceType, UUID referenceId,
+                                                DeclineReasons declineReasons) {
+        // 운영자 처리가 남긴 취소 기록이면 원장에 반영된 거래가 없다고 본다(조회·취소 모두).
+        // 취소 뒤 우리 DB 반영이 실패해 다시 처리할 때도 같은 결과(시간 초과 취소)가 나오게 한다
+        if ("REJECTED".equals(data.status()) && CANCELLED_BY_REQUESTER.equals(data.rejectReason())) {
+            log.info("원장 거래 취소 기록 확인 referenceType={} referenceId={} ledgerTransactionId={}",
+                    referenceType, referenceId, data.transactionId());
+            return PaymentLedgerLookup.notFound();
         }
         return switch (data.status()) {
             case "POSTED" -> PaymentLedgerLookup.posted(data.transactionId(),

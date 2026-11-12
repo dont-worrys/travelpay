@@ -27,6 +27,7 @@ import org.springframework.transaction.support.TransactionOperations;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -111,14 +112,14 @@ public class PaymentReviewService {
     public ManualReviewResolveResult resolvePayment(UUID actorId, UUID paymentId, String memo) {
         Payment payment = findManualReviewPayment(paymentId);
         SettlementReviewReason reviewReason = payment.getReviewReason();
-        PaymentLedgerLookup ledger = ledgerClient.findPaymentTransaction(paymentId);
+        PaymentLedgerLookup ledger = paymentLedgerForResolve(reviewReason, paymentId, actorId);
         PaymentDecision decision = ManualReviewRules.decidePayment(reviewReason, ledger,
                 expectedPaymentEntries(payment));
         requireResolvable(decision.resolvable(), reviewReason, ledger, "paymentId=" + paymentId);
 
         ManualReviewResolveResult result;
         try {
-            result = transactionOperations.execute(status -> {
+            result = Objects.requireNonNull(transactionOperations.execute(status -> {
                 PaymentHistory history = decision.toStatus() == PaymentStatus.APPROVED
                         ? payment.resolveApprovedHistory(ledger.transactionId())
                         : payment.resolveDeclinedHistory(decision.declineReason());
@@ -129,7 +130,7 @@ public class PaymentReviewService {
                         decision.description(), memo));
                 return new ManualReviewResolveResult(paymentId, null, saved.getStatus().name(), saved.getStatus(),
                         ledger.status(), ledger.transactionId());
-            });
+            }));
         } catch (OptimisticLockingFailureException e) {
             // 원장을 조회하는 사이 다른 처리가 먼저 끝남
             throw new BusinessException(PaymentErrorCode.NOT_MANUAL_REVIEW);
@@ -138,6 +139,19 @@ public class PaymentReviewService {
         log.info("결제 MANUAL_REVIEW 처리 paymentId={} reviewReason={} ledger={} → {} actorId={}",
                 paymentId, reviewReason, ledger.status(), result.toStatus(), actorId);
         return result;
+    }
+
+    // 원장 조회. 재시도를 다 쓴 결제가 원장에 없으면, 늦게 커밋될 수 있는 마지막 요청을 막으려고 취소 기록을 먼저 남기고
+    // 그 응답(취소 확정 또는 먼저 반영된 거래)으로 처리한다. 취소 여부를 모르면 503(상태 유지)
+    private PaymentLedgerLookup paymentLedgerForResolve(SettlementReviewReason reviewReason, UUID paymentId,
+                                                        UUID actorId) {
+        PaymentLedgerLookup found = ledgerClient.findPaymentTransaction(paymentId);
+        if (!ManualReviewRules.requiresLedgerCancel(reviewReason, found)) {
+            return found;
+        }
+        PaymentLedgerLookup afterCancel = ledgerClient.cancelPaymentTransaction(paymentId, actorId);
+        log.info("결제 MANUAL_REVIEW 처리 전 원장 취소 paymentId={} result={}", paymentId, afterCancel.status());
+        return afterCancel;
     }
 
     public ManualReviewResolveResult resolveRefund(UUID actorId, UUID refundId, String memo) {
@@ -153,7 +167,7 @@ public class PaymentReviewService {
         RefundStatus toStatus = decision.toStatus();
         ManualReviewResolveResult result;
         try {
-            result = transactionOperations.execute(status -> {
+            result = Objects.requireNonNull(transactionOperations.execute(status -> {
                 Instant now = Instant.now();
                 int updated = switch (toStatus) {
                     case COMPLETED -> refundRepository.resolveCompleted(refundId, ledger.transactionId(), now);
@@ -186,7 +200,7 @@ public class PaymentReviewService {
                         ledger.status(), ledger.transactionId(), toStatus, actorId, decision.description(), memo));
                 return new ManualReviewResolveResult(payment.getId(), refundId, toStatus.name(), payment.getStatus(),
                         ledger.status(), ledger.transactionId());
-            });
+            }));
         } catch (OptimisticLockingFailureException e) {
             throw new BusinessException(PaymentErrorCode.NOT_MANUAL_REVIEW);
         }

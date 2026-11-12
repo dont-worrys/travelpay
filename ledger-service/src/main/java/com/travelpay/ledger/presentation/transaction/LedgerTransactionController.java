@@ -3,12 +3,14 @@ package com.travelpay.ledger.presentation.transaction;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.ledger.application.transaction.LedgerTransactionService;
+import com.travelpay.ledger.application.transaction.dto.CancelTransactionResult;
 import com.travelpay.ledger.application.transaction.dto.TransactionDetailResult;
 import com.travelpay.ledger.application.transaction.dto.TransactionPeriodQuery;
 import com.travelpay.ledger.application.transaction.dto.TransactionPeriodResult;
 import com.travelpay.ledger.application.transaction.dto.TransactionResult;
 import com.travelpay.ledger.domain.LedgerErrorCode;
 import com.travelpay.ledger.domain.transaction.ReferenceType;
+import com.travelpay.ledger.presentation.transaction.dto.CancelTransactionRequest;
 import com.travelpay.ledger.presentation.transaction.dto.RegisterTransactionRequest;
 import com.travelpay.ledger.presentation.transaction.dto.RegisterTransactionResponse;
 import com.travelpay.ledger.presentation.transaction.dto.TransactionPeriodResponse;
@@ -51,6 +53,20 @@ public class LedgerTransactionController {
         }
         return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK)
                 .body(ApiResponse.success(RegisterTransactionResponse.from(result)));
+    }
+
+    /**
+     * 같은 reference를 취소 기록으로 막는다. 거래가 없어 취소를 새로 기록했으면 201,
+     * 이미 거래가 있으면 내용과 상관없이 바꾸지 않고 그 거래를 200으로 돌려준다(409 아님).
+     * 응답은 단건 조회와 같은 형식이라 POSTED면 항목이 들어 있다.
+     */
+    @PostMapping("/cancel")
+    public ResponseEntity<ApiResponse<TransactionResultResponse>> cancel(
+            @Valid @RequestBody CancelTransactionRequest request) {
+        CancelTransactionResult result = callLogging(request.referenceType(), request.referenceId(),
+                () -> transactionService.cancel(request.toCommand()));
+        return ResponseEntity.status(result.created() ? HttpStatus.CREATED : HttpStatus.OK)
+                .body(ApiResponse.success(TransactionResultResponse.from(result.transaction())));
     }
 
     @GetMapping

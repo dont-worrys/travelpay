@@ -1,7 +1,11 @@
 package com.travelpay.ledger.application.transaction;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.ledger.application.transaction.dto.CancelTransactionCommand;
+import com.travelpay.ledger.application.transaction.dto.CancelTransactionResult;
+import com.travelpay.ledger.application.transaction.dto.LedgerEntryResult;
 import com.travelpay.ledger.application.transaction.dto.RegisterTransactionCommand;
+import com.travelpay.ledger.application.transaction.dto.TransactionDetailResult;
 import com.travelpay.ledger.application.transaction.dto.TransactionResult;
 import com.travelpay.ledger.domain.LedgerErrorCode;
 import com.travelpay.ledger.domain.account.LedgerAccount;
@@ -11,6 +15,7 @@ import com.travelpay.ledger.domain.transaction.Direction;
 import com.travelpay.ledger.domain.transaction.LedgerEntry;
 import com.travelpay.ledger.domain.transaction.LedgerTransaction;
 import com.travelpay.ledger.domain.transaction.LedgerTransactionRepository;
+import com.travelpay.ledger.domain.transaction.ReferenceType;
 import com.travelpay.ledger.domain.transaction.RejectReason;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
@@ -117,6 +122,38 @@ class LedgerTransactionRecorder {
                 .findByReference(command.referenceType(), command.referenceId())
                 .orElseThrow(() -> new IllegalStateException("중복으로 거절된 거래를 다시 찾을 수 없습니다."));
         return toExistingResult(existing, requestHash);
+    }
+
+    /**
+     * 취소 기록. 같은 reference의 거래가 이미 있으면 내용과 상관없이 바꾸지 않고 그대로 돌려준다(요청 해시를 비교하지 않음).
+     * 계정을 잠그지 않고 거래 행 하나만 저장한다. 등록과 동시에 저장되면 reference UNIQUE 위반(DuplicateReferenceException)으로 롤백된다.
+     */
+    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    public CancelTransactionResult cancel(CancelTransactionCommand command, String requestHash) {
+        Optional<LedgerTransaction> existing =
+                transactionRepository.findByReference(command.referenceType(), command.referenceId());
+        if (existing.isPresent()) {
+            return new CancelTransactionResult(detail(existing.get()), false);
+        }
+        LedgerTransaction cancelled = transactionRepository.save(LedgerTransaction.rejected(
+                command.referenceType(), command.referenceId(), requestHash, command.userId(),
+                RejectReason.CANCELLED_BY_REQUESTER, null, command.description()));
+        return new CancelTransactionResult(TransactionDetailResult.of(cancelled, List.of()), true);
+    }
+
+    /** 취소와 동시에 먼저 저장된 거래를 새 트랜잭션에서 다시 읽어 그대로 돌려준다 */
+    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    public CancelTransactionResult existingForCancel(ReferenceType referenceType, UUID referenceId) {
+        LedgerTransaction existing = transactionRepository.findByReference(referenceType, referenceId)
+                .orElseThrow(() -> new IllegalStateException("중복으로 거절된 취소의 기존 거래를 다시 찾을 수 없습니다."));
+        return new CancelTransactionResult(detail(existing), false);
+    }
+
+    private TransactionDetailResult detail(LedgerTransaction transaction) {
+        List<LedgerEntryResult> entries = transactionRepository.findEntryLines(transaction.getId()).stream()
+                .map(LedgerEntryResult::from)
+                .toList();
+        return TransactionDetailResult.of(transaction, entries);
     }
 
     private Optional<UUID> findAccountId(RegisterTransactionCommand.Entry entry) {
