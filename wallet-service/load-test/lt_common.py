@@ -14,12 +14,18 @@ HERE = pathlib.Path(__file__).resolve().parent
 DATA_FILE = HERE / "data" / "users.json"
 RESULTS = HERE / "results"
 
-# 로컬 전체 스택 주소. 다르면 환경 변수로 바꾼다
+# 업무 API 주소(회원가입·지갑 개설·대사). 측정 환경(compose.yaml)이 같은 포트를 열므로 기본값 그대로 쓴다
 USER_URL = os.environ.get("USER_URL", "http://localhost:8081")
 WALLET_URL = os.environ.get("WALLET_URL", "http://localhost:8082")
 LEDGER_URL = os.environ.get("LEDGER_URL", "http://localhost:8085")
 MOCK_BANK_URL = os.environ.get("MOCK_BANK_URL", "http://localhost:8090")
-SERVICES = {"user": USER_URL, "wallet": WALLET_URL, "ledger": LEDGER_URL, "mock-bank": MOCK_BANK_URL}
+# Actuator(health·prometheus) 주소. 측정 환경은 지표 포트를 따로 연다(190xx, README). 지정하지 않으면 업무 주소와 같음
+SERVICES = {
+    "user": os.environ.get("USER_METRICS_URL", USER_URL),
+    "wallet": os.environ.get("WALLET_METRICS_URL", WALLET_URL),
+    "ledger": os.environ.get("LEDGER_METRICS_URL", LEDGER_URL),
+    "mock-bank": os.environ.get("MOCK_BANK_METRICS_URL", MOCK_BANK_URL),
+}
 
 # Postgres 컨테이너 안 psql로 읽고 쓴다(송금 measure.py와 같은 접속). 관리자 계정은 compose의 POSTGRES_USER(슈퍼유저)
 PG_CONTAINER = os.environ.get("PG_CONTAINER", "travelpay-local-postgres-1")

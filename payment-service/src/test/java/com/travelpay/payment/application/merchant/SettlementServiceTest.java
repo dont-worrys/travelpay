@@ -253,6 +253,31 @@ class SettlementServiceTest {
     }
 
     @Test
+    void notSentStaysRequestedWithoutCountingAttempt() {
+        when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.notSent());
+
+        SettlementResult result = settlementService.requestSettlement(OWNER, MERCHANT_ID, KEY);
+
+        // 원장 서킷이 열려 보내지 않음. 원장에 기록이 없으니 시도로 세지 않고 항목도 그대로 둠
+        assertEquals(SettlementStatus.REQUESTED, result.status());
+        verify(settlementRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+        verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
+    }
+
+    @Test
+    void notSentDuringRecoveryDoesNotMoveToManualReview() {
+        Settlement fourTimesUnknown = settlementWithId(SETTLEMENT_ID);
+        ReflectionTestUtils.setField(fourTimesUnknown, "attemptCount", 4);
+        givenRecoveryTargets(fourTimesUnknown);
+        when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.notSent());
+
+        settlementService.recoverSettlements(Instant.now(), 10);
+
+        // 보내지 않은 호출은 5번째 시도로 세지 않으므로 MANUAL_REVIEW로 넘어가지 않음
+        verify(settlementRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+    }
+
+    @Test
     void notAcceptedStopsAsManualReviewWithoutReleasingPayments() {
         when(ledgerClient.settlementTransaction(any())).thenReturn(PaymentLedgerResult.notAccepted());
         when(settlementRepository.markManualReview(eq(SETTLEMENT_ID), eq(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED),

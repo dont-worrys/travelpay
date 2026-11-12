@@ -1,0 +1,45 @@
+// TRAVELPAY 앱 호스트 로그 수집 설정입니다. ECS Task 컨테이너의 표준 출력을 Docker에서 읽어 Data 호스트의 Loki로 보냅니다.
+// 같은 로그는 awslogs로 CloudWatch에도 갑니다. awslogs가 Loki로 보내지는 않으므로 이 경로를 따로 둡니다.
+
+// ECS가 붙이는 Task 레이블이 있는 컨테이너만 봅니다(ECS Agent·이 수집기 자신은 제외).
+discovery.docker "ecs" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "15s"
+
+	filter {
+		name   = "label"
+		values = ["com.amazonaws.ecs.task-arn"]
+	}
+}
+
+// 걸러 낸 대상만 수집기에 넘깁니다. loki.source.docker의 relabel_rules에서 drop하면 레이블만 지워지고
+// 컨테이너는 그대로 수집되어 레이블 없는 스트림(unknown_service)이 생기므로 발견 단계에서 제외합니다.
+discovery.relabel "ecs" {
+	targets = discovery.docker.ecs.targets
+
+	// awsvpc Task마다 붙는 네트워크용 pause 컨테이너(실제 레이블 값 ~internal~ecs~pause)는 앱 로그가 아닙니다.
+	rule {
+		source_labels = ["__meta_docker_container_label_com_amazonaws_ecs_container_name"]
+		regex         = "~internal~ecs~pause"
+		action        = "drop"
+	}
+
+	// 컨테이너 이름이 서비스 이름(spring.application.name)과 같아 로컬과 같은 service_name 레이블이 됩니다.
+	rule {
+		source_labels = ["__meta_docker_container_label_com_amazonaws_ecs_container_name"]
+		target_label  = "service_name"
+	}
+}
+
+loki.source.docker "ecs" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.ecs.output
+	labels     = {job = "ecs-tasks", environment = "production", host = constants.hostname}
+	forward_to = [loki.write.data.receiver]
+}
+
+loki.write "data" {
+	endpoint {
+		url = "http://${loki_host}:${loki_port}/loki/api/v1/push"
+	}
+}

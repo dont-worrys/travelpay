@@ -61,6 +61,8 @@ exchange:
     # 견적 유효 시간과 수수료율(0.01 = 1%)
     ttl: 5m
     fee-rate: 0.01
+    # 견적 저장소 Redis 명령 대기 한도 (환율 캐시 200ms와 별도, #261)
+    redis-timeout: 1s
     # 보내는 통화별 1회 금액 범위 (통화 단위, 팀 확정 전 임시값)
     limits:
       KRW:

@@ -1,0 +1,29 @@
+[Unit]
+Description=TravelPay Prometheus, Loki, Grafana and Alloy
+Requires=docker.service
+# Data 유닛이 쓰는 runtime.env의 사설 IP로 Loki를 엽니다. 순서만 정하므로 Data 유닛의 실패가 이 유닛을 막지 않고,
+# 이 유닛의 실패도 Redis·Kafka에 영향을 주지 않습니다.
+After=docker.service network-online.target travelpay-data.service
+Wants=network-online.target
+RequiresMountsFor=/srv/travelpay/monitoring
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/travelpay/data
+UMask=0077
+ExecStartPre=/usr/bin/python3 /opt/travelpay/data/prepare-monitoring.py
+ExecStart=/usr/bin/docker compose --file monitoring-compose.yaml --env-file runtime.env up --detach --wait --wait-timeout 300
+# 설정 묶음을 적용할 때 서비스를 멈추지 않고 바뀐 컨테이너만 다시 만듭니다.
+ExecReload=/usr/bin/python3 /opt/travelpay/data/prepare-monitoring.py
+ExecReload=/usr/bin/docker compose --file monitoring-compose.yaml --env-file runtime.env up --detach --wait --wait-timeout 300
+ExecStop=/usr/bin/docker compose --file monitoring-compose.yaml --env-file runtime.env stop --timeout 30
+TimeoutStartSec=900
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

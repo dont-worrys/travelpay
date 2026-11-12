@@ -38,7 +38,12 @@ payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액�
 
 5. 테이블은 앱이 시작할 때 Flyway가 만듭니다([DB 스키마](#db-스키마-flyway)).
 
-결제·가맹점 API는 아직 Swagger 그룹이 없습니다. Swagger UI에는 송금(`transfer`) 그룹만 보입니다
+Swagger UI(`http://localhost:8083/swagger-ui.html`, prod에서는 꺼짐)에서 결제 API는 두 그룹으로 나뉩니다.
+
+- `payment`(결제, `/v3/api-docs/payment`): `/api/v1/payments/**` — 결제·환불, 가맹점, 정산
+- `payment-admin`(결제 관리, `/v3/api-docs/payment-admin`): `/api/v1/admin/payments/**` — MASTER 전용 MANUAL_REVIEW 처리·처리 기록·오래된 환불 신청
+- Gateway 없이 직접 호출할 때는 각 API의 `User-Id`·`User-Role` 헤더 입력칸을 채웁니다. 실제 환경에서는 Gateway가 세션 확인 후 붙입니다.
+- 오류 코드는 Swagger에 적지 않습니다. API별 오류 코드는 이 문서의 각 API 설명을 봅니다.
 
 ## API 목록
 
@@ -702,6 +707,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | 422 + `LEDGER_REJECTED_*` 코드 | 거절 | `DECLINED` / `DECLINED` / `FAILED` |
 | 그 밖의 4xx(400·409·알 수 없는 422 등) | 받아들이지 않음 | `MANUAL_REVIEW` (`LEDGER_REQUEST_NOT_ACCEPTED`) |
 | 읽기 타임아웃·연결 실패·Eureka 미등록·5xx·해석 불가 2xx | 결과 모름 | `PENDING` / `REQUESTED` / `REQUESTED` 유지 |
+| 보내지 않음(원장 서킷 열림, [아래](#원장-서킷-브레이커)) | 보내지 않음 | `PENDING` / `REQUESTED` / `REQUESTED` 유지, 결과 모름 횟수는 늘리지 않음 |
 
 | 원장 거절 코드 | 결제 거절 사유 | 환불 거절 사유 | 정산 거절 사유 |
 |---|---|---|---|
@@ -713,6 +719,23 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 - 타임아웃이나 5xx는 원장이 이미 처리했을 수 있으므로 실패로 단정하지 않습니다.
 - 409는 같은 reference의 원장 거래가 이미 있다는 뜻일 수 있어 `DECLINED`로 끝내지 않습니다. 받아들이지 않음은 ERROR 로그를 남깁니다.
 - 원장 Feign 호출은 자동 재시도를 끕니다. 타임아웃은 연결 1초, 읽기 6초입니다(원장 최대 응답 약 5초).
+
+### 원장 서킷 브레이커
+
+원장이 느리거나 응답하지 않을 때 결제 요청마다 읽기 타임아웃(6초)까지 요청 스레드를 잡고 기다리면, 원장과 상관없는 결제까지 줄을 서서 응답이 수십 초로 늘어납니다. 그래서 결제·환불·정산의 거래 등록은 서킷 브레이커(`PaymentLedgerCircuitBreakerConfig`, Resilience4j)를 거칩니다.
+
+| 항목 | 값 |
+|---|---|
+| 판단 기간 | 최근 10초, 20건 이상 호출됐을 때만 판단 |
+| 열리는 조건 | 실패(읽기 타임아웃·연결 실패·5xx 등 결과 모름) 50% 이상, 또는 2초 이상 걸린 호출 50% 이상 |
+| 실패로 세지 않음 | 4xx 응답(`LEDGER_REJECTED_*` 거절, 받아들이지 않음). 원장이 정상으로 판단해 답한 것 |
+| 열려 있는 시간 | 10초. 이 동안은 원장에 보내지 않고 바로 "보내지 않음" |
+| 반열림 | 10초 뒤 5건만 원장에 보내 보고 닫거나 다시 엶 |
+
+- 보내지 않은 결제·환불·정산은 원장에 기록이 없으므로, 결과 모름과 달리 재시도 횟수를 늘리지 않습니다. 원장 장애가 길어도 보내지 않은 호출 때문에 `MANUAL_REVIEW`로 넘어가지 않습니다.
+- 복구 스케줄러에서는 결과 모름과 같이 원장 장애 신호로 세어, 연달아 3번이면 그 종류를 다음 주기로 미룹니다.
+- 원장 거래 조회(운영자 처리)와 송금(`TransferLedgerClientAdapter`)은 이 서킷을 거치지 않습니다.
+- 상태가 바뀌면 WARN 로그(`원장 서킷 상태 변경`)를 남기고, `/actuator/prometheus`의 `resilience4j_circuitbreaker_state{name="paymentLedger"}`로 상태를 볼 수 있습니다.
 
 ### 복구 스케줄러
 
@@ -856,7 +879,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 
 - 결제의 지갑 확인 단계에서 실패하면 결제는 저장되지 않고 키도 사용되지 않습니다. 같은 키로 다시 요청할 수 있습니다.
 - 가맹점 생성의 주인 확인 단계에서 실패하면 가맹점은 저장되지 않습니다. 원장 계정 생성이 실패하면 오류가 아니라 202 `PENDING`입니다.
-- user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니다. 가맹점 생성은 `MASTER`의 한도를 씁니다([User 가이드](user-service.md#i02-요청자별-호출-제한)).
+- user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니다. 가맹점 생성은 `MASTER`의 한도를 씁니다.
 
 ## 오류 응답
 

@@ -110,6 +110,20 @@ class GatewayRoutingTest {
         assertEquals(verification.header("Request-Id"), arrived.header("Request-Id"));
     }
 
+    @Test
+    void theOriginSecretCloudflareAddsReachesNoService() {
+        client().get().uri("/api/v1/wallets/me")
+                .header("Cookie", "SESSION=abc").header("Origin-Auth", "origin-secret")
+                .exchange().expectStatus().isOk();
+        client().get().uri("/api/v1/terms")
+                .header("Origin-Auth", "origin-secret")
+                .exchange().expectStatus().isOk();
+
+        assertTrue(USER.received(SESSION_VERIFICATION).getFirst().header("Origin-Auth").isEmpty());
+        assertTrue(WALLET.received("/api/v1/wallets/me").getFirst().header("Origin-Auth").isEmpty());
+        assertTrue(USER.received("/api/v1/terms").getFirst().header("Origin-Auth").isEmpty());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "close, User-Id, User-Role, Request-Id, Client-Ip",
@@ -222,6 +236,21 @@ class GatewayRoutingTest {
         var arrived = EXCHANGE.received(path).getFirst();
         assertEquals(List.of(MEMBER_ID.toString()), arrived.header("User-Id"));
         assertEquals(List.of("MASTER"), arrived.header("User-Role"));
+        assertTrue(arrived.header("Cookie").isEmpty());
+    }
+
+    /** 예약 환전 API는 목록·상세 모두 세션 확인을 거쳐, 확인된 회원 헤더를 달고 환전 서비스에 도착합니다. */
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/api/v1/exchange-reservations",
+            "/api/v1/exchange-reservations/550e8400-e29b-41d4-a716-446655440001"
+    })
+    void exchangeReservationRequestsReachExchangeServiceWithTheVerifiedMember(String path) {
+        client().get().uri(path).header("Cookie", "SESSION=abc").exchange().expectStatus().isOk();
+
+        var arrived = EXCHANGE.received(path).getFirst();
+        assertEquals(List.of(MEMBER_ID.toString()), arrived.header("User-Id"));
+        assertEquals(List.of("USER"), arrived.header("User-Role"));
         assertTrue(arrived.header("Cookie").isEmpty());
     }
 

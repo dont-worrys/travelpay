@@ -34,7 +34,11 @@ import static com.travelpay.wallet.domain.charge.ChargeStatus.REQUESTED;
  * - 409·400·응답 형식 이상: 재시도로 풀리지 않으므로 바로 MANUAL_REVIEW(RESPONSE_INVALID)
  * - 계좌번호 복호화 실패: 재시도로 풀리지 않고, 이전 시도에서 이미 출금됐을 수 있으므로 MANUAL_REVIEW(ACCOUNT_DECRYPT_FAILED)
  * - 전이가 0행(다른 실행기가 먼저 진행): 다음 외부 호출 없이 멈춤
+ * - 은행 서킷 열림(NotSent): 은행이 요청을 받지 않았으므로 아무것도 쓰지 않고 멈춤
+ *   (상태·attempt_count·last_error·이력·updated_at 그대로. 호출 전에 이미 커밋된 전이·선점은 별개)
  * 로그에는 chargeId·bankRequestId·eventId·예외 클래스명만 남긴다 (계좌번호·예금주 금지).
+ * 반환값은 외부 호출이 어느 단계에서 확실한 응답·결과 모름으로 끝났는지와 서킷이 열려 보내지 않은 은행이다
+ * (복구 스케줄러의 장애 판단용, 컨슈머는 쓰지 않음).
  */
 @Slf4j
 @Service
@@ -54,44 +58,46 @@ public class ChargeSagaExecutor {
     private final LedgerTransactionClient ledgerClient;
     private final AccountNumberCipher cipher;
 
-    public void execute(UUID chargeId) {
-        execute(chargeId, null);
+    public ChargeSagaOutcome execute(UUID chargeId) {
+        return execute(chargeId, null);
     }
 
     /** @param eventId 상태 이력 trace_id와 로그에 남긴다 (없으면 null) */
-    public void execute(UUID chargeId, String eventId) {
+    public ChargeSagaOutcome execute(UUID chargeId, String eventId) {
         Optional<ChargeRequest> loaded = steps.load(chargeId);
         if (loaded.isEmpty()) {
             log.error("충전 SAGA 대상 충전 없음 chargeId={} eventId={}", chargeId, eventId);
-            return;
+            return ChargeSagaOutcome.NONE;
         }
         ChargeRequest charge = loaded.get();
+        CallTrace trace = new CallTrace(charge.getBankAccount().getBankCode());
         while (charge.getStatus().isInProgress()) {
-            Optional<ChargeStatus> advancedTo = runStep(charge, eventId);
+            Optional<ChargeStatus> advancedTo = runStep(charge, eventId, trace);
             if (advancedTo.isEmpty()) {
-                return;
+                break;
             }
             Optional<ChargeRequest> reloaded = steps.load(chargeId);
             // 방금 바꾼 상태가 아니면 다른 실행기가 이어서 진행한 것
             if (reloaded.isEmpty() || reloaded.get().getStatus() != advancedTo.get()) {
-                return;
+                break;
             }
             charge = reloaded.get();
         }
+        return trace.toOutcome();
     }
 
     /** 전이했으면 바뀐 상태, 멈춰야 하면 empty */
-    private Optional<ChargeStatus> runStep(ChargeRequest charge, String eventId) {
+    private Optional<ChargeStatus> runStep(ChargeRequest charge, String eventId, CallTrace trace) {
         return switch (charge.getStatus()) {
             case REQUESTED -> advance(charge, REQUESTED, BANK_PROCESSING, ChargeStepResult.none(), eventId);
-            case BANK_PROCESSING -> withdraw(charge, eventId);
-            case CREDIT_PROCESSING -> credit(charge, eventId);
-            case REFUND_PROCESSING -> refund(charge, eventId);
+            case BANK_PROCESSING -> withdraw(charge, eventId, trace);
+            case CREDIT_PROCESSING -> credit(charge, eventId, trace);
+            case REFUND_PROCESSING -> refund(charge, eventId, trace);
             case COMPLETED, FAILED, REFUNDED, MANUAL_REVIEW -> Optional.empty();
         };
     }
 
-    private Optional<ChargeStatus> withdraw(ChargeRequest charge, String eventId) {
+    private Optional<ChargeStatus> withdraw(ChargeRequest charge, String eventId, CallTrace trace) {
         String accountNumber;
         try {
             accountNumber = cipher.decrypt(charge.getBankAccount().getAccountNumberEnc());
@@ -105,6 +111,7 @@ public class ChargeSagaExecutor {
         BankResult result = bankClient.withdraw(charge.getBankRequestId(), charge.getBankAccount().getBankCode(),
                 accountNumber, charge.getHolderNameSnapshot(), charge.getAmount(), charge.getId(),
                 charge.getAttemptCount());
+        trace.recordBank(BANK_PROCESSING, result);
         return switch (result) {
             case BankResult.Succeeded succeeded -> advance(charge, BANK_PROCESSING, CREDIT_PROCESSING,
                     ChargeStepResult.withdrawn(succeeded.bankTxId()), eventId);
@@ -112,12 +119,14 @@ public class ChargeSagaExecutor {
                     withdrawFailure(failed.failureCode()), eventId);
             case BankResult.Unknown unknown -> recordUnknown(charge, BANK_PROCESSING, unknown.errorClass(), eventId);
             case BankResult.Invalid invalid -> toManualReview(charge, BANK_PROCESSING, invalid.cause(), eventId);
+            case BankResult.NotSent notSent -> notSent(charge, BANK_PROCESSING, notSent.bankCode(), eventId, trace);
         };
     }
 
-    private Optional<ChargeStatus> credit(ChargeRequest charge, String eventId) {
+    private Optional<ChargeStatus> credit(ChargeRequest charge, String eventId, CallTrace trace) {
         LedgerPostResult result = ledgerClient.postCharge(charge.getId(), charge.getUserId(), charge.getWalletId(),
                 charge.getAmount());
+        trace.record(CREDIT_PROCESSING, result instanceof LedgerPostResult.Unknown);
         return switch (result) {
             case LedgerPostResult.Posted posted -> advance(charge, CREDIT_PROCESSING, COMPLETED,
                     ChargeStepResult.credited(posted.transactionId()), eventId);
@@ -131,7 +140,7 @@ public class ChargeSagaExecutor {
         };
     }
 
-    private Optional<ChargeStatus> refund(ChargeRequest charge, String eventId) {
+    private Optional<ChargeStatus> refund(ChargeRequest charge, String eventId, CallTrace trace) {
         // 환불할 원거래가 없으면 재시도로 풀리지 않는다. failure_code(LEDGER_REJECTED)는 유지하고 사유는 last_error에 남긴다
         if (charge.getBankTxId() == null) {
             log.error("환불할 출금 거래 ID 없음으로 수동 확인 전환 chargeId={} bankRequestId={} eventId={}",
@@ -139,7 +148,9 @@ public class ChargeSagaExecutor {
             return advance(charge, REFUND_PROCESSING, MANUAL_REVIEW,
                     ChargeStepResult.failed(null, "refund bankTxId missing"), eventId);
         }
-        BankResult result = bankClient.refund(charge.getRefundRequestId(), charge.getBankTxId(), charge.getAmount());
+        BankResult result = bankClient.refund(charge.getRefundRequestId(), charge.getBankAccount().getBankCode(),
+                charge.getBankTxId(), charge.getAmount());
+        trace.recordBank(REFUND_PROCESSING, result);
         return switch (result) {
             case BankResult.Succeeded succeeded -> advance(charge, REFUND_PROCESSING, REFUNDED,
                     ChargeStepResult.refunded(succeeded.bankTxId()), eventId);
@@ -149,6 +160,7 @@ public class ChargeSagaExecutor {
             case BankResult.Unknown unknown ->
                     recordUnknown(charge, REFUND_PROCESSING, unknown.errorClass(), eventId);
             case BankResult.Invalid invalid -> toManualReview(charge, REFUND_PROCESSING, invalid.cause(), eventId);
+            case BankResult.NotSent notSent -> notSent(charge, REFUND_PROCESSING, notSent.bankCode(), eventId, trace);
         };
     }
 
@@ -182,6 +194,15 @@ public class ChargeSagaExecutor {
         return Optional.empty();
     }
 
+    /** 서킷이 열려 보내지 않음. DB에 아무것도 쓰지 않고 멈춘다 (다음 시도는 복구 스케줄러가 대기 시간 뒤에) */
+    private Optional<ChargeStatus> notSent(ChargeRequest charge, ChargeStatus status, String bankCode, String eventId,
+                                           CallTrace trace) {
+        trace.recordNotSent(bankCode);
+        log.info("은행 서킷 열림으로 충전 단계 보내지 않음 chargeId={} bankRequestId={} status={} bankCode={} eventId={}",
+                charge.getId(), charge.getBankRequestId(), status, bankCode, eventId);
+        return Optional.empty();
+    }
+
     private Optional<ChargeStatus> toManualReview(ChargeRequest charge, ChargeStatus from, String cause,
                                                   String eventId) {
         log.error("충전 외부 응답 이상으로 수동 확인 전환 chargeId={} bankRequestId={} eventId={} exception={}",
@@ -198,5 +219,45 @@ public class ChargeSagaExecutor {
         }
         log.error("충전 상태 전이 실패, 예상 밖 상태 chargeId={} bankRequestId={} eventId={}",
                 charge.getId(), charge.getBankRequestId(), eventId);
+    }
+
+    /**
+     * 외부 호출 결과 기록. 결과 모름은 기록(recordUnknown)이 RECORDED·EXHAUSTED·NOT_RECORDED 중 무엇이든 결과 모름으로 둔다.
+     * 복구 스케줄러가 보는 것은 외부 의존성의 상태라 DB 반영 여부와 무관하기 때문이다
+     */
+    private static final class CallTrace {
+        private final String bankCode;
+        private final Set<ChargeStatus> answeredAt = EnumSet.noneOf(ChargeStatus.class);
+        private ChargeStatus unknownAt;
+        private String notSentBankCode;
+
+        private CallTrace(String bankCode) {
+            this.bankCode = bankCode;
+        }
+
+        /** NotSent는 은행이 답한 것도 결과 모름도 아니라 여기서 기록하지 않는다 (recordNotSent) */
+        private void recordBank(ChargeStatus step, BankResult result) {
+            if (!(result instanceof BankResult.NotSent)) {
+                record(step, result instanceof BankResult.Unknown);
+            }
+        }
+
+        private void recordNotSent(String notSentBankCode) {
+            this.notSentBankCode = notSentBankCode;
+        }
+
+        private void record(ChargeStatus step, boolean unknown) {
+            if (unknown) {
+                unknownAt = step;
+            } else {
+                answeredAt.add(step);
+            }
+        }
+
+        private ChargeSagaOutcome toOutcome() {
+            return answeredAt.isEmpty() && unknownAt == null && notSentBankCode == null
+                    ? ChargeSagaOutcome.NONE
+                    : new ChargeSagaOutcome(answeredAt, unknownAt, bankCode, notSentBankCode);
+        }
     }
 }

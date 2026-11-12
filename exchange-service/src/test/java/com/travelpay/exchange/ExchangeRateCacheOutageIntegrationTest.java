@@ -44,7 +44,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * 캐시 Redis에 장애가 나도 환율 조회·견적 발급·수집이 DB로 계속 동작하는지 실제 Redis 컨테이너를 멈춰 확인합니다(기록 문서 5절 시나리오 6).
  * 두 가지 장애를 차례로 만듭니다. 컨테이너가 같아 순서가 중요하므로 테스트 순서를 고정합니다.
- * 1) 응답 없음(docker pause): 연결은 살아 있지만 Redis가 답하지 않음 → 명령 타임아웃(200ms)까지 기다린 뒤 DB
+ * 1) 응답 없음(docker pause): 연결은 살아 있지만 Redis가 답하지 않음 → 환율은 명령 타임아웃(200ms)까지 기다린 뒤 DB,
+ *    견적은 견적 전용 타임아웃(exchange.quote.redis-timeout, 1s)까지 기다린 뒤 503 (#261)
  * 2) 꺼짐(docker stop): 연결이 끊김 → 기다리지 않고 바로 DB
  * Docker가 없으면 건너뜁니다.
  */
@@ -108,7 +109,7 @@ class ExchangeRateCacheOutageIntegrationTest {
     @Test
     @Order(1)
     void readsFromCacheWhileRedisIsUp() {
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(Instant.parse("2026-11-06T02:00:00Z"));
         collectOnce();
@@ -121,7 +122,8 @@ class ExchangeRateCacheOutageIntegrationTest {
 
     /**
      * 응답 없음: 환율 조회는 명령 타임아웃(200ms)까지 기다린 뒤 DB 값으로 처리한다. 다시 답하면 캐시를 쓴다.
-     * 견적은 Redis에만 저장하므로(#223) DB로 대신하지 못하고, 타임아웃 뒤 503으로 빠르게 실패한다.
+     * 견적은 Redis에만 저장하므로(#223) DB로 대신하지 못하고, 타임아웃 뒤 503이다.
+     * 견적은 환율 캐시와 다른 연결·타임아웃(1s)을 쓰므로(#261), API가 200ms가 아니라 1초까지 기다린 뒤 503인지 시간으로 확인한다.
      */
     @Test
     @Order(2)
@@ -140,12 +142,15 @@ class ExchangeRateCacheOutageIntegrationTest {
             assertTrue(took.compareTo(Duration.ofSeconds(2)) < 0, "타임아웃 뒤 바로 DB로: " + took);
             assertEquals(errorsBefore + ALL.size(), lookups("error"));
 
-            // 견적 발급은 환율을 DB에서 읽어도 견적을 저장할 곳이 없어 503이다. 오래 매달리지 않는다
+            // 견적 발급은 환율을 DB에서 읽어도 견적을 저장할 곳이 없어 503이다.
+            // 견적 저장은 견적 전용 타임아웃(1s)까지 기다린다: 환율 캐시의 200ms에서 끊기지 않고, 그렇다고 오래 매달리지도 않는다
             long quoteStarted = System.nanoTime();
             issueQuote().andExpect(status().isServiceUnavailable())
                     .andExpect(jsonPath("$.error.code").value("EXCHANGE_QUOTE_STORE_UNAVAILABLE"));
             Duration quoteTook = Duration.ofNanos(System.nanoTime() - quoteStarted);
-            assertTrue(quoteTook.compareTo(Duration.ofSeconds(2)) < 0, "타임아웃 뒤 바로 실패: " + quoteTook);
+            System.out.println("[측정] Redis 응답 없음일 때 견적 발급 503까지: " + quoteTook.toMillis() + "ms");
+            assertTrue(quoteTook.compareTo(Duration.ofSeconds(1)) >= 0, "견적 전용 타임아웃(1s)까지 기다림: " + quoteTook);
+            assertTrue(quoteTook.compareTo(Duration.ofSeconds(3)) < 0, "타임아웃 뒤 바로 실패: " + quoteTook);
         } finally {
             REDIS.getDockerClient().unpauseContainerCmd(REDIS.getContainerId()).exec();
         }

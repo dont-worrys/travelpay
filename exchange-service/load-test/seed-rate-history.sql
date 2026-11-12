@@ -19,7 +19,16 @@ SET search_path TO exchange_service;
 BEGIN;
 
 -- 주문·견적이 환율을 참조하므로 함께 비웁니다. (측정 전용 DB에서만 실행)
-TRUNCATE exchange_order_status_histories, exchange_orders, exchange_quotes, exchange_rates;
+-- 예약(V7, #240)은 주문을 참조하므로 있으면 함께 비웁니다. 예약 전 커밋의 jar로 잴 때는 테이블이 없어 빼고 비웁니다 (#261)
+DO $$
+BEGIN
+    IF to_regclass('exchange_reservations') IS NOT NULL THEN
+        TRUNCATE exchange_reservations, exchange_order_status_histories, exchange_orders, exchange_quotes, exchange_rates;
+    ELSE
+        TRUNCATE exchange_order_status_histories, exchange_orders, exchange_quotes, exchange_rates;
+    END IF;
+END
+$$;
 
 -- 공식 환율: 오늘 포함 최근 30일. 기준값은 고정, 살 때·팔 때는 ±1%
 INSERT INTO exchange_rates (exchange_rate_id, target_currency, unit, mid_rate, buy_rate, sell_rate,

@@ -5,6 +5,10 @@ spring:
     url: ${USER_DB_URL}
     username: ${USER_DB_USERNAME}
     password: ${USER_DB_PASSWORD}
+    hikari:
+      # 트랜잭션 타임아웃은 커넥션을 얻은 뒤부터 적용되므로 획득 대기도 따로 제한
+      connection-timeout: 2000
+      validation-timeout: 1000
   flyway:
     # 테이블과 초기 약관은 db/migration의 Flyway 파일이 만듭니다.
     default-schema: user_service
@@ -74,6 +78,22 @@ server:
         http-only: true
         same-site: lax
         secure: false
+
+# API 문서(Swagger UI: /swagger-ui.html). 외부 API만 그룹으로 노출하며 prod에서는 끕니다.
+springdoc:
+  api-docs:
+    enabled: true
+  # 그룹 없는 전체 문서(/v3/api-docs)는 내부 API까지 담으므로 만들지 않습니다.
+  enable-default-api-docs: false
+  # 응답 형식을 */* 대신 실제 형식(JSON)으로 표시합니다.
+  default-produces-media-type: application/json
+  swagger-ui:
+    enabled: true
+    # 처음 열 때 보여 줄 그룹입니다. springdoc은 그룹을 표시 이름순으로 나열해 관리 그룹이 먼저 옵니다.
+    urls-primary-name: 회원·인증
+    # 묶음은 이름순, API는 경로순으로 보여 줍니다.
+    tags-sorter: alpha
+    operations-sorter: alpha
 
 eureka:
   instance:

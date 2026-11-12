@@ -57,10 +57,15 @@ public interface ChargeRequestRepository {
     OptionalInt increaseAttempt(UUID chargeId, ChargeStatus status, String lastError, Instant now);
 
     /**
-     * 처리 중 상태이고 재시도 대기 시간이 지난 충전을 updated_at 오름차순으로 limit건까지 읽는다.
-     * 대기 시간: 30초 × 2^min(max(attempt_count - 1, 0), 5). 시간은 DB now() 기준
+     * 상태가 statuses 중 하나(처리 중 상태만 넘긴다)이고 재시도 대기 시간이 지난 충전을 updated_at 오름차순으로 limit건까지 읽는다.
+     * 대기 시간: 30초 × 2^min(max(attempt_count - 1, 0), 5). 시간은 DB now() 기준.
+     * excludedBankCodes의 은행 코드인 충전은 뺀다 (비어 있으면 조건 없음)
      */
-    List<ChargeRecoveryTarget> findRecoveryTargets(int limit);
+    List<ChargeRecoveryTarget> findRecoveryTargets(Collection<ChargeStatus> statuses,
+                                                   Collection<String> excludedBankCodes, int limit);
+
+    /** 상태가 statuses 중 하나이고 created_at이 createdBefore보다 이른 충전 수 (멈춘 충전 지표) */
+    long countByStatusInAndCreatedBefore(Collection<ChargeStatus> statuses, Instant createdBefore);
 
     /**
      * 복구 선점: 상태와 updated_at이 조회한 값 그대로일 때만 updated_at을 DB now()로 갱신한다.

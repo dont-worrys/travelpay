@@ -3,9 +3,18 @@
 로컬 전체 스택(PC)에 k6 컨테이너만 붙여 payment-service를 직접 호출합니다(Gateway 제외). README.md를 먼저 봅니다.
 
 사용:
-  python measure.py <LABEL> <VUS> [--mode spread|hot] [--amount 1]                  # 송금 요청
+  python measure.py <LABEL> <VUS> [--mode spread|hot|sender-hot] [--amount 1]       # 송금 요청
+  python measure.py <LABEL> <VUS> --gateway                                        # Gateway(8080) 경유, 세션 로그인
+  python measure.py <LABEL> <VUS> --extra-service payment2=http://localhost:8086   # 추가 인스턴스 지표도 수집
   python measure.py <LABEL> <VUS> --script transfer-query.js [--query mixed]       # 송금 조회
+  python measure.py <LABEL> <VUS> --mode hot --lock-holders                        # 원장 잠금 보유 시간 분해
+  python measure.py <LABEL> <VUS> --duration 1800 --recon db                       # 대사를 DB 읽기 전용 SQL로(대량)
+  python measure.py <LABEL> <VUS> --recon both                                     # API·DB 대사를 둘 다 하고 결과 비교
 결과: results/<LABEL>-vus<VUS>.json(k6) + results/<LABEL>-vus<VUS>-metrics.json(서비스·DB 지표, 대사)
+
+대사 방식(--recon): api(기본)는 관리자 송금 목록·원장 기간 목록 API를 끝까지 읽습니다. 관리자 목록이 페이지 번호
+방식이라 수십만 건이면 1시간 가까이 걸리므로 소량 측정에 씁니다. db는 같은 구간·불변식을 Postgres 컨테이너에서
+읽기 전용 SQL 한 번으로 확인합니다. both는 둘 다 하고 metrics의 reconciliationDb.compare에 차이를 남깁니다.
 
 측정 구간은 k6가 실제로 테스트를 시작한 시각(끝난 시각 - testRunDurationMs) + 예열부터 측정 시간만큼입니다.
 서비스 지표는 그 구간 양끝에 가장 가까운 표본의 차이로 계산합니다(서버 쪽 평균 처리 시간 = 합계 차이 / 횟수 차이).
@@ -19,11 +28,12 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from lt_common import (HERE, LEDGER_URL, PAYMENT_URL, RESULTS, SERVICES, krw_balance, load_data, member_headers,
-                       request, scrape, summarize_scrape)
+from lt_common import (GATEWAY_METRICS_URL, HERE, LEDGER_URL, PAYMENT_URL, RESULTS, SERVICES, krw_balance, load_data,
+                       member_headers, request, scrape, summarize_scrape)
 
-# 서비스별로 볼 HTTP 경로 (송금 요청 한 건이 지나는 곳)
+# 서비스별로 볼 HTTP 경로 (송금 요청 한 건이 지나는 곳). 추가 인스턴스(payment2 등)는 이름 끝 숫자를 뗀 역할로 찾는다
 WATCHED = {
+    "gateway": ["POST /api/v1/transfers", "POST UNKNOWN"],
     "payment": ["POST /api/v1/transfers", "GET /api/v1/transfers", "GET /api/v1/transfers/{transferId}"],
     "wallet": ["GET /internal/v1/wallets"],
     "user": ["GET /internal/v1/users/{userId}/real-name"],
@@ -32,15 +42,22 @@ WATCHED = {
 PG_CONTAINER = os.environ.get("PG_CONTAINER", "travelpay-local-postgres-1")
 PG_USER = os.environ.get("POSTGRES_USER", "travelpay_admin")
 PG_DB = os.environ.get("POSTGRES_DB", "travelpay")
-# 원장·송금 DB 사용자의 잠금 대기·실행 중 세션, DB 교착 누적 수
+# 원장·송금 DB 사용자의 잠금 대기·실행 중 세션, DB 교착 누적 수,
+# 잠금을 기다리는 원장 세션의 현재 쿼리 경과 시간 합계·최대(ms). 잠금 대기는 FOR UPDATE 쿼리 시작부터이므로
+# query_start 기준 경과 시간을 "지금까지 기다린 시간"으로 본다(표본 시점의 진행 중 대기라 실제 대기 시간보다 짧게 잡힘)
 PG_QUERY = (
-    "SELECT extract(epoch FROM now())::bigint,"
+    "SELECT (extract(epoch FROM now()) * 1000)::bigint,"
     " count(*) FILTER (WHERE usename = 'ledger_app' AND wait_event_type = 'Lock'),"
     " count(*) FILTER (WHERE usename = 'ledger_app' AND state = 'active'),"
     " count(*) FILTER (WHERE usename = 'payment_app' AND state = 'active'),"
-    " (SELECT deadlocks FROM pg_stat_database WHERE datname = current_database())"
+    " (SELECT deadlocks FROM pg_stat_database WHERE datname = current_database()),"
+    " coalesce(sum(extract(epoch FROM now() - query_start) * 1000)"
+    "   FILTER (WHERE usename = 'ledger_app' AND wait_event_type = 'Lock'), 0)::bigint,"
+    " coalesce(max(extract(epoch FROM now() - query_start) * 1000)"
+    "   FILTER (WHERE usename = 'ledger_app' AND wait_event_type = 'Lock'), 0)::bigint"
     " FROM pg_stat_activity WHERE pid <> pg_backend_pid()"
 )
+DB_SAMPLE_SECONDS = 0.5
 MASTER = member_headers("00000000-0000-4000-8000-00000000a0a0", "MASTER")   # 관리자 조회용(측정 전용 ID)
 
 
@@ -50,8 +67,8 @@ def iso(moment):
 
 # ---- 사전 확인 ----
 
-def precheck(script):
-    for name, url in SERVICES.items():
+def precheck(script, services):
+    for name, url in services.items():
         health = request("GET", f"{url}/actuator/health", timeout=5)
         if health.status != 200:
             raise SystemExit(f"{name}({url})이 응답하지 않습니다: {health}")
@@ -72,10 +89,11 @@ def admin_count(**params):
 # ---- 표본 수집 ----
 
 class ServiceSampler(threading.Thread):
-    """1초마다 네 서비스의 /actuator/prometheus를 읽어 (시각, 서비스별 요약)을 쌓습니다."""
+    """1초마다 서비스의 /actuator/prometheus를 읽어 (시각, 서비스별 요약)을 쌓습니다."""
 
-    def __init__(self):
+    def __init__(self, services):
         super().__init__(daemon=True)
+        self.services = services
         self.samples = []
         self.stop = threading.Event()
 
@@ -83,7 +101,7 @@ class ServiceSampler(threading.Thread):
         while not self.stop.is_set():
             started = time.time()
             snapshot = {}
-            for name, url in SERVICES.items():
+            for name, url in self.services.items():
                 samples = scrape(url)
                 snapshot[name] = summarize_scrape(samples) if samples is not None else None
             self.samples.append((started, snapshot))
@@ -91,7 +109,7 @@ class ServiceSampler(threading.Thread):
 
 
 class DbSampler(threading.Thread):
-    """Postgres 컨테이너 안 psql \\watch로 1초마다 잠금 대기·세션·교착 수를 읽습니다. 실패하면 표본 없이 끝납니다."""
+    """Postgres 컨테이너 안 psql \\watch로 0.5초마다 잠금 대기·세션·교착 수를 읽습니다. 실패하면 표본 없이 끝납니다."""
 
     def __init__(self, seconds):
         super().__init__(daemon=True)
@@ -101,7 +119,7 @@ class DbSampler(threading.Thread):
 
     def run(self):
         command = ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB, "-qAt", "-F", "\t"]
-        script = f"{PG_QUERY}\n\\watch i=1 c={self.seconds}\n"
+        script = f"{PG_QUERY}\n\\watch i={DB_SAMPLE_SECONDS} c={int(self.seconds / DB_SAMPLE_SECONDS)}\n"
         try:
             done = subprocess.run(command, input=script, capture_output=True, text=True, timeout=self.seconds + 30)
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -111,8 +129,107 @@ class DbSampler(threading.Thread):
             self.error = done.stderr.strip()[:300]
         for line in done.stdout.splitlines():
             parts = line.split("\t")
-            if len(parts) == 5 and parts[0].isdigit():
-                self.samples.append(tuple(int(part) for part in parts))
+            if len(parts) == 7 and parts[0].isdigit():
+                values = [int(part) for part in parts]
+                values[0] = values[0] / 1000   # 시각은 초 단위로
+                self.samples.append(tuple(values))
+
+
+# 원장 잠금을 쥐고 다른 원장 세션을 막고 있는 세션(holder)이 그 순간 무엇을 하는지.
+# 한 줄 = 표본 하나: 시각(ms), 잠금 대기 세션 수, holder 목록(상태#대기 이벤트#쿼리 앞부분을 |로 이음).
+# idle in transaction이면 DB는 할 일이 없고 앱이 다음 SQL을 보내길 기다리는 중(앱 처리 + 왕복 네트워크)
+LOCK_HOLDER_QUERY = (
+    "SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint,"
+    " (SELECT count(*) FROM pg_stat_activity w WHERE w.usename = 'ledger_app' AND w.wait_event_type = 'Lock'),"
+    " coalesce((SELECT string_agg(h.state || '#' || coalesce(h.wait_event_type || ':' || h.wait_event, '') || '#'"
+    "   || left(regexp_replace(h.query, '[\\s|#]+', ' ', 'g'), 80), '|')"
+    "   FROM pg_stat_activity h WHERE h.pid IN (SELECT unnest(pg_blocking_pids(w.pid)) FROM pg_stat_activity w"
+    "   WHERE w.usename = 'ledger_app' AND w.wait_event_type = 'Lock')"
+    # 행 잠금 대기열에서는 앞선 대기 세션도 blocking pid로 나온다. 스스로 잠금을 기다리는 세션은 빼고 실제 보유자만 본다
+    "   AND h.wait_event_type IS DISTINCT FROM 'Lock'), '')"
+)
+
+
+class LockHolderSampler(threading.Thread):
+    """--lock-holders: 짧은 간격으로 원장 잠금 holder의 상태를 표본으로 모읍니다(잠금 보유 시간 분해용).
+    표본 쿼리도 DB·CPU를 쓰므로 기본 측정에서는 끕니다."""
+
+    def __init__(self, seconds, interval):
+        super().__init__(daemon=True)
+        self.seconds = seconds
+        self.interval = interval
+        self.samples = []
+        self.error = None
+
+    def run(self):
+        command = ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB, "-qAt", "-F", "\t"]
+        script = f"{LOCK_HOLDER_QUERY}\n\\watch i={self.interval} c={int(self.seconds / self.interval)}\n"
+        try:
+            done = subprocess.run(command, input=script, capture_output=True, text=True, encoding="utf-8",
+                                  timeout=self.seconds + 60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.error = str(error)
+            return
+        if done.returncode != 0:
+            self.error = done.stderr.strip()[:300]
+        for line in done.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3 and parts[0].isdigit():
+                holders = [holder.split("#", 2) for holder in parts[2].split("|") if holder]
+                self.samples.append((int(parts[0]) / 1000, int(parts[1]), holders))
+
+
+def holder_activity(holder):
+    """holder 한 개를 '무엇을 하는 중인지' 한 단어로 묶습니다."""
+    state, wait, query = (holder + ["", ""])[:3]
+    text = query.strip().lower()
+    if text.startswith("commit"):
+        statement = "COMMIT"
+    elif text.startswith("select") and ("for update" in text or "for no key update" in text):
+        statement = "SELECT FOR UPDATE"
+    else:
+        words = text.split()
+        if len(words) >= 3 and words[0] in ("insert", "delete") and words[1] in ("into", "from"):
+            statement = f"{words[0].upper()} {words[2]}"
+        elif len(words) >= 2 and words[0] == "update":
+            statement = f"UPDATE {words[1]}"
+        else:
+            statement = words[0].upper() if words else "?"
+    if state == "idle in transaction":
+        return f"앱·네트워크 대기 (직전 {statement})"
+    if state == "active":
+        return f"DB 실행 {statement}" + (f" [{wait}]" if wait else "")
+    return f"{state or '?'} {statement}"
+
+
+def lock_holder_metrics(sampler, start, end, per_tx_hold_ms):
+    if sampler is None:
+        return None
+    if sampler.error and not sampler.samples:
+        return {"error": sampler.error}
+    window = [sample for sample in sampler.samples if start <= sample[0] <= end]
+    contended = [sample for sample in window if sample[1] > 0]
+    counts = {}
+    for _, _, holders in contended:
+        for holder in holders:
+            activity = holder_activity(holder)
+            counts[activity] = counts.get(activity, 0) + 1
+    total = sum(counts.values())
+    breakdown = []
+    for activity, count in sorted(counts.items(), key=lambda item: -item[1]):
+        share = count / total
+        row = {"activity": activity, "samples": count, "sharePercent": round(share * 100, 1)}
+        if per_tx_hold_ms is not None:
+            # 집중 계정은 잠금이 쉬지 않고 넘어가므로 건당 보유 시간 ≈ 측정 시간 / 거래 수. 그 시간을 표본 비율로 나눈다
+            row["perTxMsEstimate"] = round(share * per_tx_hold_ms, 2)
+        breakdown.append(row)
+    return {
+        "intervalSeconds": sampler.interval,
+        "samples": len(window),
+        "samplesWithWaiters": len(contended),
+        "perTxHoldMsEstimate": per_tx_hold_ms,
+        "breakdown": breakdown,
+    }
 
 
 # ---- 지표 계산 ----
@@ -121,13 +238,36 @@ def nearest(samples, moment):
     return min(samples, key=lambda sample: abs(sample[0] - moment))
 
 
+PERCENTILES = (("p50Ms", 0.50), ("p95Ms", 0.95), ("p99Ms", 0.99), ("p999Ms", 0.999), ("maxBucketMs", 1.0))
+
+
+def bucket_percentiles(before, after):
+    """측정 구간 양끝의 누적 bucket 차이로 백분위를 냅니다. 값은 그 백분위가 들어간 bucket의 상한(ms)이라
+    실제 값 이상으로 잡힙니다(보수적). bucket이 없으면 빈 dict."""
+    bounds = sorted(after)
+    if not bounds:
+        return {}
+    counts = [after[le] - before.get(le, 0.0) for le in bounds]
+    total = counts[-1]
+    if total <= 0:
+        return {}
+    result = {}
+    for label, quantile in PERCENTILES:
+        target = total * quantile
+        upper = next(le for le, count in zip(bounds, counts) if count >= target)
+        result[label] = None if upper == float("inf") else round(upper * 1000, 1)
+    return result
+
+
 def service_metrics(samples, start, end):
     window = [sample for sample in samples if start <= sample[0] <= end]
     result = {"samples": len(window)}
     if not window:
         return result
     first, last = nearest(samples, start), nearest(samples, end)
-    for name, paths in WATCHED.items():
+    names = sorted({name for _, snapshot in window for name in snapshot})
+    for name in names:
+        paths = WATCHED.get(name.rstrip("0123456789"), [])
         before, after = first[1].get(name), last[1].get(name)
         service = {}
         if before and after:
@@ -136,7 +276,10 @@ def service_metrics(samples, start, end):
                 a = after["http"].get(path, {"count": 0, "sum": 0})
                 calls = a["count"] - b["count"]
                 if calls > 0:
-                    service[path] = {"calls": int(calls), "avgMs": round((a["sum"] - b["sum"]) / calls * 1000, 2)}
+                    # _max 게이지는 최근 약 2분의 최대라 앞 측정 값이 섞이므로 쓰지 않고, 구간 bucket으로 최대를 낸다.
+                    # 서버 쪽 처리 시간이다. 호출하는 쪽이 본 시간은 여기에 네트워크·HTTP 클라이언트 시간이 더해진다
+                    service[path] = {"calls": int(calls), "avgMs": round((a["sum"] - b["sum"]) / calls * 1000, 2),
+                                     **bucket_percentiles(b.get("buckets", {}), a.get("buckets", {}))}
         gauges = [snapshot[1][name] for snapshot in window if snapshot[1].get(name)]
         for gauge, label in (("hikaricp_connections_pending", "hikariPending"),
                              ("hikaricp_connections_active", "hikariActive"),
@@ -144,6 +287,35 @@ def service_metrics(samples, start, end):
             values = [g[gauge] for g in gauges if gauge in g]
             if values:
                 service[label] = {"avg": round(sum(values) / len(values), 2), "max": max(values)}
+        if before and after:
+            for prefix, label in (("hikaricp_connections_acquire_seconds", "hikariAcquireAvgMs"),
+                                  ("hikaricp_connections_usage_seconds", "hikariUsageAvgMs")):
+                calls = after.get(f"{prefix}_count", 0) - before.get(f"{prefix}_count", 0)
+                if calls > 0:
+                    service[label] = round((after.get(f"{prefix}_sum", 0) - before.get(f"{prefix}_sum", 0))
+                                           / calls * 1000, 3)
+            timeouts = after.get("hikaricp_connections_timeout_total", 0) - before.get("hikaricp_connections_timeout_total", 0)
+            service["hikariTimeouts"] = int(timeouts)
+            gc_count = after.get("jvm_gc_pause_seconds_count", 0) - before.get("jvm_gc_pause_seconds_count", 0)
+            gc_sum = after.get("jvm_gc_pause_seconds_sum", 0) - before.get("jvm_gc_pause_seconds_sum", 0)
+            service["gcPauses"] = {"count": int(gc_count), "totalMs": round(gc_sum * 1000, 1)}
+        acquire_max = [g["hikaricp_connections_acquire_seconds_max"] for g in gauges
+                       if "hikaricp_connections_acquire_seconds_max" in g]
+        if acquire_max:
+            service["hikariAcquireMaxMs"] = round(max(acquire_max) * 1000, 1)
+        gc_max = [g["jvm_gc_pause_seconds_max"] for g in gauges if "jvm_gc_pause_seconds_max" in g]
+        if gc_max:
+            service["gcPauseMaxMs"] = round(max(gc_max) * 1000, 1)
+        heap = [g["jvm_heap_used_bytes"] for g in gauges if "jvm_heap_used_bytes" in g]
+        if heap:
+            third = max(1, len(heap) // 3)
+            service["heapMb"] = {"avg": round(sum(heap) / len(heap) / 2**20, 1), "max": round(max(heap) / 2**20, 1),
+                                 # 측정 구간 처음 1/3과 마지막 1/3의 평균. 꾸준히 오르면 누수 후보
+                                 "firstThirdAvg": round(sum(heap[:third]) / third / 2**20, 1),
+                                 "lastThirdAvg": round(sum(heap[-third:]) / third / 2**20, 1)}
+        heap_max = [g["jvm_heap_max_bytes"] for g in gauges if "jvm_heap_max_bytes" in g]
+        if heap_max:
+            service["heapMaxMb"] = round(heap_max[0] / 2**20, 1)
         cpu = [g["process_cpu_usage"] for g in gauges if "process_cpu_usage" in g]
         if cpu:
             service["processCpuPercentAvg"] = round(sum(cpu) / len(cpu) * 100, 1)
@@ -175,6 +347,12 @@ def db_metrics(sampler, start, end):
         "ledgerActiveSessions": stat(2),
         "paymentActiveSessions": stat(3),
         "deadlocksDuringMeasure": window[-1][4] - window[0][4],
+        # 표본 시점에 잠금을 기다리던 원장 세션들의 "지금까지 기다린 시간"(ms)
+        "ledgerLockWaitAgeMs": {
+            "avgPerWaiter": round(sum(sample[5] for sample in window)
+                                  / max(1, sum(sample[1] for sample in window)), 1),
+            "max": max(sample[6] for sample in window),
+        },
     }
 
 
@@ -222,22 +400,62 @@ def fetch_ledger(created_from, created_to):
             return list(items.values())
 
 
-def reconcile(data, balances_before, created_from, created_to, recovery_timeout):
-    """측정 구간 송금과 원장 거래를 맞춰 보고 불변식 위반을 모읍니다."""
+def reconcile(data, balances_before, created_from, created_to, recovery_timeout, method):
+    """PROCESSING 복구를 기다린 뒤 method(api|db|both)로 대사합니다. both면 두 결과와 비교를 함께 돌려줍니다."""
     recovery_seconds = wait_processing(created_from, created_to, recovery_timeout)
     time.sleep(5)   # 원장 거래 기록 트랜잭션 제한(3초)보다 넉넉히 지난 닫힌 구간을 읽는다
-    transfers = fetch_transfers(created_from, created_to)
+    ledger_from = created_from.replace(microsecond=0) - timedelta(seconds=1)
     ledger_to = datetime.now(timezone.utc).replace(microsecond=0)
-    ledger = fetch_ledger(created_from.replace(microsecond=0) - timedelta(seconds=1), ledger_to)
+    participants = {pair["senderId"] for pair in data["pairs"]} | {pair["receiverId"] for pair in data["pairs"]}
+    participants.add(data["hotReceiverId"])
+    balances_after = {user: krw_balance(user) for user in participants}
+
+    results = {}
+    for name, run in (("db", reconcile_db), ("api", reconcile_api)):
+        if method not in (name, "both"):
+            continue
+        started = time.monotonic()
+        result = run(created_from, created_to, ledger_from, ledger_to)
+        result["violations"] += balance_violations(balances_before, balances_after, result.pop("net"))
+        result.update({"method": name, "elapsedSeconds": round(time.monotonic() - started, 1),
+                       "recoverySeconds": recovery_seconds,
+                       "balanceTotal": {"before": sum(balances_before.values()),
+                                        "after": sum(balances_after.values())}})
+        results[name] = result
+    if method != "both":
+        return results[method], None
+    keys = ("transfers", "statuses", "ledgerTransactions", "balanceTotal")
+    diff = {key: {"api": results["api"][key], "db": results["db"][key]}
+            for key in keys if results["api"][key] != results["db"][key]}
+    if bool(results["api"]["violations"]) != bool(results["db"]["violations"]):
+        diff["hasViolations"] = {"api": bool(results["api"]["violations"]), "db": bool(results["db"]["violations"])}
+    return results["api"], {"db": results["db"], "compare": {"match": not diff, "compared": list(keys) + ["hasViolations"],
+                                                             "diff": diff}}
+
+
+def balance_violations(balances_before, balances_after, net):
+    """참여자 KRW 잔액(지갑 API)이 음수가 아닌지, 측정 전 잔액 + COMPLETED 송금 순변동과 같은지 봅니다."""
+    violations = []
+    for user, after in balances_after.items():
+        expected = balances_before[user] + net.get(user, 0)
+        if after < 0:
+            violations.append(f"음수 잔액 {user}: {after}")
+        if after != expected:
+            violations.append(f"잔액 불일치 {user}: 기대 {expected} 실제 {after}")
+    if sum(balances_after.values()) != sum(balances_before.values()):
+        violations.append(f"잔액 합계 변화 {sum(balances_before.values())} → {sum(balances_after.values())}")
+    return violations
+
+
+def reconcile_api(created_from, created_to, ledger_from, ledger_to):
+    """API 대사: 관리자 송금 목록(페이지 번호)과 원장 기간 목록(커서)을 모두 읽어 맞춥니다. 수만 건까지 권장."""
+    transfers = fetch_transfers(created_from, created_to)
+    ledger = fetch_ledger(ledger_from, ledger_to)
     by_reference = {}
     for item in ledger:
         by_reference.setdefault(item["referenceId"], []).append(item)
 
-    violations, statuses = [], {}
-    completed_ids = set()
-    participants = {pair["senderId"] for pair in data["pairs"]} | {pair["receiverId"] for pair in data["pairs"]}
-    participants.add(data["hotReceiverId"])
-    expected_balance = dict(balances_before)
+    violations, statuses, net = [], {}, {}
     for transfer in transfers:
         transfer_id, status = transfer["transferId"], transfer["status"]
         statuses[status] = statuses.get(status, 0) + 1
@@ -246,14 +464,13 @@ def reconcile(data, balances_before, created_from, created_to, recovery_timeout)
         if len(records) > 1:
             violations.append(f"원장 거래가 2건 이상 {transfer_id}")
         if status == "COMPLETED":
-            completed_ids.add(transfer_id)
             if len(posted) != 1:
                 violations.append(f"COMPLETED인데 원장 POSTED가 {len(posted)}건 {transfer_id}")
             elif not entries_match(posted[0], transfer):
                 violations.append(f"원장 항목이 송금과 다름 {transfer_id}")
             amount = transfer["amount"]
-            expected_balance[transfer["senderId"]] = expected_balance.get(transfer["senderId"], 0) - amount
-            expected_balance[transfer["receiverId"]] = expected_balance.get(transfer["receiverId"], 0) + amount
+            net[transfer["senderId"]] = net.get(transfer["senderId"], 0) - amount
+            net[transfer["receiverId"]] = net.get(transfer["receiverId"], 0) + amount
         elif status == "FAILED" and posted:
             violations.append(f"FAILED인데 원장 POSTED {transfer_id}")
         elif status == "PROCESSING":
@@ -263,24 +480,109 @@ def reconcile(data, balances_before, created_from, created_to, recovery_timeout)
                if item["status"] == "POSTED" and item["referenceId"] not in transfer_ids]
     if orphans:
         violations.append(f"송금 없이 원장만 POSTED {len(orphans)}건 (예: {orphans[:3]})")
+    return {"transfers": len(transfers), "statuses": statuses, "ledgerTransactions": len(ledger),
+            "violations": violations, "net": net}
 
-    balances_after = {user: krw_balance(user) for user in participants}
-    for user in participants:
-        if balances_after[user] < 0:
-            violations.append(f"음수 잔액 {user}: {balances_after[user]}")
-        if balances_after[user] != expected_balance.get(user, balances_before[user]):
-            violations.append(f"잔액 불일치 {user}: 기대 {expected_balance.get(user)} 실제 {balances_after[user]}")
-    if sum(balances_after.values()) != sum(balances_before.values()):
-        violations.append(f"잔액 합계 변화 {sum(balances_before.values())} → {sum(balances_after.values())}")
 
-    return {
-        "transfers": len(transfers),
-        "statuses": statuses,
-        "ledgerTransactions": len(ledger),
-        "recoverySeconds": recovery_seconds,
-        "balanceTotal": {"before": sum(balances_before.values()), "after": sum(balances_after.values())},
-        "violations": violations,
-    }
+# DB 대사: API 대사와 같은 구간·같은 불변식을 읽기 전용 트랜잭션의 SELECT 한 번으로 확인합니다(쓰기 없음).
+# 송금 구간은 관리자 목록과 같은 created_at [from, to), 원장 구간은 원장 기간 목록과 같은 created_at [from, to).
+# API 대사에 없는 원장 쪽 점검(같은 키 중복, 차변≠대변, 지갑별 순변동, 사용자 계정 음수)도 함께 봅니다.
+# CTE 행 수 추정이 1로 잡혀 CTE끼리 중첩 루프로 조인되면 수만 건에서도 수십 초가 걸려(2026-11-12 확인: 2,589건 41초 →
+# 끈 뒤 4초), 이 트랜잭션에서만 중첩 루프를 끕니다(SET LOCAL, 세션 설정이라 데이터 쓰기 아님).
+RECON_SQL = """
+BEGIN TRANSACTION READ ONLY;
+SET LOCAL enable_nestloop = off;
+WITH t AS (
+  SELECT * FROM payment_service.transfer WHERE created_at >= '{transfer_from}' AND created_at < '{transfer_to}'),
+l AS (
+  SELECT * FROM ledger_service.ledger_transactions
+  WHERE reference_type = 'TRANSFER' AND created_at >= '{ledger_from}' AND created_at < '{ledger_to}'),
+tl AS (
+  SELECT t.id, t.status, count(l.id) AS records, count(l.id) FILTER (WHERE l.status = 'POSTED') AS posted
+  FROM t LEFT JOIN l ON l.reference_id = t.id GROUP BY t.id, t.status),
+le AS MATERIALIZED (
+  SELECT l.id AS transaction_id, l.reference_id, l.status, en.direction, en.entry_type, en.amount, en.currency,
+         a.owner_type, a.wallet_id
+  FROM l JOIN ledger_service.ledger_entries en ON en.transaction_id = l.id
+  JOIN ledger_service.ledger_accounts a ON a.id = en.account_id),
+e AS (
+  SELECT t.id, count(*) AS cnt,
+    bool_or(le.owner_type = 'USER' AND le.wallet_id = t.source_wallet_id AND le.direction = 'DEBIT'
+            AND le.entry_type = 'TRANSFER_OUT' AND le.amount = t.amount AND le.currency = t.currency) AS has_debit,
+    bool_or(le.owner_type = 'USER' AND le.wallet_id = t.target_wallet_id AND le.direction = 'CREDIT'
+            AND le.entry_type = 'TRANSFER_IN' AND le.amount = t.amount AND le.currency = t.currency) AS has_credit
+  FROM t JOIN le ON le.reference_id = t.id AND le.status = 'POSTED'
+  WHERE t.status = 'COMPLETED' GROUP BY t.id),
+completed AS (SELECT * FROM t WHERE status = 'COMPLETED'),
+net AS (
+  SELECT user_id, sum(delta) AS delta FROM (
+    SELECT sender_id AS user_id, -amount AS delta FROM completed
+    UNION ALL SELECT receiver_id, amount FROM completed) x GROUP BY user_id),
+wallet_net AS (
+  SELECT coalesce(p.wallet_id, q.wallet_id) AS wallet_id, p.delta AS transfer_delta, q.delta AS ledger_delta FROM
+    (SELECT wallet_id, sum(delta) AS delta FROM (
+       SELECT source_wallet_id AS wallet_id, -amount AS delta FROM completed
+       UNION ALL SELECT target_wallet_id, amount FROM completed) x GROUP BY wallet_id) p
+  FULL JOIN
+    (SELECT le.wallet_id, sum(CASE le.direction WHEN 'CREDIT' THEN le.amount ELSE -le.amount END) AS delta
+     FROM le JOIN t ON t.id = le.reference_id
+     WHERE le.status = 'POSTED' AND le.owner_type = 'USER' GROUP BY le.wallet_id) q
+  ON p.wallet_id = q.wallet_id),
+checks AS (
+  SELECT 'multipleLedger' AS name, id FROM tl WHERE records > 1
+  UNION ALL SELECT 'completedNotPosted', id FROM tl WHERE status = 'COMPLETED' AND posted <> 1
+  UNION ALL SELECT 'entryMismatch', tl.id FROM tl LEFT JOIN e ON e.id = tl.id
+            WHERE tl.status = 'COMPLETED' AND tl.posted = 1 AND (e.id IS NULL OR e.cnt <> 2 OR NOT e.has_debit OR NOT e.has_credit)
+  UNION ALL SELECT 'failedPosted', id FROM tl WHERE status = 'FAILED' AND posted > 0
+  UNION ALL SELECT 'processingLeft', id FROM tl WHERE status = 'PROCESSING'
+  UNION ALL SELECT 'orphanLedger', reference_id FROM l
+            WHERE status = 'POSTED' AND NOT EXISTS (SELECT 1 FROM t WHERE t.id = l.reference_id)
+  UNION ALL SELECT 'duplicateKey', min(id::text)::uuid FROM t GROUP BY sender_id, idempotency_key HAVING count(*) > 1
+  UNION ALL SELECT 'unbalancedLedger', reference_id FROM le GROUP BY transaction_id, reference_id
+            HAVING sum(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END) <> 0
+  UNION ALL SELECT 'walletNetMismatch', wallet_id FROM wallet_net WHERE transfer_delta IS DISTINCT FROM ledger_delta
+  UNION ALL SELECT 'negativeUserAccount', id FROM ledger_service.ledger_accounts WHERE owner_type = 'USER' AND balance < 0)
+SELECT json_build_object(
+  'transfers', (SELECT count(*) FROM t),
+  'statuses', (SELECT coalesce(json_object_agg(status, n), '{{}}') FROM (SELECT status, count(*) AS n FROM t GROUP BY status) s),
+  'ledgerTransactions', (SELECT count(*) FROM l),
+  'net', (SELECT coalesce(json_object_agg(user_id, delta), '{{}}') FROM net),
+  'checks', (SELECT coalesce(json_object_agg(name, json_build_object('count', n, 'examples', examples)), '{{}}')
+             FROM (SELECT name, count(*) AS n, (array_agg(id))[1:3] AS examples FROM checks GROUP BY name) c));
+ROLLBACK;
+"""
+DB_CHECK_LABELS = {
+    "multipleLedger": "원장 거래가 2건 이상",
+    "completedNotPosted": "COMPLETED인데 원장 POSTED가 1건이 아님",
+    "entryMismatch": "원장 항목이 송금과 다름",
+    "failedPosted": "FAILED인데 원장 POSTED",
+    "processingLeft": "복구 후에도 PROCESSING",
+    "orphanLedger": "송금 없이 원장만 POSTED",
+    "duplicateKey": "같은 송금인·Idempotency-Key 중복",
+    "unbalancedLedger": "원장 거래 차변≠대변",
+    "walletNetMismatch": "지갑별 순변동(송금 COMPLETED ↔ 원장 항목) 불일치",
+    "negativeUserAccount": "원장 사용자 계정 음수 잔액",
+}
+
+
+def reconcile_db(created_from, created_to, ledger_from, ledger_to):
+    """DB 대사: Postgres 컨테이너 psql로 RECON_SQL을 실행합니다(읽기 전용). 수십만 건 규모 측정용."""
+    sql = RECON_SQL.format(transfer_from=iso(created_from), transfer_to=iso(created_to),
+                           ledger_from=iso(ledger_from), ledger_to=iso(ledger_to))
+    command = ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB,
+               "-qAt", "-v", "ON_ERROR_STOP=1"]
+    try:
+        done = subprocess.run(command, input=sql, capture_output=True, text=True, encoding="utf-8", timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(f"DB 대사 실패: {error}")
+    lines = [line for line in done.stdout.splitlines() if line.strip()]
+    if done.returncode != 0 or not lines:
+        raise SystemExit(f"DB 대사 실패(종료 코드 {done.returncode}): {done.stderr.strip()[:500]}")
+    row = json.loads(lines[-1])
+    violations = [f"{DB_CHECK_LABELS.get(name, name)} {check['count']}건 (예: {check['examples']})"
+                  for name, check in sorted(row["checks"].items())]
+    return {"transfers": row["transfers"], "statuses": row["statuses"],
+            "ledgerTransactions": row["ledgerTransactions"], "violations": violations, "net": row["net"]}
 
 
 def entries_match(record, transfer):
@@ -299,13 +601,24 @@ def main():
     parser.add_argument("label")
     parser.add_argument("vus", type=int)
     parser.add_argument("--script", default="transfer-request.js", choices=["transfer-request.js", "transfer-query.js"])
-    parser.add_argument("--mode", default="spread", choices=["spread", "hot"])
+    parser.add_argument("--mode", default="spread", choices=["spread", "hot", "sender-hot", "bidirectional", "mixed"])
+    parser.add_argument("--hot-vus", type=int, default=None,
+                        help="mixed에서 집중 수취인에게 보내는 가상 사용자 수 (기본 VUS/2, 0이면 spread 그룹만)")
     parser.add_argument("--amount", type=int, default=1)
     parser.add_argument("--query", default="mixed", choices=["list", "detail", "mixed"])
     parser.add_argument("--warmup", type=int, default=15)
     parser.add_argument("--duration", type=int, default=60)
+    parser.add_argument("--gateway", action="store_true",
+                        help="Gateway(8080)를 거쳐 세션 로그인·CSRF로 호출 (data/users.json에 senderEmail 필요)")
+    parser.add_argument("--extra-service", action="append", default=[], metavar="NAME=URL",
+                        help="지표를 함께 읽을 추가 인스턴스 (예: payment2=http://localhost:8086)")
     parser.add_argument("--recovery-timeout", type=int, default=600,
                         help="측정 후 PROCESSING 복구를 기다릴 최대 초 (결과 모름 5회 백오프 합계 약 7분 30초)")
+    parser.add_argument("--lock-holders", action="store_true",
+                        help="원장 잠금 holder 상태를 짧은 간격으로 표본 수집 (잠금 보유 시간 분해, --mode hot과 함께)")
+    parser.add_argument("--lock-holder-interval", type=float, default=0.05, help="holder 표본 간격(초)")
+    parser.add_argument("--recon", default="api", choices=["api", "db", "both"],
+                        help="대사 방식: api(기본, 소량), db(읽기 전용 SQL, 대량), both(둘 다 하고 비교)")
     args = parser.parse_args()
     is_request = args.script == "transfer-request.js"
 
@@ -316,20 +629,34 @@ def main():
     for stale in (k6_result, metrics_result):
         stale.unlink(missing_ok=True)   # 앞 실행 결과를 이번 결과로 오인하지 않게
 
+    services = dict(SERVICES)
+    if args.gateway:
+        services["gateway"] = GATEWAY_METRICS_URL
+    for item in args.extra_service:
+        name, url = item.split("=", 1)
+        services[name] = url
+
     print("[1/4] 사전 확인 (서비스 health, 남은 PROCESSING)")
-    precheck(args.script)
+    precheck(args.script, services)
     participants = {pair["senderId"] for pair in data["pairs"]} | {pair["receiverId"] for pair in data["pairs"]}
     participants.add(data["hotReceiverId"])
     balances_before = {user: krw_balance(user) for user in participants} if is_request else {}
 
     print(f"[2/4] k6 실행 ({args.script}, VUS={args.vus}), 서비스·DB 지표 1초 간격 기록")
-    service_sampler = ServiceSampler()
+    service_sampler = ServiceSampler(services)
     db_sampler = DbSampler(args.warmup + args.duration + 60)
+    holder_sampler = (LockHolderSampler(args.warmup + args.duration + 60, args.lock_holder_interval)
+                      if args.lock_holders else None)
     service_sampler.start()
     db_sampler.start()
+    if holder_sampler:
+        holder_sampler.start()
     run_started = datetime.now(timezone.utc)
     env = {"VUS": str(args.vus), "LABEL": args.label, "WARMUP": f"{args.warmup}s", "DURATION": f"{args.duration}s",
-           "MODE": args.mode, "AMOUNT": str(args.amount), "QUERY": args.query}
+           "MODE": args.mode, "AMOUNT": str(args.amount), "QUERY": args.query,
+           "GATEWAY": "1" if args.gateway else "0", "HOT_VUS": "" if args.hot_vus is None else str(args.hot_vus)}
+    if args.gateway:
+        env["BASE_URL"] = "http://host.docker.internal:8080"
     command = ["docker", "compose", "run", "--rm"]
     for key, value in env.items():
         command += ["-e", f"{key}={value}"]
@@ -349,24 +676,43 @@ def main():
     db_sampler.join(timeout=args.warmup + args.duration + 120)
     metrics = {
         "label": args.label, "vus": args.vus, "script": args.script,
-        "mode": args.mode if is_request else None, "query": None if is_request else args.query,
+        "mode": args.mode if is_request else None, "hotVus": args.hot_vus, "query": None if is_request else args.query,
+        "gateway": args.gateway, "extraServices": args.extra_service,
         "measureWindow": {"from": iso(datetime.fromtimestamp(measure_from, timezone.utc)),
                           "to": iso(datetime.fromtimestamp(measure_to, timezone.utc))},
         "services": service_metrics(service_sampler.samples, measure_from, measure_to),
         "db": db_metrics(db_sampler, measure_from, measure_to),
     }
+    ledger_calls = sum(service.get("POST /internal/v1/ledger/transactions", {}).get("calls", 0)
+                       for name, service in metrics["services"].items()
+                       if isinstance(service, dict) and name.rstrip("0123456789") == "ledger")
+    lock_waits = (metrics["db"].get("ledgerLockWaits") or {}).get("avg")
+    if ledger_calls and lock_waits is not None:
+        # 리틀 법칙 L = λW → 거래 한 건이 잠금을 기다린 평균 시간 W = 평균 대기 세션 수 / 초당 거래 수
+        metrics["db"]["ledgerLockWaitPerTxMsEstimate"] = round(lock_waits / (ledger_calls / args.duration) * 1000, 1)
+    if holder_sampler:
+        holder_sampler.join(timeout=args.warmup + args.duration + 120)
+        per_tx_hold_ms = round(args.duration * 1000 / ledger_calls, 2) if ledger_calls else None
+        metrics["db"]["lockHolders"] = lock_holder_metrics(holder_sampler, measure_from, measure_to, per_tx_hold_ms)
 
     if is_request:
         print("[4/4] 대사: PROCESSING 복구 대기 → 송금·원장·잔액 대조")
         created_from = run_started - timedelta(seconds=5)
         created_to = datetime.fromtimestamp(k6_ended + 5, timezone.utc)
-        metrics["reconciliation"] = reconcile(data, balances_before, created_from, created_to, args.recovery_timeout)
+        metrics["reconciliation"], extra = reconcile(data, balances_before, created_from, created_to,
+                                                     args.recovery_timeout, args.recon)
+        if extra:
+            metrics["reconciliationDb"] = extra["db"]
+            metrics["reconciliationDb"]["compare"] = extra["compare"]
     else:
         print("[4/4] 조회 측정이라 대사는 하지 않습니다")
 
     metrics_result.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
-    violations = (metrics.get("reconciliation") or {}).get("violations") or []
+    recon_db = metrics.get("reconciliationDb") or {}
+    violations = ((metrics.get("reconciliation") or {}).get("violations") or []) + (recon_db.get("violations") or [])
+    if not recon_db.get("compare", {}).get("match", True):
+        violations.append("API 대사와 DB 대사 결과가 다름")
     failures = summary["statusCounts"]["429"] + summary["statusCounts"]["4xxOther"] + \
         summary["statusCounts"]["5xx"] + summary["statusCounts"]["noResponse"]
     if violations or failures:

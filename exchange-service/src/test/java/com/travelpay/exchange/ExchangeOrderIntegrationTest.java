@@ -130,7 +130,7 @@ class ExchangeOrderIntegrationTest {
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
         ledger.reset();
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(NOW);
         BigDecimal mid = new BigDecimal("838.30");
@@ -148,6 +148,7 @@ class ExchangeOrderIntegrationTest {
                 .andExpect(jsonPath("$.data.status").value("PROCESSING"))
                 .andExpect(jsonPath("$.data.type").value("EXCHANGE"))
                 .andExpect(jsonPath("$.data.quoteId").value(quoteId))
+                .andExpect(jsonPath("$.data.reservationId").doesNotExist())   // 직접 신청한 환전 (#254)
                 .andExpect(jsonPath("$.data.totalDebitAmount").value("101000"))
                 .andExpect(jsonPath("$.data.toAmount").value("11928"))
                 .andReturn().getResponse().getContentAsString(), "$.data.orderId");

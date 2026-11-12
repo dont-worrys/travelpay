@@ -24,6 +24,10 @@ DB만 쓸 때와 Redis를 쓸 때를 같은 방법으로 재서 비교합니다(
 | `quote-issue.js` | k6 스크립트: 견적 발급. 가상 사용자마다 다른 회원 ID로 원화 → 엔화 견적 |
 | `measure.sh` | 한 단계 측정: 앱 재시작 → 이력 적재 → k6 실행(그동안 DB·커넥션 지표 1초 간격 기록) → 지표 정리 |
 | `measure-all.sh` | 50 / 100 / 300 단계를 3번씩 측정하고 단계별 중앙값 표를 만듦 |
+| `measure-compare.sh` | 버전(jar) 여러 개를 회차·단계·버전 순서를 섞어 같은 날 비교 측정 |
+| `measure-common.sh` | 위 두 스크립트가 함께 쓰는 결과 검사(실패 요청, 견적 검산)와 요약 표 |
+| `pc-state.sh` | 측정하는 PC의 전원 모드·충전기·팀 서비스 포트·IntelliJ 상태를 JSON 한 줄로 (Windows) |
+| `standby-events.sh` | 두 시각 사이 Windows 대기 모드 진입 횟수 (Windows 시스템 로그) |
 | `results/` | 측정 결과 JSON (커밋하지 않음. 비교에 쓴 값은 측정 기록 문서에 옮겨 적음) |
 
 필요한 것은 Docker와 jar를 빌드할 JDK뿐입니다. 앱·DB·k6 모두 컨테이너로 실행합니다(k6는 `grafana/k6` 이미지).
@@ -60,15 +64,29 @@ docker compose --profile app up -d --wait app   # 측정 DB도 함께 뜸. 준�
 | --- | --- |
 | `--management.server.port=18085` | Actuator(지표)를 별도 포트로 띄움. 같은 포트면 지표 요청이 부하 요청 뒤에 줄 서서, 바쁠 때 지표를 못 읽음 |
 | `--server.tomcat.max-keep-alive-requests=-1` | 톰캣은 기본으로 연결 하나에 요청 100번을 받으면 끊음. 초당 수백 번 새 연결이 생기며 Docker 네트워크에서 가끔 연결 시간 초과(`dial: i/o timeout`)가 남. 측정 중 연결을 계속 재사용하게 함 |
+| `--management.metrics.distribution.percentiles-histogram.http.server.requests=${MEASURE_HISTOGRAM:-false}` | HTTP 응답 시간을 구간별 개수(히스토그램)로도 내보내 Grafana가 p95·p99를 계산하게 함. 비교하는 옛 jar에는 이 설정이 없어 실행 옵션으로 정함. **처리량을 낮추므로 기본은 끔**(변수를 빠뜨려도 공식 측정 조건). Grafana 캡처용 측정만 `MEASURE_HISTOGRAM=true`로 켬(아래 "모니터링 연결") |
 
 ### 측정 전 PC 조건 (같은 날 비교할 측정끼리 반드시 같게)
 
 한 PC에서 k6·앱·DB를 함께 돌리므로, PC 상태만으로도 처리량이 크게 바뀝니다.
 
 1. **충전기를 연결합니다.** 배터리면 전력 제한이 더 강합니다.
-2. **Windows 전원 모드를 "최고 성능"으로** 둡니다.
-3. **IntelliJ로 띄운 팀 서비스, 빌드, 브라우저 등 무거운 작업을 끕니다.** Docker 안의 CPU 지표에는 PC의 다른 프로그램이 쓰는 CPU가 보이지 않습니다.
-4. 측정하는 동안 PC를 쓰지 않습니다.
+2. **Windows 전원 모드를 비교할 측정끼리 같게** 둡니다(설정 → 시스템 → 전원 및 배터리 → 전원 모드). 다른 날 결과와 비교하려면 그날의 모드와 같아야 합니다.
+3. **충전기 연결 시 "화면 끄기"와 "절전"을 "안 함"으로** 둡니다(설정 → 전원 및 배터리 → 화면, 절전 및 최대 절전 시간 제한). 측정이 끝나면 원래대로 돌립니다.
+4. **IntelliJ로 띄운 팀 서비스, 빌드, 회의 프로그램, 무거운 브라우저 탭을 끕니다.** Docker 안의 CPU 지표에는 PC의 다른 프로그램이 쓰는 CPU가 보이지 않습니다. IntelliJ를 켜 둔다면 측정 중 아무 작업도 하지 않습니다.
+5. **팀 공용 Docker 인프라(개발용 Postgres·Redis·Kafka)와 쓰지 않는 모니터링(Loki·Alloy)을 멈춥니다**(`docker stop`, 측정 후 `docker start`). 측정에는 쓰지 않으면서 메모리·CPU를 씁니다.
+6. 측정하는 동안 PC를 쓰지 않습니다.
+
+**조건은 결과 파일에 자동으로 남습니다.** `measure.sh`가 k6 직전·직후에 `pc-state.sh`로 전원 모드·충전기·PC에서 열린 팀 서비스 포트 수·IntelliJ 실행 여부를 읽어 `-db.json`의 `conditions`에 적고, 히스토그램 옵션과 측정 앱에 붙은 Prometheus 여부도 함께 적습니다. 그리고 측정 중에 다음이 생기면 그 회차를 **무효**로 끝냅니다.
+
+| 무효 조건 | 확인 방법 | 이유 |
+| --- | --- | --- |
+| 전원 모드나 충전기 연결이 k6 직전과 직후에 다름 | `pc-state.sh` 두 번 비교 | PC 성능이 바뀌어 처리량이 흔들림 |
+| k6가 도는 동안 PC가 대기 모드(Modern Standby)에 들어감 | `standby-events.sh`: Windows 시스템 로그의 Kernel-Power 506(대기 모드 진입) 수 | CPU가 제한되다가 Docker까지 멈춤. 얕은 대기면 숫자가 나와 다른 검사를 통과할 수 있음 |
+
+Windows가 아니면 PC 상태는 `null`로 남고 위 두 검사는 건너뜁니다. Windows인데 **확인 자체를 못 하면 측정하지 않거나 무효**로 끝냅니다: 전원 모드·충전기를 읽지 못함(`unknown`, 빈 출력), 시스템 로그를 읽지 못함(`standby-events.sh`가 `error`). 읽기 실패를 "변화 없음", "대기 모드 0번"으로 보면 검사가 조용히 사라지기 때문입니다.
+
+실제로 겪은 일 (2026-11-10, 견적 발급): "측정 중 PC를 쓰지 않기"를 지키자 **5분 뒤 화면이 꺼지며 대기 모드**에 들어갔습니다(충전 시 화면 끄기·절전 5분). 2·3회차는 CPU가 제한된 채 숫자가 나와 검사를 통과했고, 4회차에서 Docker가 멈춰 표본이 8초만 남아 무효로 멈췄습니다. 그래서 3번 조건과 대기 모드 검사를 넣고 18회를 처음부터 다시 쟀습니다. 또 이전 측정(2026-11-09)의 전원 모드를 기록하지 않아, 다른 날 환율 결과와 비교할 때 조건을 맞출 수 없었습니다(자동 기록을 넣은 이유).
 
 실제로 겪은 일 (2026-11-04, 견적 발급, 노트북 Intel Core Ultra 7 258V): 위 조건 없이 50/100/300 단계를 연달아 재자, 처음 약 7분(50 단계 3번)만 2,553 TPS였고 그 뒤로는 동시 요청 수와 상관없이 약 1,550 TPS였습니다(50을 다시 재도 1,601). 측정 DB에는 쌓인 것이 없었습니다(크기 37MB, 죽은 행 0). 조건을 맞춘 뒤 같은 50 단계를 6번 연속(약 13분) 재자 2,690~2,868 TPS로 떨어지지 않았고, 그동안 PC CPU 성능(`\Processor Information(_Total)\% Processor Performance`)이 170%(부스트 유지)였습니다. 전원 모드와 백그라운드 서비스를 함께 바꿔, 둘 중 무엇이 주원인인지는 나눠 보지 않았습니다.
 
@@ -214,6 +232,7 @@ SCRIPT=quote-issue.js ./measure.sh quote-db 50   # 견적 발급
 | `dbActiveSessions` | `pg_stat_activity` (state=active) | DB에서 실제로 실행 중인 쿼리 수, 평균·최대 |
 | `quoteRows` | `exchange_quotes` 행 수 + Redis `exchange:quote:*` 키 수 | `db`: DB 행, `redis`: Redis 키(견적 저장소가 Redis인 jar), `all`: 둘의 합 = 이번 실행(예열 포함)에서 저장된 견적. 측정 직전 적재 SQL이 견적 테이블을, `FLUSHALL`이 견적 키를 비우므로 그대로 셈(키 수명 10분이라 측정 중에 사라지지 않음). `measure`: DB 행 중 `created_at`이 측정 구간 안(어림값). 환율 조회 측정이면 모두 0 |
 | `redis` | 측정 Redis `INFO`·`CONFIG` | 측정이 끝난 시점 사용 메모리(`usedMb`), 최대(`maxMb`), 정책(`policy`). 견적이 Redis에 있으면 발급 수 × 키 크기만큼 늘어남. 이번 측정 동안 Redis가 키를 지웠거나(evicted) 메모리 부족으로 쓰기를 거절했으면(OOM) 무효로 끝남 |
+| `conditions` | `pc-state.sh`, `standby-events.sh`, 앱 실행 명령, Docker 네트워크 | 측정 조건: `histogram`(실제로 뜬 앱의 히스토그램 옵션), `prometheus`(측정 앱 네트워크에 Prometheus가 붙어 수집 중이면 `on`), `pcBefore`·`pcAfter`(k6 직전·직후 PC 상태), `standbyEntries`(k6 중 대기 모드 진입 수). 위 "측정 전 PC 조건" 참고 |
 | `rateSelectCalls` | `pg_stat_statements` | 환율 SELECT 호출 수. `measure`: DB 세션과 같은 1초 표본에서 누적 값을 읽어 구한 **측정 구간만의** 차이(수집기 포함). `all`: 적재 후 전체(예열 포함, 검산용). 적재 때 통계를 초기화하므로 예열 호출이 섞이지 않게 구간 차이를 씀 |
 
 - 측정 구간은 k6가 **실제로 테스트를 시작한 시각**(끝난 시각 − k6 결과의 `testRunDurationMs`)에서 예열(`WARMUP_SECONDS`, 기본 30초)을 뺀 측정 시간(`MEASURE_SECONDS`, 기본 2분)입니다. 컨테이너를 띄우는 데 걸린 시간과 상관없이 k6 집계 구간과 같습니다.
@@ -232,7 +251,13 @@ SCRIPT=quote-issue.js ./measure-all.sh quote-db   # 견적 발급: 같은 단계
 
 - 요약 표 열: TPS, 회차별 TPS, TPS 편차, P50·P95·P99, 연결 대기, 연결 얻는 시간, 연결 얻은 횟수, 환율 SELECT(측정 구간), DB 활성 세션, 캐시 hit, 스크립트별 열(환율 조회는 오래된 응답 %, 견적 발급은 **견적 저장 / 성공 응답**), 실패율, 실패 건수, CPU
 - **TPS 편차** = (회차 중 최대 − 최소) / 중앙값. 10%를 넘으면 ⚠가 붙고, **그 버전·단계만 2회 추가 측정**합니다(결과를 보고 유리한 회차를 고르지 않도록 측정 전에 정한 규칙, 2026-11-09)
-- **견적 발급 검산:** 회차마다 저장된 견적 수(`quoteRows.all`)가 예열 포함 성공 응답 수(`okAll`)와 같은지 확인하고, 다르면 멈춥니다. 성공 응답을 받은 만큼 정확히 저장됐는지(응답과 저장이 어긋나지 않는지) 보는 것입니다. 측정 구간 행 수는 시각 경계가 1초 안에서 어긋나 이 검산에 쓰지 않습니다.
+- **견적 발급 검산:** 회차마다 예열 포함 **성공 응답 수(`okAll`) ≤ 저장된 견적 수(`quoteRows.all`) ≤ 보낸 요청 수(`requestsAll`)**인지 확인하고, 아니면 멈춥니다.
+  - 저장 < 성공: 성공이라고 답한 견적이 저장되지 않음(유실). 이 검산이 막으려는 것
+  - 저장 > 보낸 요청: 보내지 않은 요청이 저장됨(앞 측정의 키가 남는 등)
+  - 성공 < 저장: **실패로 답했는데 저장된 견적이 적어도 그 차이만큼 있다는 뜻.** 멈추지 않고 "저장 수와 성공 응답 수의 차이"를 출력합니다. 이 차이는 실패 응답 중 저장된 견적의 정확한 수가 아닙니다. 성공한 견적이 유실됐다면 실제로는 그만큼 더 많습니다(ID 대조를 하지 않아 정확한 수는 모름). Redis 견적 jar는 Redis 명령을 200ms(`spring.data.redis.timeout`)까지만 기다려 503으로 답하지만, Redis는 늦게라도 저장합니다. 2026-11-10 측정에서 앱을 막 띄운 직후 동시 300이 몰린 예열 첫 1~2초에 실패 응답이 생겼고, 저장 수가 성공 응답 수보다 38건 많았습니다. 처음에는 "성공 = 저장"을 요구해 이 경우에도 멈췄는데, 실패로 답한 요청이 저장되는 것 자체는 유실이 아니라서 위처럼 바꿨습니다. 측정 구간의 실패는 실패 요청 검사가 따로 막습니다.
+  - **개수로 "유실 없음"을 증명하는 건 실패 응답이 0건일 때뿐입니다.** 요청 하나는 견적을 많아야 하나 저장하므로, 실패가 없으면 성공 = 보낸 요청이고 저장이 그 사이라면 모든 요청이 저장된 것입니다. 실패 응답이 있으면 "실패했는데 저장됨"과 "성공했는데 유실됨"이 같은 수만큼 생겨도 개수가 맞으므로, 검산은 통과시키되 "개수만으로는 증명하지 못함"을 출력합니다. 응답별 견적 ID 대조는 하지 않습니다(회차당 약 200만 건).
+  - 성공 응답·보낸 요청·저장 수 중 하나라도 비었거나 숫자가 아니면 실패로 멈춥니다(비교가 오류로 거짓이 되어 그냥 통과하지 않게).
+  - 측정 구간 행 수는 시각 경계가 1초 안에서 어긋나 이 검산에 쓰지 않습니다.
 
 - 결과: 회차별 `results/db-r1-vus50.json` … 과 중앙값 표 `results/db-summary.md`(마크다운, 실패율·실패 건수와 회차별 TPS도 함께 적어 흔들림을 확인)
 - 한 회차라도 실패한 요청(4xx·5xx·응답 없음)이나 불완전 응답이 있으면 그 자리에서 멈춥니다. 실패가 섞인 측정은 무효로 보고 원인부터 찾습니다(k6 기준값은 측정을 멈추지 않게 항상 통과하도록 두었으므로 여기서 확인). 시작할 때 앞 실행의 요약을 지우고 모든 회차가 성공해야 새 요약을 만들어, 남은 요약을 이번 결과로 오인하지 않게 합니다.
@@ -297,7 +322,8 @@ cd exchange-service/load-test
 export MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction
 docker compose up -d --force-recreate --wait measure-redis
 J=exchange-service/build/libs/exchange-service-0.0.1-SNAPSHOT.jar
-SCRIPT=quote-issue.js ./measure-compare.sh quote quote-db=../../../travelpay-quote-db/$J quote-redis=../../../travelpay-quote-redis/$J
+# 공식 측정은 모니터링을 멈추고 히스토그램을 끔 (아래 "모니터링 연결")
+MEASURE_HISTOGRAM=false SCRIPT=quote-issue.js ./measure-compare.sh quote250 quote-db=../../../travelpay-quote-db/$J quote-redis=../../../travelpay-quote-redis/$J
 ```
 
 - `measure.sh`는 견적 발급을 잴 때 측정 Redis가 1GB보다 작으면 시작하지 않습니다. 값이 다른 셸에서 이어 재면(환경 변수 없음) compose가 Redis를 기본값으로 다시 만들어 막힙니다.
@@ -306,3 +332,48 @@ SCRIPT=quote-issue.js ./measure-compare.sh quote quote-db=../../../travelpay-quo
 - 그래서 `연결 얻은 횟수`는 0이 아니라, 캐시 miss 몫과 수집기(5초마다)·복구 스케줄러·지표 갱신(30초마다)이 쓴 만큼 남습니다(환율 조회 v1과 비슷한 수준).
 - 견적 발급 요약 표에는 저장된 견적 수 / 성공 응답 수와 측정 Redis 사용 메모리(회차 중 최대)가 붙습니다.
 - 환율 조회를 다시 잴 때는 `unset MEASURE_REDIS_MAXMEMORY MEASURE_REDIS_POLICY` 후 `docker compose up -d --force-recreate --wait measure-redis`로 기본값(128MB·allkeys-lru)으로 돌립니다.
+- 결과(2026-11-10, #250)는 결과 파일 `results/quote250-*`와 [견적 저장소 Redis 전환 설계·측정 기록](https://claude.ai/artifact/A85umbeqG876f37rKvfidz)에 있습니다. 동시 300에서 TPS 3,051 → 14,525(4.8배), P95 226 → 33.9ms, 견적 발급의 DB 연결 사용 0. Redis 견적 jar는 순간 멈칫(200ms 넘는 Redis 명령)에 503을 내 측정 구간 실패로 무효가 되는 회차가 가끔 생깁니다. 규칙대로 그 회차만 다시 잽니다. 환경 변수는 명령마다 사라지므로 **공식 측정과 같은 값을 다시 모두 붙입니다.** 빠지면 히스토그램이 켜지거나(기본 true) 환율 조회 스크립트로 재고 견적 검산을 건너뜁니다.
+
+```bash
+export MEASURE_REDIS_MAXMEMORY=2gb MEASURE_REDIS_POLICY=noeviction   # 같은 셸에서 이어 잼
+MEASURE_HISTOGRAM=false SCRIPT=quote-issue.js APP_JAR=../../../travelpay-quote-redis/$J ./measure.sh quote250-quote-redis-r5 100
+SUMMARY_ONLY=1 SCRIPT=quote-issue.js ./measure-compare.sh quote250 quote-db=../../../travelpay-quote-db/$J quote-redis=../../../travelpay-quote-redis/$J
+```
+
+다시 잰 회차의 `-db.json`에서 `conditions.histogram`이 `"false"`, `conditions.prometheus`가 `"off"`인지 확인합니다.
+
+## 모니터링 연결 (Grafana 캡처)
+
+공식 측정 수치는 k6와 측정 스크립트(1초 표본)로 내고, Grafana는 발표·설명용 **화면**으로만 씁니다. 모니터링을 켜면 처리량이 낮아지기 때문입니다.
+
+| 측정 | 모니터링(Prometheus 수집) | 히스토그램 | 용도 |
+| --- | --- | --- | --- |
+| 공식 | 끔 | 끔 (기본, `MEASURE_HISTOGRAM` 없음 또는 `false`) | 결과 표의 수치 |
+| 캡처용 | 켬 | `MEASURE_HISTOGRAM=true` | Grafana 그래프 (버전당 1회, 동시 300) |
+
+캡처용 측정 예: `MEASURE_HISTOGRAM=true SCRIPT=quote-issue.js APP_JAR=../../../travelpay-quote-redis/$J ./measure.sh capture250-quote-redis 300`
+
+모니터링 영향 (2026-11-10, 환율 조회 v0, 동시 300, 같은 날 같은 PC): 모니터링·히스토그램 **끔 6,073 TPS / 켬 5,809 TPS → 약 4% 낮음**. 같은 날 다른 버전도 켠 채로 11/9 결과보다 4~10% 낮았습니다(그중 약 6%는 그날 PC 상태, 끔으로 재도 11/9보다 낮음). 병목 모양(연결 대기·캐시 hit)은 켜든 끄든 같았습니다.
+
+**연결:** 측정 환경을 띄운 뒤 저장소 루트에서. Prometheus를 측정 네트워크에도 붙여 `app:18085`를 Docker 네트워크 안에서 수집합니다(PC 포트를 지나지 않게). 자세한 설명은 [로컬 환경 설정 가이드](../../docs/guide/local-settings.md)의 "부하 시험 환경 연결"입니다.
+
+```bash
+cp infra/monitoring/prometheus/load-test/targets.example.yml infra/monitoring/prometheus/load-test/targets.local.yml   # 처음 한 번 (Git 제외 파일)
+MONITORING_LOAD_TEST_NETWORK=travelpay-load-test_default \
+MONITORING_LOAD_TEST_TARGETS_FILE=./infra/monitoring/prometheus/load-test/targets.local.yml \
+docker compose -f compose.monitoring.yaml -f compose.monitoring.load-test.yaml up -d --no-deps prometheus grafana
+```
+
+- **Prometheus와 Grafana만 띄웁니다**(`--no-deps`). Loki·Alloy는 측정 앱 로그를 모으지 않아 측정에 쓰지 않고, 띄우면 측정 중 메모리·CPU만 씁니다(위 "측정 전 PC 조건" 5번). 이미 떠 있다면 `docker stop travelpay-monitoring-loki-1 travelpay-monitoring-alloy-1`로 멈춥니다. Grafana의 로그 패널만 비고 지표 패널은 그대로입니다.
+
+- Grafana(`http://localhost:3000`)에서 **메트릭 환경 = `load-test`**를 고릅니다. Prometheus 대상(`localhost:9090/targets`)에서 `app:18085`가 UP인지 확인합니다.
+- 공식 측정 동안은 `docker stop travelpay-monitoring-prometheus-1 travelpay-monitoring-grafana-1`로 멈추고, 캡처용 측정 전에 `docker start`로 켭니다. 공식 측정 중에는 모니터링 컨테이너가 하나도 떠 있지 않아야 합니다(`docker ps --filter name=travelpay-monitoring`이 비어 있음). Prometheus 수집 여부는 결과 파일의 `conditions.prometheus`로 확인할 수 있습니다.
+- Prometheus 수집 간격은 15초라, 15초보다 짧은 측정은 그래프에 처리량이 그려지지 않습니다(합계만 남음). 캡처는 예열 30초 + 측정 2분 기본값이면 충분합니다.
+- 데이터는 72시간 보관됩니다. 캡처는 그 안에 측정 시각 범위를 지정해 합니다.
+- Grafana 값은 서버 안에서 잰 시간이고 1분 단위로 묶여, k6 값과 다릅니다(k6는 네트워크·앱 앞 대기를 포함). 숫자는 결과 표, 그래프는 모양만 씁니다.
+
+**해제:** 측정 환경을 내리기 **전에** Prometheus를 기본 구성으로 되돌립니다(연결된 채로 내리면 네트워크가 사용 중이라 지워지지 않음).
+
+```bash
+docker compose -f compose.monitoring.yaml up -d --no-deps --force-recreate prometheus   # 저장 볼륨은 유지
+```

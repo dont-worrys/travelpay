@@ -17,6 +17,8 @@ WALLET_URL = os.environ.get("WALLET_URL", "http://localhost:8082")
 PAYMENT_URL = os.environ.get("PAYMENT_URL", "http://localhost:8083")
 LEDGER_URL = os.environ.get("LEDGER_URL", "http://localhost:8085")
 SERVICES = {"user": USER_URL, "wallet": WALLET_URL, "payment": PAYMENT_URL, "ledger": LEDGER_URL}
+# Gateway 경유 측정(--gateway)에서만 지표를 읽는 관리 포트 (API 포트 8080과 다름)
+GATEWAY_METRICS_URL = os.environ.get("GATEWAY_METRICS_URL", "http://localhost:18080")
 
 
 class HttpResult:
@@ -106,7 +108,8 @@ def scrape(base_url, timeout=2):
 
 
 def summarize_scrape(samples):
-    """측정에 쓰는 값만 뽑습니다: HTTP 서버 요청(경로·메서드별 횟수·합계), 커넥션 풀, CPU, 톰캣 스레드."""
+    """측정에 쓰는 값만 뽑습니다: HTTP 서버 요청(경로·메서드별 횟수·합계), 커넥션 풀(현재 값, 획득·점유 시간 누적),
+    CPU, 톰캣 스레드, Heap 사용량, GC 정지 누적."""
     http = {}
     picked = {}
     for name, labels, value in samples:
@@ -114,8 +117,25 @@ def summarize_scrape(samples):
             key = f"{labels.get('method')} {labels.get('uri')}"
             entry = http.setdefault(key, {"count": 0.0, "sum": 0.0})
             entry["count" if name.endswith("_count") else "sum"] += value
+        elif name == "http_server_requests_seconds_bucket":
+            # 누적 bucket(le 이하 건수). 상태·결과 라벨을 합쳐 경로별로 모은다
+            key = f"{labels.get('method')} {labels.get('uri')}"
+            buckets = http.setdefault(key, {"count": 0.0, "sum": 0.0}).setdefault("buckets", {})
+            le = float("inf") if labels.get("le") == "+Inf" else float(labels.get("le"))
+            buckets[le] = buckets.get(le, 0.0) + value
         elif name in ("hikaricp_connections_pending", "hikaricp_connections_active", "hikaricp_connections_max",
                       "system_cpu_usage", "process_cpu_usage", "tomcat_threads_busy_threads",
-                      "tomcat_threads_config_max_threads"):
+                      "tomcat_threads_config_max_threads",
+                      # 누적값: 측정 구간 양끝의 차이로 평균을 낸다
+                      "hikaricp_connections_acquire_seconds_count", "hikaricp_connections_acquire_seconds_sum",
+                      "hikaricp_connections_usage_seconds_count", "hikaricp_connections_usage_seconds_sum",
+                      "hikaricp_connections_timeout_total",
+                      "jvm_gc_pause_seconds_count", "jvm_gc_pause_seconds_sum"):
             picked[name] = picked.get(name, 0.0) + value
+        elif name in ("hikaricp_connections_acquire_seconds_max", "jvm_gc_pause_seconds_max"):
+            picked[name] = max(picked.get(name, 0.0), value)
+        elif name == "jvm_memory_used_bytes" and labels.get("area") == "heap":
+            picked["jvm_heap_used_bytes"] = picked.get("jvm_heap_used_bytes", 0.0) + value
+        elif name == "jvm_memory_max_bytes" and labels.get("area") == "heap" and value > 0:
+            picked["jvm_heap_max_bytes"] = picked.get("jvm_heap_max_bytes", 0.0) + value
     return {"http": http, **picked}

@@ -18,6 +18,7 @@ spring:
       port: ${REDIS_CACHE_PORT:16380}
       password: ${REDIS_CACHE_PASSWORD}
       # 캐시는 DB보다 빨라야 의미가 있어, 명령 하나를 200ms까지만 기다리고 넘으면 DB로 조회한다.
+      # 견적 저장소는 같은 Redis에 따로 연결하고 대기 한도는 exchange.quote.redis-timeout을 쓴다 (#261)
       # 연결은 앱 시작·재연결 때만 맺으므로 조금 더 기다린다. application-prod.yml에도 같은 값을 둔다
       connect-timeout: 1s
       timeout: 200ms
@@ -68,6 +69,9 @@ exchange:
     # 견적 유효 시간과 수수료율(0.01 = 1%)
     ttl: 5m
     fee-rate: 0.01
+    # 견적 저장소 Redis 명령 대기 한도. 환율 캐시(spring.data.redis.timeout 200ms)와 따로 둔다.
+    # 견적은 Redis가 원본이라 넘으면 503이므로 순간 지연은 기다린다. application-prod.yml에도 같은 값을 둔다 (#261)
+    redis-timeout: 1s
     # 보내는 통화별 1회 금액 범위 (통화 단위, 팀 확정 전 임시값)
     limits:
       KRW:
@@ -85,6 +89,15 @@ exchange:
       enabled: true
       fixed-delay: 30s
       batch-size: 50
+  reservation:
+    # 예약 환전: 최대 예약 기간과 회원당 동시 대기 예약 수 (값이 없으면 같은 기본값을 씀)
+    max-period: 30d
+    max-waiting-per-user: 10
+    # 만료 시각이 지난 대기 예약을 EXPIRED로 바꾸는 주기와 한 배치 크기
+    expiry:
+      enabled: true
+      fixed-delay: 1m
+      batch-size: 500
 
 server:
   port: 8084

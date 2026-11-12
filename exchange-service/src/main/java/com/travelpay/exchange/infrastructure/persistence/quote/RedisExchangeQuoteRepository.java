@@ -36,8 +36,11 @@ class RedisExchangeQuoteRepository implements ExchangeQuoteRepository {
 
     private final StringRedisTemplate redis;
 
-    RedisExchangeQuoteRepository(StringRedisTemplate redis) {
-        this.redis = redis;
+    /**
+     * 환율 캐시와 같은 Redis지만 견적 전용 연결을 씁니다. 명령 대기 한도가 캐시(200ms)와 달라서입니다(#261, QuoteRedisConnection 참고).
+     */
+    RedisExchangeQuoteRepository(QuoteRedisConnection connection) {
+        this.redis = connection.template();
     }
 
     /**
@@ -74,6 +77,8 @@ class RedisExchangeQuoteRepository implements ExchangeQuoteRepository {
     /**
      * Redis에 닿지 못하면(연결 실패·타임아웃·메모리 가득 등) 503으로 알립니다.
      * 환율 캐시처럼 DB로 대신할 수 없어서 요청을 실패시키고, 원인은 경고 로그로 남깁니다.
+     * 타임아웃은 "실패"가 아니라 "결과를 모름"입니다. 앱이 기다리기를 포기해도 Redis는 그 명령을 늦게 실행할 수 있어,
+     * 저장이 503으로 끝났어도 견적이 남을 수 있습니다. 쓰이지 않으면 키 수명이 지나 사라집니다.
      */
     private static BusinessException unavailable(String action, UUID quoteId, DataAccessException cause) {
         log.warn("견적 저장소 {} 실패: quoteId={}, cause={}", action, quoteId, cause.toString());

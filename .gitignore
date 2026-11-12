@@ -45,3 +45,19 @@ out/
 
 # 개인·측정 도구가 생성한 부하 시험 수집 대상
 /infra/monitoring/prometheus/load-test/*.local.yml
+
+# Terraform 로컬 실행 파일·State·개인 입력값
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+/infra/aws/**/tfplan
+/infra/aws/**/tfplan.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+/infra/aws/**/backend.hcl
+/infra/aws/**/__pycache__/

@@ -22,9 +22,12 @@ public class InternalHeaderResetFilter implements GlobalFilter, Ordered {
     // Cloudflare가 넣는 실제 클라이언트 IP 헤더
     static final String CF_CONNECTING_IP = "CF-Connecting-IP";
 
-    // 클라이언트가 보내도 믿지 않고 지우는 헤더
+    // Cloudflare가 ALB 원본 인증용으로 붙이는 비밀 헤더. ALB 규칙이 확인한 뒤에는 쓸 곳이 없으므로 업무 서비스로 넘기지 않음
+    static final String ORIGIN_AUTH = "Origin-Auth";
+
+    // 업무 서비스로 넘기지 않고 지우는 헤더: 클라이언트가 보내도 믿지 않는 내부·추적 헤더와 원본 인증 헤더
     private static final List<String> UNTRUSTED_HEADERS = List.of(AuthHeaders.USER_ID, AuthHeaders.USER_ROLE,
-            AuthHeaders.ORIGINAL_METHOD, AuthHeaders.REQUEST_ID, AuthHeaders.CLIENT_IP, CF_CONNECTING_IP,
+            AuthHeaders.ORIGINAL_METHOD, AuthHeaders.REQUEST_ID, AuthHeaders.CLIENT_IP, CF_CONNECTING_IP, ORIGIN_AUTH,
             "traceparent", "tracestate", "baggage", "b3", "X-B3-TraceId", "X-B3-SpanId", "X-B3-ParentSpanId",
             "X-B3-Sampled", "X-B3-Flags", "X-Amzn-Trace-Id");
 

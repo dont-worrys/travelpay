@@ -17,6 +17,7 @@ import com.travelpay.exchange.domain.rate.ExchangeRateProvider;
 import com.travelpay.exchange.domain.rate.ExchangeRateRepository;
 import com.travelpay.exchange.domain.rate.ForeignCurrency;
 import com.travelpay.exchange.domain.rate.RateSource;
+import com.travelpay.exchange.infrastructure.persistence.quote.QuoteRedisConnection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,6 +26,8 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.core.env.Environment;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -40,6 +43,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -96,13 +101,19 @@ class ExchangeQuoteIntegrationTest {
     @Autowired
     private StringRedisTemplate redis;
 
+    @Autowired
+    private RedisConnectionFactory defaultRedisConnectionFactory;
+
+    @Autowired
+    private QuoteRedisConnection quoteRedisConnection;
+
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
         // 주문이 환율을 FK로 참조하므로 참조하는 테이블까지 함께 비운다 (CASCADE 대신 대상을 명시)
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         // 견적은 Redis에 있으므로 견적 개수를 세기 전에 견적 키를 비운다
         Set<String> quoteKeys = redis.keys("exchange:quote:*");
@@ -112,11 +123,29 @@ class ExchangeQuoteIntegrationTest {
         clock.set(NOW);
     }
 
+    /**
+     * 견적 저장소는 환율 캐시와 다른 Redis 연결을 쓰고 명령 대기 한도도 다릅니다(#261).
+     * 기본 연결(환율 캐시)은 Spring Boot가 만든 그대로 200ms, 견적 연결은 exchange.quote.redis-timeout(1s)입니다.
+     */
+    @Test
+    void quoteStoreUsesItsOwnRedisConnectionWithLongerTimeout() {
+        LettuceConnectionFactory cacheFactory = (LettuceConnectionFactory) defaultRedisConnectionFactory;
+        LettuceConnectionFactory quoteFactory = quoteRedisConnection.connectionFactory();
+
+        assertNotSame(cacheFactory, quoteFactory);
+        assertSame(cacheFactory, redis.getConnectionFactory());
+        assertEquals(Duration.ofMillis(200), cacheFactory.getClientConfiguration().getCommandTimeout());
+        assertEquals(Duration.ofSeconds(1), quoteFactory.getClientConfiguration().getCommandTimeout());
+        // 주소는 같은 Redis(spring.data.redis)
+        assertEquals(cacheFactory.getStandaloneConfiguration().getHostName(), quoteFactory.getStandaloneConfiguration().getHostName());
+        assertEquals(cacheFactory.getStandaloneConfiguration().getPort(), quoteFactory.getStandaloneConfiguration().getPort());
+    }
+
     @Test
     void appliesFlywayMigrationsAndStartsWithSchemaValidation() {
         assertEquals("validate", environment.getProperty("spring.jpa.hibernate.ddl-auto"));
         // version이 없는 행은 Flyway가 스키마를 만들었다는 기록입니다.
-        assertEquals(List.of("1", "2", "3", "4", "5", "6"), jdbcTemplate.queryForList(
+        assertEquals(List.of("1", "2", "3", "4", "5", "6", "7", "8"), jdbcTemplate.queryForList(
                 "SELECT version FROM " + SCHEMA + ".flyway_schema_history"
                         + " WHERE success AND version IS NOT NULL ORDER BY installed_rank",
                 String.class));

@@ -73,6 +73,9 @@ public class SecurityConfiguration {
                         .requestMatchers(HttpMethod.GET, "/api/v1/auth/csrf", "/api/v1/terms").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**",
                                 "/actuator/prometheus").permitAll()
+                        // 로컬 API 문서(Swagger). 배포 설정은 springdoc을 꺼서 이 주소들이 없음(404)
+                        .requestMatchers(HttpMethod.GET, "/v3/api-docs/**", "/swagger-ui.html", "/swagger-ui/**")
+                        .permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/users", "/api/v1/auth/login").permitAll()
                         // 팀 결정(2026-10-31): 서비스 간 호출은 서비스 인증 없이 내부망 격리로 보호하므로 세션 없이 엽니다.
                         // 외부 차단은 Gateway·배포 망이 맡고, 회원 헤더 검사·충전 예금주 본인 확인·수취인 실명 조회 횟수 제한은 컨트롤러와 응용 서비스가 맡습니다.

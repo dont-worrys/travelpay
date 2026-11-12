@@ -39,7 +39,7 @@ public class TransferOpenApiConfig {
                         .title("TravelPay 송금 API")
                         .version("v1")
                         .description("""
-                                사용자 간 같은 통화의 지갑 송금 API입니다.
+                                사용자 간 같은 통화의 지갑 송금 API입니다. 회원(USER)만 쓰며, MASTER는 403입니다.
                                 금액은 통화별 최소 단위의 정수이며, 응답은 공통 형식 `{success, data, error}`를 따릅니다.
                                 실제 환경에서는 Gateway가 세션을 확인한 뒤 회원 헤더를 붙이므로 클라이언트가 보내지 않습니다.
                                 """)))

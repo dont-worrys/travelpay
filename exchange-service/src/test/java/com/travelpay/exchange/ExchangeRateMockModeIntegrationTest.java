@@ -107,7 +107,7 @@ class ExchangeRateMockModeIntegrationTest {
     @BeforeEach
     void setUp() {
         mockMvc = MockMvcBuilders.webAppContextSetup(context).build();
-        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_order_status_histories, "
+        jdbcTemplate.execute("TRUNCATE " + SCHEMA + ".exchange_reservations, " + SCHEMA + ".exchange_order_status_histories, "
                 + SCHEMA + ".exchange_orders, " + SCHEMA + ".exchange_quotes, " + SCHEMA + ".exchange_rates");
         clock.set(NOW);
         // koreaexim 모드로 전날 받아 둔 공식 환율. 가짜 환율의 기준값이 된다
@@ -142,6 +142,39 @@ class ExchangeRateMockModeIntegrationTest {
                 .andReturn().getResponse().getContentAsString();
 
         assertEquals(0, latestMock.compareTo(new BigDecimal(JsonPath.<String>read(body, "$.data[0].midRate"))));
+    }
+
+    /**
+     * 전일 대비(#272): 어제 마지막 mock 환율과 비교한 변동이 응답에 붙는다. 어제 값이 없는 통화(CNY)는 null이다.
+     * 전일 환율은 서버 메모리에 (출처, 통화, 최신 고시일)로 기억되므로, 다른 테스트와 겹치지 않는 날짜(11/12)로 잰다.
+     */
+    @Test
+    void rateApiShowsChangeAgainstPreviousDayMockRate() throws Exception {
+        clock.set(Instant.parse("2026-11-12T02:00:00Z"));
+        BigDecimal yesterday = new BigDecimal("840.00");
+        rateRepository.save(ExchangeRate.collected(new CollectedRate(ForeignCurrency.JPY, 100, yesterday, yesterday,
+                yesterday, LocalDate.of(2026, 11, 11), RateSource.MOCK), Instant.parse("2026-11-11T14:59:55Z")));
+        collectTimes(1);
+        BigDecimal latest = latestMid(RateSource.MOCK, ForeignCurrency.JPY);
+        // 전일 환율은 뒤에서 읽고 요청은 200ms까지만 기다리므로, 첫 DB 읽기가 늦으면 첫 응답에는 없을 수 있다. 나올 때까지 다시 조회
+        for (int i = 0; i < 30 && !mockMvc.perform(get("/api/v1/exchange-rates")).andReturn().getResponse()
+                .getContentAsString().contains("\"previousMidRate\":\"840\""); i++) {
+            Thread.sleep(100);
+        }
+
+        String body = mockMvc.perform(get("/api/v1/exchange-rates"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].currency").value("JPY"))
+                .andExpect(jsonPath("$.data[0].rateDate").value("2026-11-12"))
+                .andExpect(jsonPath("$.data[0].previousMidRate").value("840"))
+                .andExpect(jsonPath("$.data[0].previousRateDate").value("2026-11-11"))
+                .andExpect(jsonPath("$.data[1].currency").value("CNY"))
+                .andExpect(jsonPath("$.data[1].previousMidRate").isEmpty())
+                .andExpect(jsonPath("$.data[1].changeAmount").isEmpty())
+                .andReturn().getResponse().getContentAsString();
+
+        assertEquals(0, latest.subtract(yesterday).compareTo(new BigDecimal(JsonPath.<String>read(body, "$.data[0].changeAmount"))));
+        assertTrue(body.contains("\"changeRate\":null"), "전일 값이 없으면 필드는 빠지지 않고 null로 온다: " + body);
     }
 
     /** 견적을 받은 뒤 환율이 계속 바뀌어도, 그 견적으로 신청한 주문은 견적 때의 환율 행과 값을 쓴다 */

@@ -89,6 +89,28 @@ curl -s -b jar $BASE/api/v1/users/me
 curl -s -c jar -b jar -H "Csrf-Token: $TOKEN" -X POST -o /dev/null -w '%{http_code}\n' $BASE/api/v1/auth/logout
 ```
 
+## Swagger
+
+로컬에서만 열립니다. 배포 설정(`application-prod.yml`)에서는 API 문서(`/v3/api-docs/**`)와 Swagger UI 주소(`/swagger-ui.html`, `/swagger-ui/**`)가 꺼집니다(404). 의존성에 들어 있는 Swagger UI 화면 파일(`/webjars/swagger-ui/**`)은 남지만, 로그인해야 열리고 우리 API 정보가 없으며 Gateway가 넘기지 않는 주소입니다.
+
+| 항목 | 값 |
+|---|---|
+| Swagger UI | `http://localhost:8081/swagger-ui.html` |
+| 그룹 `user` (회원·인증) | `/api/v1/auth/**`, `/api/v1/users/**`, `/api/v1/terms/**`. 명세 `/v3/api-docs/user` |
+| 그룹 `user-admin` (회원·약관 관리) | `/api/v1/admin/users/**`, `/api/v1/admin/terms/**`. 명세 `/v3/api-docs/user-admin` |
+
+- 내부 API(`/internal/**`)는 문서에 없습니다. 그룹 없는 전체 문서(`/v3/api-docs`)는 내부 API까지 담으므로 만들지 않습니다(404).
+- Gateway를 거치지 않고 User를 직접 호출합니다. 로그인은 세션 쿠키로 확인하며, 쿠키는 브라우저가 자동으로 보냅니다. 회원 헤더(`User-Id`·`User-Role`)는 쓰지 않습니다.
+- 자물쇠 표시는 그 API에 필요한 것을 나타냅니다. `session`은 로그인, `csrf`는 `Csrf-Token` 헤더입니다.
+- 사용 순서는 [호출 순서](#호출-순서)와 같습니다.
+  1. `GET /api/v1/auth/csrf`를 실행하고 응답의 `token`을 **Authorize**의 `csrf` 칸에 넣습니다. `session` 칸은 비워 둡니다.
+  2. 회원가입·로그인을 실행합니다.
+  3. 로그인하면 이전 토큰이 버려지므로 `GET /api/v1/auth/csrf`로 새 토큰을 받아 다시 넣습니다. 비밀번호 변경·로그아웃 뒤에도 같습니다.
+- 관리자 그룹은 MASTER 계정으로 로그인한 뒤 씁니다. 일반 회원은 403입니다.
+- 로그인 시도 제한도 같습니다. 같은 이메일·IP로 10분 안에 5번 틀리면 20분 동안 429입니다.
+- 처음에는 입력칸이 잠겨 있습니다. **Try it out**을 누른 뒤 값을 넣고 **Execute**로 요청합니다.
+- 오류 코드와 세부 규칙은 이 문서를 기준으로 합니다. Swagger는 요청·응답 형식을 확인하고 직접 호출해 보는 용도입니다.
+
 ## 비밀번호 변경
 
 로그인한 ACTIVE 회원이 자신의 현재 비밀번호를 확인한 뒤 새 비밀번호로 변경합니다. `USER`·`MASTER` 모두 같은 본인 변경 API를 사용합니다. 변경 대상은 서버의 세션에서 확인하므로 본문에 회원 ID·이메일·역할을 넣지 않습니다.
@@ -136,7 +158,7 @@ Csrf-Token: 현재 세션의 유효한 토큰
 |---|---|---|
 | `travelpay.user.password-change.transaction-timeout` | `USER_PASSWORD_CHANGE_TRANSACTION_TIMEOUT` | `5s` |
 
-처음 자격 증명을 읽는 트랜잭션과 마지막 잠금 조회·저장 트랜잭션에 각각 적용합니다. 비밀번호 해시 연산·Redis 호출은 이 DB 트랜잭션 밖에서 수행하며, 이 값은 HTTP 요청 전체의 제한 시간이 아닙니다. 1초 이상의 정수 초 단위만 허용하고 잘못된 설정은 앱 시작 시 거절합니다. 기본 5초는 초기 보호값이며 성능 측정으로 정한 최적값은 아닙니다.
+처음 자격 증명을 읽는 트랜잭션과 마지막 잠금 조회·저장 트랜잭션에 각각 적용합니다. 비밀번호 해시 연산·Redis 호출은 이 DB 트랜잭션 밖에서 수행하며, 이 값은 HTTP 요청 전체의 제한 시간이 아닙니다. 1초 이상의 정수 초 단위만 허용하고 잘못된 설정은 앱 시작 시 거절합니다. 기본 5초는 초기 보호값이며 성능 측정으로 정한 최적값은 아닙니다. DB 커넥션을 얻기까지의 대기는 이 값에 들어가지 않고 [오류 응답](#오류-응답)의 커넥션 획득 대기를 따릅니다.
 
 ## 내부 API
 
@@ -359,6 +381,8 @@ User의 `/api/v1/admin/**`는 DB의 현재 상태·역할로 ACTIVE MASTER만 �
 
 503은 장애 응답이며 오류 코드로 비밀번호 변경 완료 여부를 구분합니다. 응답만으로 기존 세션 쿠키를 지우지 않습니다. 비밀번호 변경의 부분 성공과 재로그인 방법은 [비밀번호 변경](#비밀번호-변경-b05)을 따릅니다.
 
+DB 커넥션 획득 대기는 2초, 검증은 1초입니다(`spring.datasource.hikari.connection-timeout`·`validation-timeout`, 로컬·배포 파일에 같은 값). 로그인·가입·관리자 API를 포함한 모든 DB 접근에 적용됩니다. 비밀번호 변경·관리자 API의 트랜잭션 제한 시간은 커넥션을 얻은 뒤부터 적용되므로 획득 대기를 따로 제한합니다. 기본값 30초를 쓰면 DB가 응답하지 않을 때 요청이 30초씩 묶입니다. 실제 PostgreSQL을 일시 정지한 실험에서 약관 조회가 503을 받기까지 30.07초에서 2.03초로 줄었습니다.
+
 ## DB 스키마 (Flyway)
 
 테이블과 초기 데이터는 `user-service/src/main/resources/db/migration`의 `V번호__설명.sql` 파일로 관리합니다. 앱이 시작할 때 Flyway가 아직 적용하지 않은 파일만 번호 순서대로 실행하고 실행 기록을 `user_service.flyway_schema_history`에 남깁니다. Hibernate는 표를 만들거나 바꾸지 않고 엔티티와 맞는지 검사만 합니다(`ddl-auto: validate`).
@@ -383,7 +407,7 @@ User의 `/api/v1/admin/**`는 DB의 현재 상태·역할로 ACTIVE MASTER만 �
 
 테스트는 Testcontainers로 PostgreSQL·Redis 컨테이너를 띄우므로 Docker가 실행 중이어야 합니다.
 
-비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
+비밀번호 변경은 실제 PostgreSQL의 동시 변경·잠금 대기·커밋 실패를 확인하고, 실제 HTTP 서버·Redis를 통과하는 시험에서 세션 ID 교체·CSRF·시도 제한 공유·부분 성공 응답을 검증합니다. 관리자 API는 실제 HTTP·PostgreSQL·Redis로 MASTER 권한·CSRF·세션 버전·검색·약관 등록을, 실제 PostgreSQL로 동시 정지·잠금 대기·약관 동시 등록을 확인합니다. 세션 Redis가 꺼진 상태와 메모리가 가득 찬 상태의 health도 확인합니다. API 문서는 실제 HTTP로 그룹·입력칸과 로그인·CSRF 표시가 실제 보안 동작과 같은지, 배포 설정에서 문서 주소가 꺼지는지 확인합니다. 실행 중인 로컬 회원 DB나 세션 Redis의 데이터를 시험용으로 지우지 않습니다.
 
 ## Gateway 연결과 배포 시 신뢰 경계
 

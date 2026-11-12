@@ -3,85 +3,150 @@
 충전 접수(`POST /api/v1/charges`)부터 SAGA 종결(은행 출금 → 원장 적립)까지를 같은 조건에서 재고, 끝난 뒤 은행 출금 정합성과 운영 대사 API 결과를 확인합니다.
 
 - 충전은 접수 후 202로 응답하고 Outbox(1초·50건) → Kafka(`wallet.charge.requested`, 파티션 3) → SAGA로 처리됩니다. 그래서 **접수 응답 시간**과 **종결까지의 완료 처리량·지연**을 따로 봅니다.
-- 목적은 **병목 위치와 정합성 확인**입니다. 로컬 전체 스택(PC)에 k6 컨테이너만 붙이므로 절대 처리량이 아니라 **같은 날 같은 조건의 비교**(예: SAGA 컨슈머 동시성 1 vs 3)와 대사 결과를 봅니다.
-- **Gateway 제외 측정입니다.** k6가 wallet-service(8082)를 `User-Id`·`User-Role` 헤더로 직접 호출합니다.
+- 목적은 **병목 위치와 정합성 확인**입니다. 노트북 한 대의 Docker 안에서 재므로 절대 처리량이 아니라 **같은 날 같은 조건의 비교**(예: SAGA 컨슈머 동시성 1 vs 3)와 대사 결과를 봅니다.
+- **앱까지 Docker 네트워크 안에서 실행합니다.** user·wallet·ledger·mock-bank, 측정 전용 Postgres·Kafka·Redis, k6를 같은 compose 프로젝트(`travelpay-charge-load-test`)에 띄웁니다. 앱을 PC에 띄우면 앱↔DB·Kafka 왕복이 Docker Desktop 포트 전달을 지나 느려지고(환전 측정: 0.05ms → 2.7ms, [환전 README "측정 환경을 Docker 안에 두는 이유"](../../exchange-service/load-test/README.md#측정-환경을-docker-안에-두는-이유)), 충전 한 건은 이 왕복을 약 25번 합니다.
+- **Gateway 제외 측정입니다.** k6가 같은 네트워크의 `wallet:8082`를 `User-Id`·`User-Role` 헤더로 직접 호출합니다. Eureka는 쓰지 않고 지갑이 다른 서비스를 직접 주소로 부릅니다.
 - 부하는 VU 닫힌 루프가 아니라 **constant-arrival-rate**(초당 `--rate`건, 총 `--count`건)입니다. 서버가 느려져도 요청 시작 간격이 유지되고, VU가 모자라 시작하지 못한 건은 `dropped_iterations`로 남습니다. 요청마다 새 `Idempotency-Key`(UUID), 측정 회원을 돌아가며 씁니다.
 
 ## 구성
 
 | 파일 | 하는 일 |
 | --- | --- |
-| `compose.yaml` | k6 컨테이너(`grafana/k6:1.3.0`). `host.docker.internal:8082`로 PC의 wallet-service 호출 |
+| `compose.yaml` | 측정 전용 Postgres(5441, pg_stat_statements 켬)·Kafka·세션 Redis, 앱 4개(profile `app`), k6(profile `k6`, `wallet:8082` 호출)를 같은 Docker 네트워크에 띄움 |
+| `init/02-pg-stat-statements.sql` | 측정 DB를 처음 만들 때 pg_stat_statements 확장 생성 (공용 `infra/postgres/init/01-service-schemas.sql` 다음에 실행) |
+| `prometheus-targets.yml` | 공용 모니터링(Prometheus)에 연결할 때의 수집 대상 (네 앱의 지표 포트) |
 | `charge-request.js` | 충전 접수 부하(constant-arrival-rate), 접수 P50·P95·상태별 건수·`dropped_iterations` |
 | `prepare.py` | 측정 회원·지갑을 만들고 회원마다 mock-bank 계좌를 DB에 INSERT, `data/users.json`에 남김 |
 | `measure.py` | 한 번 측정: 사전 확인 → k6(서비스·DB 지표 1초 표본) → 종결 대기 → 지표 → 출금 정합성 → 대사 |
 | `lt_common.py` | HTTP·Prometheus·psql 도우미 (표준 라이브러리만 사용, 송금 측정과 같은 방식) |
 | `results/`, `data/` | 결과 JSON, 준비 데이터 (커밋하지 않음) |
 
-필요한 것: Docker, Python 3.10 이상(추가 패키지 없음), 로컬 전체 스택.
+필요한 것: Docker, jar를 빌드할 JDK 21, Python 3.10 이상(추가 패키지 없음). 앱·DB·Kafka·k6는 모두 컨테이너로 실행합니다.
 
 ## 1. 서비스 띄우기
 
-| 서비스 | 포트 | 비고 |
-| --- | --- | --- |
-| postgres, redis-session, kafka (저장소 루트 `compose.yaml`) | 5432, 16379, 9092 | `docker compose up -d postgres redis-session kafka` |
-| eureka-server | 8761 | |
-| user-service | 8081 | 충전 접수마다 I03(`funding-identity`) 1번. 호출 한도 없음 |
-| wallet-service | 8082 | 아래 실행 조건 |
-| ledger-service | 8085 | |
-| mock-bank | 8090 | 아래 실행 조건 |
+1. **PC에서 띄운 user·wallet·ledger·mock-bank를 먼저 끕니다**(포트가 같아 충돌). 켜져 있으면 compose가 포트를 열지 못해 시작하지 않습니다. 공용 스택(저장소 루트 `compose.yaml`)의 Postgres·Kafka·Redis는 쓰지 않으므로 꺼도 됩니다.
+2. jar를 빌드하고 측정 환경을 띄웁니다.
+
+   ```bash
+   ./gradlew :user-service:bootJar :wallet-service:bootJar :ledger-service:bootJar :mock-bank:bootJar   # 저장소 루트, 코드를 바꿨다면 다시
+   cd wallet-service/load-test
+   docker compose --profile app up -d --wait     # 인프라 → user·ledger·mock-bank → wallet 순서로 뜸. 모두 health UP까지 기다림
+   ```
+
+   이미 떠 있는 상태에서 지갑 jar를 다시 빌드했다면 지갑을 다시 만듭니다.
+
+   ```bash
+   docker compose --profile app up -d --wait --force-recreate wallet
+   ```
+
+   **지갑을 다른 설정이나 새 jar로 다시 띄울 때는 항상 `--force-recreate`를 붙입니다.** 같은 경로에 jar를 다시 빌드해도 compose 설정이 같으면 컨테이너를 다시 만들지 않아 예전 코드가 계속 돕니다. 측정 전에 새 코드에만 있는 지표(예: `charge_recovery_stuck`)나 로그로 새 코드가 떴는지 확인합니다.
+
+   ```bash
+   curl -s 127.0.0.1:19082/actuator/prometheus | grep charge_recovery_stuck
+   ```
+
+3. `measure.py`·`prepare.py`를 실행할 셸에서 아래 환경 변수를 둡니다. 주소는 반드시 `localhost`가 아니라 **`127.0.0.1`**로 둡니다. compose가 포트를 `127.0.0.1`(IPv4)에만 열어서, `localhost`로 부르면 Python이 IPv6(`::1`)를 먼저 시도하다 요청마다 약 2초씩 늦어집니다(서비스 지표 표본이 7초 간격으로 벌어지고 대사 소요 시간에도 2초가 붙음).
+
+   ```bash
+   export PG_CONTAINER=travelpay-charge-load-test-measure-postgres-1
+   export USER_URL=http://127.0.0.1:8081 WALLET_URL=http://127.0.0.1:8082 \
+          LEDGER_URL=http://127.0.0.1:8085 MOCK_BANK_URL=http://127.0.0.1:8090
+   export USER_METRICS_URL=http://127.0.0.1:19081 WALLET_METRICS_URL=http://127.0.0.1:19082 \
+          LEDGER_METRICS_URL=http://127.0.0.1:19085 MOCK_BANK_METRICS_URL=http://127.0.0.1:19090
+   ```
+
+   PowerShell은 `$env:PG_CONTAINER="travelpay-charge-load-test-measure-postgres-1"`처럼 하나씩 둡니다. 새 셸을 열면 다시 둡니다.
+
+4. 끄기: `docker compose --profile app down` (DB·Kafka 데이터 사라짐. 다시 띄우면 `prepare.py`부터)
+
+| 서비스 (compose) | 업무 포트 | 지표 포트 | 비고 |
+| --- | --- | --- | --- |
+| `measure-postgres` | 5441 (PC) | | 공용 init으로 서비스별 계정·스키마, 관리자 `travelpay_admin`. 볼륨 없음 |
+| `measure-kafka` | (PC에 열지 않음) | | `measure-kafka:9092`. 자동 토픽 생성 끔, 지갑이 `wallet.charge.requested`(파티션 3) 생성. 볼륨 없음 |
+| `measure-redis` | (PC에 열지 않음) | | user 세션·CSRF. 공용 redis-session과 같은 설정 |
+| `user` | 8081 | 19081 | 충전 접수마다 I03(`funding-identity`) 1번. 호출 한도 없음 |
+| `wallet` | 8082 | 19082 | 아래 실행 조건 |
+| `ledger` | 8085 | 19085 | |
+| `mock-bank` | 8090 | 19090 | 아래 실행 조건 |
+
+- 업무 포트는 PC 스택과 같은 번호지만, 위 3번처럼 `127.0.0.1` 주소로 export 합니다(기본값 `localhost`는 요청마다 약 2초 지연). k6는 Docker 네트워크 안에서 `wallet:8082`로 요청합니다.
+- 지표(Actuator)는 업무 포트와 따로 엽니다. 같은 포트면 지표 요청이 부하 요청 뒤에 줄 섭니다.
+- 앱은 Dockerfile 없이 `eclipse-temurin:21.0.13_9-jdk`에 jar를 마운트해 `java -jar`로 실행합니다(환전 측정과 같은 이미지). 다른 커밋의 jar로 잴 때는 `WALLET_JAR=<경로> docker compose --profile app up -d --wait --force-recreate wallet`처럼 바꿔 끼웁니다(이 폴더 기준 상대 경로 또는 절대 경로).
+- 네 앱 모두 `--eureka.client.enabled=false`(mock-bank는 Eureka 의존성이 없어 생략), 프로필 지정 없음(prod 아님)입니다.
+- 힙은 네 앱 모두 `APP_JAVA_OPTS`(기본 `-Xmx1g`)입니다. JVM 기본 최대 힙은 Docker 메모리의 25%라 PC마다 달라지기 때문입니다.
+- 측정 중 수집하는 1초 서비스 지표는 PC의 `measure.py`가 지표 포트로 읽으므로 포트 전달을 지납니다(앱↔DB·Kafka, k6↔앱, DB 표본은 Docker 안). 표본이 빠지면 아래 실패 조건(구간 경계 표본 없음)으로 드러납니다.
 
 ### 지갑 실행 조건
 
-환경 변수: `MOCK_BANK_URL=http://localhost:8090`, `LEDGER_SERVICE_URL=http://localhost:8085`(지갑 개설에도 필요), `USER_SERVICE_URL=http://localhost:8081`.
-**`BANK_FAULT_INJECTION_MODE`는 비워 둡니다**(값이 있으면 출금 첫 시도마다 장애를 주입해 측정이 무효).
+`compose.yaml`의 `wallet`이 지갑을 직접 주소로 부르게 둡니다: `MOCK_BANK_URL=http://mock-bank:8090`, `LEDGER_SERVICE_URL=http://ledger:8085`(원장 계정·거래 Feign 두 개가 같이 씀, 지갑 개설에도 필요), `USER_SERVICE_URL=http://user:8081`, `KAFKA_BOOTSTRAP_SERVERS=measure-kafka:9092`. 계좌번호 키는 측정 전용 고정값입니다.
+**`BANK_FAULT_INJECTION_MODE`는 넣지 않습니다**(값이 있으면 출금 첫 시도마다 장애를 주입해 측정이 무효).
 
-실행 인자(IntelliJ Run 구성의 Program arguments 등):
+실행 인자(compose에 고정):
 
 ```
 --travelpay.wallet.charge.reconciliation.enabled=false
 --travelpay.wallet.charge.reconciliation.grace=10s
 --management.metrics.distribution.percentiles-histogram.http.server.requests=true
---travelpay.wallet.charge.saga.consumer.concurrency=<측정값>
+--travelpay.wallet.charge.saga.consumer.concurrency=${CHARGE_CONCURRENCY:-1}
+--travelpay.wallet.outbox.publisher.batch-size=${OUTBOX_BATCH_SIZE:-50}
 ```
 
 - `reconciliation.enabled=false`: 10분 주기 대사 스케줄러가 측정 중에 돌지 않게 합니다(수동 실행은 그대로 됨).
 - `reconciliation.grace=10s`: `measure.py`가 기간 끝을 `지금 − 10초`로 수동 대사합니다. 기본값(5m)이면 400입니다.
-- 동시성은 앱 재기동으로 바꿉니다. `measure.py --concurrency`는 결과에 남기는 값일 뿐 실제 설정을 바꾸지 않으므로 두 값을 맞춥니다.
+- 동시성·batch-size는 환경 변수로 바꾸고 지갑 컨테이너를 다시 만듭니다. `measure.py --concurrency`는 결과에 남기는 값일 뿐 실제 설정을 바꾸지 않으므로 두 값을 맞춥니다.
+
+  ```bash
+  CHARGE_CONCURRENCY=3 OUTBOX_BATCH_SIZE=200 docker compose --profile app up -d --wait --force-recreate wallet
+  ```
+
+  값을 바꾸지 않은 다른 서비스는 그대로 둡니다. 같은 셸에서 이어 잴 때는 `export`로 값을 유지합니다(값 없이 `up`하면 기본값 1·50으로 다시 만들어짐).
 
 ### Mock 은행 실행 조건
 
-기준선 측정과 장애 측정 모두 실행 인자 `--mock-bank.fault.enabled=true`로 띄웁니다(`prod` 프로필이 아니어야 함). 장애 주입은 기본 꺼짐이고, 꺼져 있으면 유실 카운터(`mock_bank_fault_withdrawal_lost_rate_total`)가 등록되지 않아 `measure.py`가 종료 코드 1이 됩니다(아래 실패 조건). 유실 비율은 기준선에서 기본값 0 그대로 두고, 장애 측정에서만 지정합니다.
+기준선 측정과 장애 측정 모두 장애 주입을 켜 둡니다. `compose.yaml`의 `mock-bank`가 `MOCK_BANK_FAULT_ENABLED=true`이고 프로필을 지정하지 않습니다(`prod`면 꺼짐). 꺼져 있으면 유실 카운터(`mock_bank_fault_withdrawal_lost_rate_total`)가 등록되지 않아 `measure.py`가 종료 코드 1이 됩니다(아래 실패 조건). 유실 비율(`MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE`)은 기준선에서 기본값 0.0 그대로 두고, 장애 측정에서만 지정합니다.
 
-```
---mock-bank.fault.enabled=true
+처음 띄운 뒤 카운터가 있는지 확인합니다.
+
+```bash
+curl -s localhost:19090/actuator/prometheus | grep mock_bank_fault_withdrawal_lost_rate_total
 ```
 
 ### 동시성을 3보다 크게 잴 때
 
-토픽 파티션(코드 선언 3)보다 컨슈머가 많으면 남는 컨슈머는 놉니다. 측정 전에 브로커 토픽 파티션을 먼저 늘립니다.
+토픽 파티션(코드 선언 3)보다 컨슈머가 많으면 남는 컨슈머는 놉니다. 지갑이 토픽을 만든 뒤(지갑이 뜬 뒤) 측정 전에 브로커 토픽 파티션을 늘립니다.
 
 Git Bash에서는 `/opt/...` 경로가 Windows 경로(`C:/Program Files/Git/opt/...`)로 바뀌어 실패하므로 `MSYS_NO_PATHCONV=1`을 붙입니다(PowerShell·macOS·Linux에서는 없어도 됨).
 
 ```bash
-MSYS_NO_PATHCONV=1 docker exec travelpay-local-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+MSYS_NO_PATHCONV=1 docker compose exec measure-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --alter --topic wallet.charge.requested --partitions <N>
-MSYS_NO_PATHCONV=1 docker exec travelpay-local-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+MSYS_NO_PATHCONV=1 docker compose exec measure-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --describe --topic wallet.charge.requested     # PartitionCount 확인
 ```
 
 이때 지갑 기동 로그의 `충전 SAGA 컨슈머 동시성이 토픽 파티션 수보다 큼 … partitions=3` WARN은 **코드 선언값(3)과만 비교**한 것이라(브로커 조회 안 함) 무시해도 됩니다.
 
-**되돌리기.** 파티션은 줄일 수 없으므로 토픽을 지우고 다시 만듭니다. **지갑을 끄고** 처리 중 충전이 없는 상태에서 토픽을 지운 뒤 지갑을 다시 띄우면, 코드에 선언한 파티션 수(3)로 토픽이 다시 만들어집니다. 아직 Kafka로 넘어가지 않은 건은 Outbox에 남아 있다가 새 토픽으로 발행됩니다. Kafka 볼륨을 지우는 방법은 다른 토픽까지 모두 사라지므로 쓰지 않습니다.
+**되돌리기.** 파티션은 줄일 수 없습니다. 측정 Kafka는 볼륨이 없으므로 `docker compose --profile app down` 후 다시 띄우면 지갑이 파티션 3으로 다시 만듭니다(DB도 비므로 `prepare.py`부터 다시). 환경을 내리지 않으려면 **지갑을 끄고**(`docker compose stop wallet`) 처리 중 충전이 없는 상태에서 토픽을 지운 뒤 지갑을 다시 띄웁니다. 아직 Kafka로 넘어가지 않은 건은 Outbox에 남아 있다가 새 토픽으로 발행됩니다.
 
 ```bash
-MSYS_NO_PATHCONV=1 docker exec travelpay-local-kafka-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+MSYS_NO_PATHCONV=1 docker compose exec measure-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
   --delete --topic wallet.charge.requested
+```
+
+### 공용 모니터링 연결 (선택)
+
+측정 환경이 떠 있는 상태에서 저장소 루트에서 실행합니다. 공용 Prometheus가 이 측정 네트워크에 붙어 네 앱의 지표 포트를 수집합니다(`environment: load-test` 라벨).
+
+```bash
+MONITORING_LOAD_TEST_NETWORK=travelpay-charge-load-test_default \
+MONITORING_LOAD_TEST_TARGETS_FILE=./wallet-service/load-test/prometheus-targets.yml \
+docker compose -f compose.monitoring.yaml -f compose.monitoring.load-test.yaml up -d prometheus
 ```
 
 ### 측정 전 PC 조건 (같은 날 비교할 측정끼리 같게)
 
-충전기 연결, Windows 전원 모드 "최고 성능", 브라우저·빌드 등 무거운 작업 끄기, 측정 중 PC 사용하지 않기.
+충전기 연결, Windows 전원 모드 "최고 성능", 빌드 등 무거운 작업 끄기, 측정 중 PC 조작하지 않기. 같은 날 비교할 측정은 모두 같은 상태에서 잽니다.
 
 ## 2. 데이터 준비 (`prepare.py`)
 
@@ -89,9 +154,12 @@ MSYS_NO_PATHCONV=1 docker exec travelpay-local-kafka-1 /opt/kafka/bin/kafka-topi
 cd wallet-service/load-test
 python prepare.py                 # 회원 50명(실명 유재석) + 지갑 + 회원마다 mock-bank 계좌
 python prepare.py --users 100 --bank-balance 1000000000000
+python prepare.py --bank-codes 004,088   # 회원을 두 은행에 번갈아 배정 (은행별 붙잡기 측정용)
 ```
 
-- 계좌는 `mock_bank.bank_accounts`에 직접 INSERT합니다: 예금주 `유재석`, 은행 `004`, 계좌번호 `77` + 실행 시각(UTC `yyMMddHHmmss`) + 순번 4자리(실행끼리 겹치지 않음), 잔액 기본 1조 원. Flyway 시드 계좌는 건드리지 않습니다.
+- 은행은 `--bank-codes`(쉼표 구분, 기본 `004`)를 회원 순번대로 돌아가며 배정합니다(u1=004, u2=088, u3=004 …). 회원별 은행은 `data/users.json`의 `users[].bankCode`에 남고, k6는 회원의 은행 코드로 충전을 요청합니다. k6도 회원을 순번대로 쓰므로 회원 수를 은행 수의 배수로 두면 충전이 은행별로 같은 수로 나뉩니다(기본 50명, 두 은행이면 25명씩).
+- 회원별 은행 코드가 없는 이전 `data/users.json`(최상위 `bankCode` 하나)도 그대로 쓸 수 있습니다.
+- 계좌는 `mock_bank.bank_accounts`에 직접 INSERT합니다: 예금주 `유재석`, 은행 `--bank-codes`, 계좌번호 `77` + 실행 시각(UTC `yyMMddHHmmss`) + 순번 4자리(실행끼리 겹치지 않음), 잔액 기본 1조 원. Flyway 시드 계좌는 건드리지 않습니다.
 - 충전은 하지 않습니다. 회원 수(`--users`)와 충전 건수(`measure.py --count`)는 별개이며, 충전은 회원을 돌아가며 씁니다.
 - 다시 실행하면 새 회원·계좌로 `data/users.json`을 덮어씁니다(이전 계좌는 DB에 남음).
 
@@ -114,7 +182,7 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 
 ### 측정 절차 (비교할 조건마다)
 
-1. 지갑 실행 인자의 동시성을 바꾸고 **재기동**합니다(3 초과면 위의 파티션 먼저). Mock 은행은 `--mock-bank.fault.enabled=true`(유실 비율 지정 없음)로 떠 있어야 합니다.
+1. `CHARGE_CONCURRENCY`(필요하면 `OUTBOX_BATCH_SIZE`)를 바꿔 **지갑 컨테이너를 다시 만듭니다**(3 초과면 위의 파티션 먼저). Mock 은행은 유실 비율 지정 없이(기본 0.0) 떠 있어야 합니다.
 2. **예열 1회**: `python measure.py warmup --count 100 --rate <측정과 같은 값> --concurrency <값>` — JIT·커넥션 풀·Kafka 할당을 데우는 용도이며 **결과는 버립니다**.
 3. **같은 조건으로 측정 3회** (`c1-1`, `c1-2`, `c1-3`처럼 라벨만 바꿈). 매번 종료 코드 0인지 확인합니다.
 4. 3회의 **중앙값**을 기록합니다(완료 처리량, 완료 지연 P50·P95, 접수 P50·P95, 서비스별 avgMs).
@@ -123,7 +191,7 @@ python measure.py c3 --count 1000 --rate 50 --concurrency 3
 
 Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로 바꿉니다(같은 requestId 재요청에도 적용). 지갑은 결과 모름으로 두고, 복구 스케줄러가 같은 requestId로 다시 보냅니다(10초 주기, 30초부터 두 배 백오프, 5회 후 `MANUAL_REVIEW`).
 
-1. Mock 은행을 실행 인자 `--mock-bank.fault.enabled=true --mock-bank.fault.withdrawal-lost-rate=<비율>`(예: `0.1`)로 **재기동**합니다(`prod` 프로필이 아니어야 함). 지갑은 측정할 조건의 동시성과 Outbox batch-size로 띄웁니다(예: `--travelpay.wallet.charge.saga.consumer.concurrency=3`, `--travelpay.wallet.outbox.publisher.batch-size=200`).
+1. Mock 은행을 유실 비율을 넣어 **다시 만듭니다**: `MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE=0.1 docker compose --profile app up -d --wait mock-bank`. 지갑은 측정할 조건의 동시성과 Outbox batch-size로 띄웁니다(예: `CHARGE_CONCURRENCY=3 OUTBOX_BATCH_SIZE=200`). 두 값 모두 바뀌지 않은 채로 다른 서비스를 `up`하면 기본값으로 다시 만들어지므로, 장애 측정이 끝날 때까지 같은 셸에서 `export`로 유지합니다.
 2. **비율이 적용됐는지 직접 확인합니다.** 출금을 몇 번 보내 500이 섞여 나오면 적용된 것입니다. Git Bash에서는 한글 본문이 깨질 수 있어 UTF-8 파일로 보냅니다(시드 계좌에서 1원씩 출금되며 측정 계좌와는 무관).
 
    ```bash
@@ -139,9 +207,120 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
    - `--fault-rate`는 Mock 은행 실행 인자와 같은 값으로 넣습니다(결과에 남기는 값).
    - `--drain-timeout`은 900 이상을 권장합니다. 응답이 계속 유실되면 30·60·120·240초 백오프 뒤 `MANUAL_REVIEW`가 되므로 종결까지 약 7~8분 걸릴 수 있습니다.
    - **처리 한도보다 느린 속도로 넣습니다.** 큐에서 30초 넘게 기다린 충전(`REQUESTED`)도 복구 스케줄러가 처리해 `recoveredCharges`에 섞이기 때문입니다. 예: 동시성 3, Outbox batch-size 200이면 `--rate 50`.
-4. 장애 측정 뒤에는 Mock 은행의 유실 비율을 **0으로 되돌리고 재기동**합니다(`--mock-bank.fault.enabled=true`는 유지). 남아 있으면 다음 기준선 측정이 종료 코드 1이 됩니다(아래 실패 조건).
+4. 장애 측정 뒤에는 Mock 은행의 유실 비율을 **0으로 되돌리고 다시 만듭니다**(`unset MOCK_BANK_FAULT_WITHDRAWAL_LOST_RATE` 후 `docker compose --profile app up -d --wait mock-bank`). 남아 있으면 다음 기준선 측정이 종료 코드 1이 됩니다(아래 실패 조건).
 
 장애 측정에서 `charges.completionTps`는 복구 대기 시간이 구간에 포함되어 처리량으로 해석하지 않습니다. 볼 값은 `fault` 블록과 출금 정합성입니다. 예: 출금 호출 26번, 은행 출금 성공 20건이면 재시도 6번이 중복 출금으로 이어지지 않은 것입니다.
+
+### 은행 장애 측정 (꺼짐·멈춤)
+
+측정 도중 Mock 은행 자체를 60초 동안 장애 상태로 둡니다. 장애는 두 종류입니다.
+
+| 장애 | 정지 / 재개 | 동작 |
+| --- | --- | --- |
+| 꺼짐 | `docker compose stop mock-bank` / `docker compose start mock-bank` | 연결을 즉시 거부. 재개 뒤 앱이 다시 뜨는 시간만큼 장애가 약 10초 더 김 |
+| 멈춤 | `docker compose pause mock-bank` / `docker compose unpause mock-bank` | 연결은 받고 응답 없이 붙잡음 |
+
+**실행.** 셸 창 두 개를 씁니다(둘 다 이 폴더, 환경 변수는 1번 절처럼).
+
+1. 창 1: `python measure.py <LABEL> --count 2400 --rate 20 --concurrency 1 --drain-timeout 3600`
+2. 창 2: 창 1에 `[2/6] k6 실행`이 찍힌 뒤 실행합니다(꺼짐 예시, 멈춤은 `pause`·`unpause`).
+
+   ```bash
+   sleep 30 && docker compose stop mock-bank && date -u && sleep 60 && docker compose start mock-bank && date -u
+   ```
+
+**확인.**
+
+- 결과 metrics 파일의 `window`(`from` ~ `to`) 안에 창 2가 찍은 정지·재개 시각이 모두 있어야 유효한 측정입니다.
+- 볼 값은 `fault.recoveredCharges`와 `fault.recoveredLatencyMs`입니다.
+- 꺼짐에서는 Mock 은행이 재시작되며 카운터가 0이 되므로 은행 호출 수(`fault.bankWithdrawalCalls`, `services.mock-bank`)는 쓰지 않습니다.
+
+**결과 (2026-11-11, 각 1회).** 기준선은 개선 전 지갑 jar, 개선 후는 복구 스케줄러가 쌓인 만큼 처리하고 장애 단계만 멈추는 지갑 jar입니다. 두 경우 모두 지갑은 기본값(동시성 1, Outbox batch-size 50), 초당 20건 2,400건, 접수 시작 30초 뒤 60초 장애입니다. 기준선의 꺼짐은 정리에 약 24분 걸려 `--drain-timeout 3600`이 필요합니다.
+
+| 장애 | 기준선 | 개선 후 |
+| --- | --- | --- |
+| 꺼짐: 접수 끝 → 모두 종결 | 1,441초 | 35.8초 |
+| 꺼짐: 복구 충전 수, 완료 지연 P50/P95 | 1,418건, 754.6/1,383.1초 | 1,457건, 57.8/73.1초 |
+| 멈춤: 완료 지연 P50/P95 | 19.9/59.1초 | 12.1/57.8초 |
+| 멈춤: 복구 스케줄러가 처리한 충전 | 23건 | 358건 |
+
+모든 측정이 2,400건 `COMPLETED`, 중복 출금 0, 대사 어긋남 0, `MANUAL_REVIEW` 0입니다.
+
+- 꺼짐은 결과 모름이 쌓이는 장애라 개선의 주 효과가 나타납니다.
+- 멈춤은 컨슈머가 은행 응답을 기다리며 묶이는 장애라 P95는 그대로입니다. `pause`는 Mock 은행 전체를 멈추므로, 특정 은행만 멈추는 장애는 아래 [은행별 붙잡기 측정](#은행별-붙잡기-측정-한-은행만-멈춤)으로 잽니다.
+- 개선 후 복구 스케줄러는 30초 넘게 기다린 `REQUESTED` 충전도 집어 가므로, 밀린 큐를 컨슈머와 나란히 처리합니다(멈춤에서 358건). 같은 충전은 선점으로 한쪽만 처리합니다.
+
+### 은행별 붙잡기 측정 (한 은행만 멈춤)
+
+한 은행의 출금만 응답 없이 붙잡을 때 **다른 은행 충전이 얼마나 늦어지는지** 봅니다. Mock 은행 [출금 붙잡기 API](../../docs/guide/mock-bank.md#은행별-출금-붙잡기)를 측정 도중 켜고 끕니다. 붙잡힌 출금은 대기 시간이 지난 뒤 처리되므로(지갑은 읽기 시간 초과 5초로 이미 포기) `docker compose pause`와 같은 장애를 은행 하나에만 만듭니다. 환불·조회는 붙잡지 않습니다.
+
+**준비.**
+
+1. Mock 은행 jar를 다시 빌드하고 다시 만듭니다(붙잡기 API는 새 jar에만 있음).
+
+   ```bash
+   ./gradlew :mock-bank:bootJar   # 저장소 루트
+   cd wallet-service/load-test
+   docker compose --profile app up -d --wait --force-recreate mock-bank
+   curl -s 127.0.0.1:8090/internal/v1/bank/faults/withdrawal-holds   # {"success":true,"data":[],...}이면 새 jar
+   ```
+
+2. 두 은행으로 데이터를 준비합니다: `python prepare.py --bank-codes 004,088`
+
+**실행.** 셸 창 두 개를 씁니다(둘 다 이 폴더, 환경 변수는 1번 절처럼).
+
+1. 창 1: `python measure.py <LABEL> --count 2400 --rate 20 --concurrency 1 --drain-timeout 3600`
+2. 창 2: 창 1에 `[2/6] k6 실행`이 찍힌 뒤 실행합니다. 접수 시작 30초 뒤 은행 `004`의 출금을 60초 동안 붙잡습니다(요청마다 10초 대기).
+
+   ```bash
+   HOLDS=127.0.0.1:8090/internal/v1/bank/faults/withdrawal-holds
+   sleep 30 && curl -s -X PUT $HOLDS/004 -H 'Content-Type: application/json' -d '{"delaySeconds":10}' && date -u \
+     && sleep 60 && curl -s -X DELETE $HOLDS/004 && date -u
+   ```
+
+   PowerShell:
+
+   ```powershell
+   $holds = "http://127.0.0.1:8090/internal/v1/bank/faults/withdrawal-holds"
+   Start-Sleep 30; Invoke-RestMethod -Method Put "$holds/004" -ContentType 'application/json' -Body '{"delaySeconds":10}'; (Get-Date).ToUniversalTime()
+   Start-Sleep 60; Invoke-RestMethod -Method Delete "$holds/004"; (Get-Date).ToUniversalTime()
+   ```
+
+- `delaySeconds`는 지갑 읽기 시간 초과(5초)보다 길고 복구 첫 재시도 대기(30초)보다 짧게 둡니다(이 절의 측정은 10초). 5초 이하면 늦을 뿐 정상 응답이라 장애가 아니고, 30초 이상이면 복구 재시도가 원래 요청이 아직 붙잡혀 있을 때 같은 `requestId`로 도착할 수 있어, 이번에 확인하려는 것과 다른 경합이 섞입니다(같은 `requestId` 동시 요청의 처리는 확인하지 않음). API는 1~600초를 받습니다.
+- 끄면(`DELETE`) 기다리던 출금도 바로 풀려 처리됩니다. 측정이 끝난 뒤에도 켜져 있으면 다음 측정이 오염되므로 `GET $HOLDS`로 `data`가 `[]`인지 확인합니다. Mock 은행을 다시 띄워도 꺼집니다(메모리 보관).
+- 켜는 동안 `GET $HOLDS`의 `heldCount`가 붙잡은 출금 요청 수입니다. 0이면 그 은행으로 출금이 오지 않은 것입니다(은행 코드·`users.json` 확인).
+
+**확인.**
+
+- 결과 metrics 파일의 `window`(`from` ~ `to`) 안에 창 2가 찍은 켜기·끄기 시각이 모두 있어야 유효한 측정입니다.
+- 볼 값은 `charges.byBank`의 은행별 `completionLatencyMs`(P50·P95·건수)입니다. 붙잡은 은행(`004`)은 늦어지는 것이 맞고, **붙잡지 않은 은행(`088`)이 얼마나 늦어지는지**가 장애 격리 정도입니다. 요약 출력의 `은행 088: … 완료 지연 P50 …ms P95 …ms` 줄로도 봅니다.
+- 출금 정합성은 은행별로도 맞아야 합니다(`bankConsistency.byBank`). 붙잡힌 출금은 지갑이 포기한 뒤 처리되므로, 재시도가 같은 `requestId`로 기존 결과를 받아 중복 출금이 없어야 합니다.
+
+#### 붙잡기 측정 결과 (2026-11-11)
+
+**조건.** 조건마다 1회. 은행 `004`·`088` 반반, 초당 20건 2,400건, 접수 30초 뒤 `004`를 60초 붙잡기(`delaySeconds` 10), 지갑 동시성 1, Outbox 배치 50.
+
+| 지표 | 기준선 | 응답 제한 2초 | 동시성 3 | 서킷 |
+|---|---|---|---|---|
+| 088 완료 지연 P50 / P95 | 18.7 / 58.8초 | 12.6 / 54.2초 | 6.9 / 52.1초 | 0.92 / 22.0초 |
+| 004 완료 지연 P50 / P95 | 18.8 / 60.8초 | 13.1 / 56.6초 | 7.7 / 54.8초 | 34.1 / 64.8초 |
+| 붙잡힌 은행에 보낸 출금(`heldCount`) | 17 | 38 | 42 | 7 |
+| 복구로 끝난 충전 | 224 | 418 | 38 | 658 (보내지 않은 건 652) |
+
+- 모든 조건에서 2,400건 모두 `COMPLETED`였고 대사 어긋남은 0건입니다.
+- 응답 제한 2초는 `APP_JAVA_OPTS`에 `-Dspring.cloud.openfeign.client.config.mock-bank.read-timeout=2000`을 넣어 쟀습니다. compose가 이 값을 `JAVA_TOOL_OPTIONS`로 넘기며, 적용 여부는 컨테이너의 `JAVA_TOOL_OPTIONS` 환경 변수로 확인했습니다.
+
+**해석.**
+
+- 응답 제한을 줄이거나 동시성을 늘리는 것으로는 088 P95가 거의 줄지 않았고(장애 시간 60초 근처), 붙잡힌 은행에 보낸 출금이 2배 넘게 늘었습니다.
+- 서킷은 붙잡기 시작 25.3초 뒤 열렸고(결과 모름 5번 × 읽기 제한 약 5초), 그 뒤 088은 평소 속도로 처리됐습니다. 088 P95 22초는 서킷이 장애를 감지하기 전 구간이라 서킷으로 줄일 수 없습니다.
+- 대가: 서킷이 막은 004 충전은 은행에 보내지 않고 처리 중으로 두었다가 복구 스케줄러가 백오프 뒤 다시 보냅니다. 그래서 004 P50이 18.8초에서 34.1초로 늘었습니다. 대신 보내지 않은 652건은 은행에 출금 기록이 없는 것이 확실합니다.
+- 동시성 3에서 복구로 끝난 충전이 적은(38건) 이유는 확인하지 않았습니다.
+
+**서킷이 잘못 열리지 않는지 확인.**
+
+- 장애 없음(2,400건)과 응답 10% 유실(2,400건, 유실 249건, 출금 호출 2,647건)에서 서킷 열린 횟수의 변화는 0이었습니다.
+- 10% 유실에서 열리지 않은 것은 1회 측정 결과입니다. 요청마다 독립으로 10% 확률의 결과 모름이 날 때 한 번의 측정에서 연속 5번이 나오는 기대 횟수는 약 0.03번이라는 계산과 맞습니다.
 
 ### measure.py가 하는 일
 
@@ -149,10 +328,11 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 2. **k6 실행**. 그동안 1초마다 네 서비스 `/actuator/prometheus`와 Postgres(`pg_stat_activity`, `pg_stat_database`, `outbox_events`)를 읽습니다. 종결 대기가 끝날 때까지 계속 읽습니다.
 3. **종결 대기**: 이번 측정 충전(측정 회원 + `created_at ≥ k6 시작 − 5초`)이 모두 `COMPLETED`·`FAILED`·`REFUNDED`·`MANUAL_REVIEW`가 될 때까지 5초 간격.
 4. **지표** (아래 표).
-5. **출금 정합성** (mock-bank DB, 측정 계좌·같은 기간의 `SUCCEEDED` 거래):
+5. **출금 정합성** (mock-bank DB, 측정 계좌·같은 기간의 `SUCCEEDED` 거래). 측정 계좌는 회원별 (은행, 계좌번호) 쌍과 정확히 맞는 계좌입니다:
    - DEBIT 건수·합계 = `COMPLETED`+`REFUNDED` 충전 건수·합계
    - REFUND 건수·합계 = `REFUNDED` 충전 건수·합계
    - 측정 계좌 잔액 감소 = DEBIT 합계 − REFUND 합계
+   - 은행별로도 위 두 등식(DEBIT·REFUND)을 확인합니다. 거래의 은행은 계좌의 `bank_code`, 충전의 은행은 `charge_requests.bank_code`
 6. **대사**: 마지막 종결 후 10초가 넘게 지난 뒤 `POST /api/v1/admin/charges/reconciliations?from=<첫 created_at>&to=<지금 − 10초>`(`User-Role: MASTER`, 동기). 요약·소요 시간을 남기고, 어긋남·판정 보류가 있으면 결과 목록(최대 100건)을 붙입니다.
 
 ### 결과
@@ -172,13 +352,14 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 | `charges.accepted`, `statuses` | `charge_requests` | 실제 접수 건수(DB), 상태별 건수·금액 |
 | `charges.completionTps` | `charge_requests.created_at`, `charge_status_history` | 접수 건수 ÷ (첫 `created_at` ~ 마지막 종결 시각) |
 | `charges.completionLatencyMs` | `charge_status_history` | `COMPLETED` 기록 시각 − `created_at`의 P50·P95 |
+| `charges.byBank.<은행 코드>` | `charge_requests.bank_code` | 은행별 `accepted`(접수 건수), `statuses`(상태별 건수·금액), `completionLatencyMs`(P50·P95·`count`, 계산은 전체 값과 같음). 은행이 하나여도 남음 |
 | `services.<서비스>.<경로>.avgMs` | `http_server_requests_seconds` 합계·횟수 차이 | wallet 충전 접수, user I03, ledger 거래 등록, mock-bank 출금(·환불) 평균 처리 시간 |
 | `services.<서비스>.hikariPending` / `hikariActive` | `hikaricp_connections_*` | 커넥션 대기·사용 평균·최대 (wallet·ledger를 봄) |
-| `services.systemCpuPercent` | wallet `system_cpu_usage` | PC 전체 CPU |
+| `services.systemCpuPercent` | wallet `system_cpu_usage` | Docker 가상 머신 전체 CPU(컨테이너 CPU 한도 없음) |
 | `db.ledgerLockWaits` | `pg_stat_activity` (`ledger_app`, `wait_event_type='Lock'`) | 원장 잠금 대기 세션 수 |
 | `db.deadlocksDuringMeasure` | `pg_stat_database.deadlocks` 차이 | 측정 중 교착 수(DB 전체) |
 | `db.outboxPending` | `outbox_events.status='PENDING'` | Outbox 미발행 건수 평균·최대 |
-| `bankConsistency` | `mock_bank.bank_transactions`, `bank_accounts` | 위 세 등식과 위반 목록 |
+| `bankConsistency` | `mock_bank.bank_transactions`, `bank_accounts` | 위 세 등식과 위반 목록. `byBank.<은행 코드>`에 은행별 `debit`·`refund`·`expectedDebit`·`expectedRefund`(은행별 위반은 `violations`에 `은행 004: …`로 들어감) |
 | `reconciliation` | 대사 API | `summary`(status, targetCount, matchedCount, mismatchCount, unverifiableCount …), `elapsedSeconds`, 어긋남 목록 |
 | `fault` | 아래 표 | 장애(응답 유실) 지표. 기존 지표·실패 조건과 별개로 추가 |
 | `failures` | | 종료 코드 1의 이유 |
@@ -210,7 +391,7 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 - DB 표본: 수집 실패(`docker exec` 0이 아닌 종료 코드 포함, `db.error`), 수집이 끝나지 않음, 측정 구간 표본 0개
 - 출금 정합성 위반
 - 대사: 실행 실패(HTTP 200 아님), 응답 필드 누락, 대상 건수 < 측정 접수 건수, status ≠ `COMPLETED` 또는 어긋남·판정 보류 1건 이상
-- 장애 설정: 유실 카운터가 수집되지 않음(`lostResponses` = `null`, `--fault-rate`와 관계없음. Mock 은행을 `--mock-bank.fault.enabled=true`로 띄웠는지 확인), `--fault-rate` > 0인데 `lostResponses` = 0(Mock 은행 실행 인자 확인), `--fault-rate` = 0인데 `lostResponses` > 0(Mock 은행 유실 비율이 남아 있음)
+- 장애 설정: 유실 카운터가 수집되지 않음(`lostResponses` = `null`, `--fault-rate`와 관계없음. Mock 은행이 장애 주입을 켜고 떴는지 확인. compose는 `MOCK_BANK_FAULT_ENABLED=true`), `--fault-rate` > 0인데 `lostResponses` = 0(Mock 은행 실행 인자 확인), `--fault-rate` = 0인데 `lostResponses` > 0(Mock 은행 유실 비율이 남아 있음)
 
 k6 결과 파일이 없거나 JSON이 아니거나 필수 필드가 빠지면 지표를 만들지 않고 바로 멈춥니다(종료 코드 1). psql 조회 실패도 같습니다.
 
@@ -219,10 +400,97 @@ k6 결과 파일이 없거나 JSON이 아니거나 필수 필드가 빠지면 �
 - 측정 중에는 다른 충전 트래픽이 없어야 합니다. 대사 기간에는 그 시간대의 측정 외 충전도 포함됩니다.
 - 처리 중 충전이 남아 있으면 사전 확인에서 멈춥니다(복구 스케줄러 재실행이 섞임). 남은 건이 종결되거나 정리된 뒤 측정합니다.
 - 측정 계좌 잔액은 반복할수록 줄어듭니다(기본 1조 원이라 사실상 바닥나지 않음).
-- Postgres 컨테이너 이름·관리자 계정이 다르면 `PG_CONTAINER`(기본 `travelpay-local-postgres-1`), `POSTGRES_USER`(기본 `travelpay_admin`), `POSTGRES_DB`(기본 `travelpay`) 환경 변수로 바꿉니다. 사전 확인·지표·정합성은 psql이 필요하고, 1초 DB 표본만 실패하면 `db.error`로 남기고 계속합니다.
-- 서비스 주소가 다르면 `USER_URL`, `WALLET_URL`, `LEDGER_URL`, `MOCK_BANK_URL`(k6는 `BASE_URL`)로 바꿉니다.
+- Postgres 컨테이너 이름·관리자 계정은 `PG_CONTAINER`(기본 `travelpay-local-postgres-1`, 측정 환경은 `travelpay-charge-load-test-measure-postgres-1`), `POSTGRES_USER`(기본 `travelpay_admin`), `POSTGRES_DB`(기본 `travelpay`) 환경 변수로 바꿉니다. 사전 확인·지표·정합성은 psql이 필요하고, 1초 DB 표본만 실패하면 `db.error`로 남기고 계속합니다.
+- 업무 주소는 `USER_URL`, `WALLET_URL`, `LEDGER_URL`, `MOCK_BANK_URL`(k6는 `BASE_URL`, 기본 `http://wallet:8082`), health·지표 주소는 `USER_METRICS_URL`, `WALLET_METRICS_URL`, `LEDGER_METRICS_URL`, `MOCK_BANK_METRICS_URL`(지정하지 않으면 업무 주소와 같음)로 바꿉니다.
+
+## 측정 결과 (2026-11-10, 앱까지 Docker)
+
+### 조건
+
+- 앱 4개·측정 전용 Postgres·Kafka·Redis·k6를 같은 Docker 네트워크에서 실행 (이 문서 1절 구성)
+- Gateway 제외(wallet 직접 호출), 충전 1건 10,000원, 측정 회원 50명
+- 지갑 재생성(설정 변경) 후 예열 1회(결과 제외) → 같은 조건 3회 → **중앙값**
+- 2026-11-08 결과와 같은 코드로, 실행 환경만 바꿈. 조건 A·B는 옛 측정과 같은 설정이고, A'·B'는 한도를 재려고 넣는 속도와 batch-size를 올려 추가함
+
+### 결과 (중앙값)
+
+| 조건 | 동시성 | 넣은 속도 (건/초) | batch-size | 완료 처리량 (건/초) | 완료 지연 P50 / P95 (ms) | 접수 P95 (ms) | 판정 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A | 1 | 50 | 50 | 47.5 | 1,064 / 1,583 | 6.1 | 넣은 만큼 처리 (한도 아님) |
+| B | 3 | 100 | 200 | 95.8 | 776 / 1,024 | 5.4 | 넣은 만큼 처리 (한도 아님) |
+| **A'** | 1 | 150 | 200 | **79.6** | 9,137 / 19,618 | 4.8 | **한도.** 큐가 쌓임 |
+| **B'** | 3 | 300 | 500 | **203.6** | 5,218 / 8,626 | 5.9 | **한도.** 큐가 쌓임 |
+
+A·B는 완료 지연이 약 1초(Outbox 발행 주기)라 큐가 쌓이지 않았습니다. 처리량은 넣은 속도가 상한이라 처리 한도가 아닙니다. 동시성 1의 한도는 넣는 속도를 올리고 Outbox 발행 상한(배치 200 → 초당 200건)을 풀어 A'로 쟀습니다. 동시성 3의 한도는 B'로 쟀습니다(Outbox 발행 상한을 배치 500으로 풀고 예상 한도보다 빠르게 넣음).
+
+### 정합성
+
+본 측정 12회(충전 36,000건)와 예열·스모크 모두 모든 충전 `COMPLETED`, 202 외 응답 0, dropped 0, 출금 정합성 위반 0, 대사 어긋남 0·판정 보류 0. 대사 소요 시간: 1,000건 0.12초, 2,000건 0.17~0.2초, 3,000건 0.25~0.33초, 6,000건 0.61~0.76초.
+
+### 분석
+
+**같은 조건에서의 환경 비교**: 같은 코드·같은 설정에서 실행 환경만 바꾼 비교입니다.
+
+| 조건 | 동시성 | 넣은 속도 | batch-size | PC 환경 (2026-11-08) 완료 처리량 / 완료 지연 P50·P95 | Docker 환경 (2026-11-10) 완료 처리량 / 완료 지연 P50·P95 |
+| --- | --- | --- | --- | --- | --- |
+| 기준선 ↔ A | 1 | 50 | 50 | 21.0 (**한도**) / 14.2초 · 27.9초 | 47.5 (**넣은 만큼**) / 1.06초 · 1.58초 |
+| B ↔ B | 3 | 100 | 200 | 60.2 (**한도**) / 6.3초 · 11.8초 | 95.8 (**넣은 만큼**) / 0.78초 · 1.02초 |
+
+PC 환경에서는 두 조건 모두 처리 한도가 넣는 속도보다 낮아 큐가 쌓였고(완료 지연 수 초), Docker 환경에서는 넣은 만큼 처리해 큐가 쌓이지 않았습니다(완료 지연은 Outbox 발행 주기 약 1초). 두 처리량은 성격이 달라(한도와 넣은 속도) 나눠서 배수로 말할 수 없습니다. 처리 한도끼리의 비교는 아래 A'(동시성 1 한도)로 합니다.
+
+**한 건 시간 (동시성 1 한도 기준)**
+
+| | 2026-11-08 (앱은 PC) | 2026-11-10 (앱까지 Docker) | 변화 |
+| --- | --- | --- | --- |
+| 동시성 1 한도 | 21.0건/초 | **79.6건/초** | 약 3.8배 |
+| 한 건 시간 (1 ÷ 한도) | 약 48ms | **약 12.6ms** | −74% |
+| 은행 출금 | 6.4ms | 1.9ms | −70% |
+| 원장 거래 등록 | 8.4ms | 2.5ms | −70% |
+| 지갑 자체 (나머지) | 약 33ms | 약 8.2ms | −75% |
+| CPU 평균 | 10% (PC) | 7% (Docker 가상 머신) | |
+
+A'의 서비스 수치는 `a2-r2` 한 회차 값이고, 지갑 자체 시간은 평균끼리 빼서 구한 근사입니다.
+
+**왜 4분의 1이 됐나**: 코드 경로를 따라 세어 보면, 컨슈머가 충전 한 건을 처리하는 동안 Postgres와 Kafka를 블로킹으로 왕복하는 횟수는 약 25번입니다(트랜잭션 7개·SQL 10번·커밋 7번, 트랜잭션마다 격리 수준 조회 7번(Postgres 로그로 확인), 레코드마다 동기 오프셋 커밋 1번). 앱을 PC에 띄우면 이 왕복이 모두 Docker Desktop 포트 전달을 지나는데, 왕복 한 번에 약 1ms가 든다면 약 25ms로 지갑 자체 시간 감소폭(약 25ms)과 맞습니다. 은행·원장도 각자 DB를 오가므로 같은 이유로 약 70% 줄었습니다. 즉 2026-11-08의 한 건 시간은 **실행 환경 때문에 약 4배 부풀려져 있었습니다**. 코드나 설정을 바꿔 빨라진 것이 아닙니다.
+
+**충전 한 건의 SQL 실측 (pg_stat_statements)**: 위 왕복 수는 코드 경로 분석으로 센 값이라, 측정 DB의 pg_stat_statements로 실제 실행 횟수를 확인했습니다(동시성 1, 충전 1,000건, 지갑 계정 `wallet_app`이 보낸 문장 ÷ 1,000).
+
+| 문장 | 건당 실측 | 코드 분석 |
+| --- | --- | --- |
+| SELECT (충전 id 조회 4, 멱등 키 조회 1, 지갑 조회 1) | 6 | 6 |
+| INSERT (상태 이력 4, Outbox 1, 충전 1) | 6 | 6 |
+| UPDATE (충전 3, Outbox 1) | 4 | 4 |
+| `SHOW TRANSACTION ISOLATION LEVEL` | 9.16 | 9 (접수 2 + 컨슈머 7) |
+| 트랜잭션 시작 (`BEGIN READ ONLY` 6 + `BEGIN` 4) | 10.16 | 10 |
+
+소수점 아래는 측정 중 1초마다 도는 Outbox 발행기의 배경 쿼리입니다. 표에 없는 두 가지는 왕복 계산에서 뺐습니다: 외래 키 확인으로 Postgres 안에서 실행된 `SELECT … FOR KEY SHARE`(건당 5, `track=all`이라 내부 쿼리까지 잡힘)는 네트워크 왕복이 아니고, `BEGIN`은 드라이버가 첫 쿼리와 한 번에 보냅니다. `COMMIT`은 이 통계에 거의 잡히지 않아(원인 미확인) 트랜잭션 수로 대신 셌습니다.
+
+**남은 8.2ms**: Docker 안 왕복은 약 0.05ms라 25번이어도 약 1ms입니다. 나머지는 트랜잭션 처리, Feign 호출, 직렬화 같은 앱 자체 비용입니다. CPU 7%라 자원 부족이 아니라 한 스레드가 단계를 차례로 기다리는 구조의 한계는 그대로입니다.
+
+**동시성 1 → 3 (A' → B')**: 한도가 79.6 → 203.6건/초로 2.56배, 선형(3배)의 85%입니다. 스레드당 한 건 시간은 12.6 → 14.7ms로 2.1ms 늘었고, 은행 +0.3ms, 원장 +0.8ms, 지갑 자체 +1.1ms로 나뉩니다(`b2-r2` 한 회차). 원장 잠금 대기 평균 0.03, 원장 커넥션 대기 0, CPU 평균 12.9%로 특정 자원이 막히지 않았습니다. 같은 Postgres·Kafka·CPU를 나눠 쓰는 비용이 조금씩 붙은 것으로, 2026-11-08 환경(95% 선형)보다 효율이 낮은 건 한 건 시간이 짧아지면서 이 공유 비용의 비중이 커졌기 때문으로 봅니다(추정).
+
+**기본 설정에서 먼저 막히는 곳이 바뀜**: 동시성 1 컨슈머 한도(약 80건/초)가 Outbox 기본 발행 상한(1초 50건)보다 높아졌습니다. 이 환경에서는 기본 설정의 첫 병목이 컨슈머가 아니라 Outbox입니다(두 한도의 비교, 별도 측정은 하지 않음).
+
+### 한계
+
+- 노트북 한 대의 Docker 안에서 잰 값입니다. 서비스와 DB가 다른 서버에 있는 배포(EC2 2대 + RDS)는 왕복이 이보다 길어, 절대 수치는 배포보다 낙관적일 수 있습니다.
+- 동시성은 토픽 파티션 수(3)까지 쟀습니다. 2026-11-08에는 파티션을 10으로 늘려 원장 시스템 계정 경합을 확인했는데, 이번에는 동시성 3(초당 약 200건)에서 원장 잠금 대기 평균 0.03, 커넥션 대기 0으로 경합 징후가 없어 다시 재지 않았습니다. 경합이 실제로 병목이 되는 지점은 목표 처리량이 정해지면 배포와 같은 구성(서비스·DB 분리)에서 재야 의미가 있습니다. 노트북에서는 모든 서비스가 Postgres 하나와 디스크를 나눠 써서 원장 경합과 공유 자원 한계가 섞입니다.
+- 시간 분해는 평균끼리 더하고 뺀 근사입니다.
+
+### 개선 후보 (구현하지 않음)
+
+환경과 관계없이 배포에서도 서비스와 DB 사이 왕복은 있으므로, 왕복 횟수 자체가 개선 대상입니다.
+
+| 후보 | 건당 왕복 | 근거 | 판단 |
+| --- | --- | --- | --- |
+| 격리 수준 명시로 생기는 `SHOW TRANSACTION ISOLATION LEVEL` | 7번 | Postgres 로그로 발생 확인. 기본값이 이미 READ COMMITTED라 명시를 빼면 사라짐 | 변경은 작지만 모든 트랜잭션 설정에 걸쳐 있어 별도 작업 |
+| 단계마다 다시 읽는 조회 전용 트랜잭션 | 약 8번 | 코드 경로 분석 | 실행기 구조 변경 |
+| 레코드마다 동기 오프셋 커밋 | 1번 | `AckMode.RECORD`, 동기 커밋 기본값 | 배치 커밋이면 줄지만 재전달 범위가 넓어짐(실행기가 멱등이라 정합성은 안전) |
+| Outbox batch-size 기본값 | | 이 환경에서는 동시성 1로도 기본 상한(초당 50건)을 넘음 | 동시성을 올리지 않아도 검토 대상 |
 
 ## 측정 결과 (2026-11-08)
+
+> 이 결과는 앱을 PC에서 띄우고 k6만 컨테이너로 잰 **이전 환경**의 값입니다. 앱↔DB·Kafka 왕복이 포트 전달을 지났으므로, 지금 환경(앱까지 Docker)의 결과와 직접 비교하지 않습니다. 결과 안의 "PC CPU"는 당시 PC 전체 CPU입니다.
 
 ### 조건
 
@@ -276,7 +544,7 @@ A·B·C는 3회 중앙값이고, 기준선의 서비스 수치는 `c1-r1`, ①�
 | B | 60.2 | 컨슈머 세 스레드 | Outbox 대기 사라짐. 21 × 3 = 63의 95%로 거의 선형. 원장 거래 등록 시간은 A와 같음(9.2 → 8.8ms) | 동시성 10 |
 | C | 160.4 | 뚜렷한 단일 병목 없음 | 21 × 10 = 210의 76%로 효율 저하 시작. 완료 지연 P95 4.3초로 조금 밀림 | 측정 종료 |
 
-**기준선 한 건 48ms의 구성 (1 ÷ 21건/초)**: 은행 6.4ms(13%) + 원장 8.4ms(18%) + 지갑 자체 약 33ms(약 70%). CPU 10%, 커넥션 대기 0이라 자원 부족이 아니라 한 스레드가 단계를 차례로 기다리는 구조의 한계입니다. 지갑 자체 시간은 단계별 상태 전이 커밋, 이력 저장, Feign 왕복, 메시지마다 오프셋 커밋(`AckMode.RECORD`)으로 보이며, 어느 것이 큰지는 이 지표로 구분하지 못했습니다(추정).
+**기준선 한 건 48ms의 구성 (1 ÷ 21건/초)**: 은행 6.4ms(13%) + 원장 8.4ms(18%) + 지갑 자체 약 33ms(약 70%). CPU 10%, 커넥션 대기 0이라 자원 부족이 아니라 한 스레드가 단계를 차례로 기다리는 구조의 한계입니다. 지갑 자체 시간은 단계별 상태 전이 커밋, 이력 저장, Feign 왕복, 메시지마다 오프셋 커밋(`AckMode.RECORD`)으로 보이며, 어느 것이 큰지는 이 지표로 구분하지 못했습니다(추정). → [2026-11-10 측정](#측정-결과-2026-11-10-앱까지-docker)에서 이 시간의 대부분이 실행 환경(포트 전달)의 DB·Kafka 왕복이었음을 확인했습니다.
 
 **동시성 10의 효율 저하 (스레드당 한 건 48 → 약 62ms, +14.5ms)**: 원장 +5.9ms(약 40%), 지갑 자체 +약 7ms(약 절반), 은행 +1.8ms(약 12%). 평균끼리의 근사입니다. 원장 시스템 계정(`CHARGE_SOURCE`) 행 경합이 시작됐지만(잠금 대기 0 → 약 1), 원장 커넥션 풀은 차지 않았고(대기 0, 사용 중 최대 6/10) PC CPU도 31%였습니다.
 

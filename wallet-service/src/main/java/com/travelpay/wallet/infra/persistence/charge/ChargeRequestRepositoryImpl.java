@@ -92,11 +92,22 @@ public class ChargeRequestRepositoryImpl implements ChargeRequestRepository {
     }
 
     @Override
-    public List<ChargeRecoveryTarget> findRecoveryTargets(int limit) {
-        return jpaRepository.findRecoveryTargets(limit).stream()
+    public List<ChargeRecoveryTarget> findRecoveryTargets(Collection<ChargeStatus> statuses,
+                                                          Collection<String> excludedBankCodes, int limit) {
+        List<String> names = statuses.stream().map(ChargeStatus::name).toList();
+        // 빈 목록을 not in ()으로 보내면 SQL 오류라 쿼리를 나눈다
+        List<ChargeRecoveryRow> rows = excludedBankCodes.isEmpty()
+                ? jpaRepository.findRecoveryTargets(names, limit)
+                : jpaRepository.findRecoveryTargetsExcludingBanks(names, List.copyOf(excludedBankCodes), limit);
+        return rows.stream()
                 .map(row -> new ChargeRecoveryTarget(row.getId(), ChargeStatus.valueOf(row.getStatus()),
-                        row.getUpdatedAt()))
+                        row.getUpdatedAt(), row.getBankCode()))
                 .toList();
+    }
+
+    @Override
+    public long countByStatusInAndCreatedBefore(Collection<ChargeStatus> statuses, Instant createdBefore) {
+        return jpaRepository.countByStatusInAndCreatedAtBefore(statuses, createdBefore);
     }
 
     @Override

@@ -20,7 +20,7 @@ Gateway는 브라우저 요청을 받아 User에 세션 검증을 요청하고, 
 | `PublicEndpoints`·`SessionAuthenticationFilter` | 공개 요청 분류와 세션 확인 결과에 따른 전달·거절 |
 | `SessionVerificationClient` | 필요한 헤더만 전달하고 검증 응답을 엄격히 해석 |
 | `SessionVerificationConfiguration`·`SessionVerificationProperties` | 내부 HTTP 클라이언트와 관측·제한 시간 설정 |
-| `GatewayErrorHandler` | 공통 JSON·HTTP 상태·Allow·no-store 처리 |
+| `GatewayErrorHandler` | 공통 JSON·HTTP 상태·Allow·no-store 처리, 서비스 연결 실패 503 |
 | `GatewayCorsConfiguration` | 허용 출처 검증과 프레임워크 CORS 거절 응답 연결 |
 
 ## 주소와 포트
@@ -32,6 +32,8 @@ Gateway는 브라우저 요청을 받아 User에 세션 검증을 요청하고, 
 | Gateway 관리 | `0.0.0.0:18080`에서 수신, PC에서는 `localhost:18080`로 접근 | 내부망의 `18080` |
 
 프런트의 Vercel 배포 여부와 백엔드의 EC2·ECS 선택은 API 코드와 분리합니다. 현재 실제 DNS·인증서·AWS 리소스는 연결하지 않았습니다.
+
+Swagger UI는 없습니다(Gateway에는 자체 업무 API가 없음). API 문서는 각 서비스의 `/swagger-ui.html`에서 봅니다: User `8081`, Wallet `8082`, Payment `8083`, Exchange `8084`.
 
 ## 로컬 실행
 
@@ -82,7 +84,7 @@ User 보호 API의 중복 세션 확인 호출을 줄이는 구조는 후속 검
 | `/api/v1/payments/**`, `/api/v1/transfers/**` | Payment | 제거 |
 | 환율·한도·견적·환전 경로 | Exchange | 제거 |
 
-환전 경로는 `/api/v1/exchange-rates/**`, `/api/v1/exchange-limits/**`, `/api/v1/exchange-quotes/**`, `/api/v1/exchanges/**`입니다. 정확한 매핑은 실행 시 사용하는 Gateway 설정의 `routes` 목록을 기준으로 합니다. `/internal/**`, `/actuator/**`는 외부 API 라우트에 없습니다.
+환전 경로는 `/api/v1/exchange-rates/**`, `/api/v1/exchange-limits/**`, `/api/v1/exchange-quotes/**`, `/api/v1/exchanges/**`, `/api/v1/exchange-reservations/**`입니다. 정확한 매핑은 실행 시 사용하는 Gateway 설정의 `routes` 목록을 기준으로 합니다. `/internal/**`, `/actuator/**`는 외부 API 라우트에 없습니다.
 
 로그인 없이 통과하는 조합은 다음과 같습니다. 공개 API라도 회원가입·로그인·로그아웃의 CSRF 및 세션 확인은 User가 담당합니다.
 
@@ -148,6 +150,8 @@ const loginResponse = await fetch(`${API_BASE}/api/v1/auth/login`, {
 
 User의 검증 거절 401·403·409는 상태와 본문을 전달하고, 연결 실패·시간 초과·해석할 수 없는 검증 응답 등은 503입니다. 두 오류 경로 모두 `Cache-Control: no-store`를 적용하고, 일시 장애만으로 SESSION 쿠키를 삭제하지 않습니다. 지원하지 않는 실제 메서드는 405와 Gateway의 `Allow` 목록으로 거절합니다. 업무 API 자체의 메서드·권한 판단은 해당 서비스가 맡습니다.
 
+다른 서비스로 넘기는 요청의 연결 대기는 2초(`spring.cloud.gateway.server.webflux.httpclient.connect-timeout`, 로컬·배포 같은 값)입니다. 기본값 30초면 Eureka 목록에 남은 종료된 인스턴스로 간 요청이 30초씩 묶입니다. 연결을 맺지 못하면(연결 거부·연결 시간 초과·경로 없음) 503 `COMMON_SERVICE_UNAVAILABLE`로 응답합니다. 이 경우는 요청이 서비스에 닿기 전의 실패입니다. 다만 각 서비스도 DB 시간 초과처럼 요청을 받은 뒤의 장애에 같은 코드를 쓰므로, 응답만으로는 다시 보내도 안전한지 알 수 없습니다. 돈이 움직이는 요청은 같은 `Idempotency-Key`로만 다시 보냅니다. 연결된 뒤의 응답 대기는 서비스마다 처리 시간이 달라 제한하지 않습니다.
+
 Gateway 수신 기본 한도는 8KiB이고, User는 로컬·배포 모두 16KiB로 두어 Gateway가 붙이는 내부 헤더의 여유를 확보했습니다. 테스트용 큰 쿠키는 검증 입력이며 실제 앱이 추가 쿠키를 발급하는 구조가 아닙니다.
 
 `Connection`의 hop-by-hop 제거 목록에서도 내부 헤더 이름을 정리합니다. 그래야 Gateway가 새로 만든 헤더가 뒤의 전송 필터에서 다시 삭제되지 않습니다. 세션 확인 응답의 역할값도 엄격히 해석해 숫자가 enum 순서로 바뀌어 인증 결과로 받아들여지지 않게 합니다.
@@ -179,6 +183,7 @@ Gateway는 외부 W3C·B3 부모 trace를 추출하지 않고 새 traceId를 시
 | API DNS | Cloudflare의 `api` 레코드를 ALB DNS 이름에 연결 |
 | TLS | 프런트·API HTTPS, Cloudflare Full (strict), ALB에 API 호스트와 일치하는 인증서 |
 | 공개 진입 | ALB 443은 Cloudflare에서, Gateway API 포트는 ALB에서 접근하도록 보안 그룹 제한 |
+| 원본 인증 | Cloudflare가 붙이는 `Origin-Auth` 비밀 헤더를 ALB 규칙이 확인. Gateway는 이 헤더를 업무 서비스로 넘기기 전에 지움 |
 | IP 신뢰 | `GATEWAY_CLOUDFLARE_PROXY_ADDRESSES`에 실제 ALB 연결 서브넷 CIDR 지정 |
 | 관리 포트 | 기본 18080, ALB 헬스체크·Prometheus가 접근하는 내부망으로 제한 |
 | 업무 앱 | User·Wallet 등은 허용된 내부 호출자에서만 접근, 외부 포트 공개 금지 |
