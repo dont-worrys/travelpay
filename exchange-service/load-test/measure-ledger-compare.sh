@@ -43,11 +43,22 @@ for rep in $(seq 1 "$REPS"); do
             echo "    실패: results/${label}.log 마지막 줄 → $(tail -1 "results/${label}.log")" | tee -a "$progress"
             exit 1
         fi
-        # 한 줄 요약: 신청 p50·p95, 상태, 환율 조회 p95·p99, 요청 스레드
-        orders=$(tr -d '\n ' <"results/${label}.json" | grep -o '"orders":{"requests":[0-9]*,"latencyMs":{[^}]*}' | grep -o '"p50":[0-9.]*\|"p95":[0-9.]*' | tr '\n' ' ')
-        rates=$(tr -d '\n ' <"results/${label}.json" | grep -o '"rates":{"latencyMs":{[^}]*}' | grep -o '"p95":[0-9.]*\|"p99":[0-9.]*' | tr '\n' ' ')
-        threads=$(tr -d '\n ' <"results/${label}-server.json" | grep -o '"tomcatThreads":{[^}]*}')
-        echo "    신청 ${orders}/ 환율 조회 ${rates}/ ${threads}" | tee -a "$progress"
+        # 한 줄 요약. 스크립트마다 결과 모양이 달라 없는 항목은 비워 둔다(grep이 못 찾아도 멈추지 않게 || true)
+        #   신청 측정(exchange-order.js): 신청 p50·p95, 환율 조회 p95·p99, 요청 스레드
+        #   예약 체결 영향(quote-freshness.js): 견적 성공·환율 오래됨 503, 환율 수집 가장 긴 틈, 예약 상태
+        k6=$(tr -d '\n ' <"results/${label}.json")
+        server=$(tr -d '\n ' <"results/${label}-server.json")
+        if [[ "$k6" == *'"orders":'* ]]; then
+            orders=$(echo "$k6" | grep -o '"orders":{"requests":[0-9]*,"latencyMs":{[^}]*}' | grep -o '"p50":[0-9.]*\|"p95":[0-9.]*' | tr '\n' ' ' || true)
+            rates=$(echo "$k6" | grep -o '"rates":{"latencyMs":{[^}]*}' | grep -o '"p95":[0-9.]*\|"p99":[0-9.]*' | tr '\n' ' ' || true)
+            threads=$(echo "$server" | grep -o '"tomcatThreads":{[^}]*}' || true)
+            echo "    신청 ${orders}/ 환율 조회 ${rates}/ ${threads}" | tee -a "$progress"
+        else
+            quotes=$(echo "$k6" | grep -o '"ok":[0-9]*,"rateUnavailable":[0-9]*' || true)
+            collection=$(echo "$server" | grep -o '"rateCollection":{[^}]*}' || true)
+            reservations=$(echo "$server" | grep -o '"reservations":{[^}]*}' || true)
+            echo "    견적 ${quotes} / ${collection} / ${reservations}" | tee -a "$progress"
+        fi
     done
 done
 echo "# $(date '+%F %T') 측정 끝" | tee -a "$progress"
