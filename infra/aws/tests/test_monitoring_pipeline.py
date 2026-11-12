@@ -114,6 +114,8 @@ class MonitoringPipelineTest(unittest.TestCase):
     def test_image_users_match_the_prepared_folder_owners(self):
         # prepare-monitoring.py가 이 uid로 폴더를 만들어야 각 컨테이너가 자기 데이터 폴더에 씁니다.
         for name, (uid, _, _) in preparation.MONITORING_DIRECTORIES.items():
+            # image inspect는 이미지를 받지 않습니다. 앞에서 실행하지 않은 Prometheus·Grafana는 새 CI 실행기에 없으므로 먼저 받습니다.
+            docker("pull", "--quiet", IMAGES[name])
             user = docker("image", "inspect", "-f", "{{.Config.User}}", IMAGES[name]).strip().split(":")[0]
             if user and not user.isdigit():
                 user = docker("run", "--rm", "--network", "none", "--entrypoint", "id", IMAGES[name], "-u", user).strip()

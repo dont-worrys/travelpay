@@ -113,7 +113,7 @@ run "github_trust_requires_project_environment_and_sts_audience" {
       jsondecode(aws_iam_role.github_deploy.assume_role_policy).Statement[0].Action == ["sts:AssumeRoleWithWebIdentity"] &&
       jsondecode(aws_iam_role.github_deploy.assume_role_policy).Statement[0].Condition.StringEquals == {
         "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-        "token.actions.githubusercontent.com:sub" = "repo:dont-worrys/travelpay:environment:production"
+        "token.actions.githubusercontent.com:sub" = "repo:dont-worrys@348131411/travelpay@1433947730:environment:production"
       }
     )
     error_message = "GitHub 신뢰는 해당 저장소의 production 환경과 STS audience로 제한해야 합니다."
@@ -157,6 +157,17 @@ run "reject_wildcard_repository" {
   }
 
   expect_failures = [var.github_repository]
+}
+
+run "reject_non_numeric_github_ids" {
+  command = plan
+
+  variables {
+    github_owner_id      = "dont-worrys"
+    github_repository_id = "*"
+  }
+
+  expect_failures = [var.github_owner_id, var.github_repository_id]
 }
 
 run "reject_wildcard_environment" {
@@ -244,5 +255,25 @@ run "enabled_deployment_cannot_register_privileged_tasks" {
       try(statement.Condition.Bool["ecs:privileged"], "") == "true"
     ]) == 1
     error_message = "배포 역할은 privileged 컨테이너가 있는 Task Definition을 등록할 수 없어야 합니다."
+  }
+}
+
+run "enabled_deployment_reads_image_tags_only_in_application_repositories" {
+  command = apply
+
+  variables {
+    enable_github_deployment = true
+  }
+
+  # CD는 실행 중 이미지의 소스 커밋 태그와 이미 올린 태그를 조회합니다. 다른 저장소의 이미지는 볼 수 없어야 합니다.
+  assert {
+    condition = [
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      toset(statement.Resource) if contains(statement.Action, "ecr:DescribeImages")
+      ] == [toset([
+        for name in ["gateway", "eureka-server", "user-service", "wallet-service", "payment-service", "exchange-service", "ledger-service", "mock-bank"] :
+        "arn:aws:ecr:ap-northeast-2:123456789012:repository/travelpay/${name}"
+    ])]
+    error_message = "배포 역할의 이미지 조회는 8개 앱 저장소로 제한해야 합니다."
   }
 }
