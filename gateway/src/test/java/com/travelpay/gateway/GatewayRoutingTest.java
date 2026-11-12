@@ -110,6 +110,20 @@ class GatewayRoutingTest {
         assertEquals(verification.header("Request-Id"), arrived.header("Request-Id"));
     }
 
+    @Test
+    void theOriginSecretCloudflareAddsReachesNoService() {
+        client().get().uri("/api/v1/wallets/me")
+                .header("Cookie", "SESSION=abc").header("Origin-Auth", "origin-secret")
+                .exchange().expectStatus().isOk();
+        client().get().uri("/api/v1/terms")
+                .header("Origin-Auth", "origin-secret")
+                .exchange().expectStatus().isOk();
+
+        assertTrue(USER.received(SESSION_VERIFICATION).getFirst().header("Origin-Auth").isEmpty());
+        assertTrue(WALLET.received("/api/v1/wallets/me").getFirst().header("Origin-Auth").isEmpty());
+        assertTrue(USER.received("/api/v1/terms").getFirst().header("Origin-Auth").isEmpty());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "close, User-Id, User-Role, Request-Id, Client-Ip",

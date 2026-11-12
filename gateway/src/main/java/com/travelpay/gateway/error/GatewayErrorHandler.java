@@ -1,10 +1,13 @@
 package com.travelpay.gateway.error;
 
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Set;
 
 import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.error.ErrorResponse;
 import com.travelpay.common.response.ApiResponse;
 import org.slf4j.Logger;
@@ -63,6 +66,13 @@ public class GatewayErrorHandler implements WebExceptionHandler {
             if (responseStatus != null) {
                 status = responseStatus.code();
                 error = ErrorResponse.fromHttpStatus(status.value());
+                break;
+            }
+            // 다른 서비스와 연결을 맺지 못한 실패(거부·연결 시간 초과·경로 없음)는 요청을 보내기 전이라 다시 시도해도 되는
+            // 503입니다. Netty의 연결 시간 초과도 ConnectException이며, 보낸 뒤 응답이 늦은 경우(504)와 구분됩니다.
+            if (current instanceof ConnectException || current instanceof NoRouteToHostException) {
+                status = HttpStatusCode.valueOf(CommonErrorCode.SERVICE_UNAVAILABLE.getStatus());
+                error = ErrorResponse.of(CommonErrorCode.SERVICE_UNAVAILABLE);
                 break;
             }
         }

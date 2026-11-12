@@ -1,10 +1,13 @@
 package com.travelpay.gateway.error;
 
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
 import java.time.Duration;
 import java.util.Set;
 
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.error.CommonErrorCode;
+import io.netty.channel.ConnectTimeoutException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -93,6 +96,65 @@ class GatewayErrorHandlerTest {
         assertEquals(HttpStatus.INTERNAL_SERVER_ERROR, exchange.getResponse().getStatusCode());
         assertEquals("COMMON_INTERNAL_SERVER_ERROR", errorBody(exchange).get("code").stringValue());
         assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
+    }
+
+    @Test
+    void connectTimeoutToAServiceIsA503WithoutTheAddress() {
+        var exchange = exchange();
+
+        handler.handle(exchange, new ConnectTimeoutException("connection timed out after 2000 ms: /10.20.10.5:8080"))
+                .block(Duration.ofSeconds(2));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("10.20.10.5"));
+    }
+
+    @Test
+    void refusedConnectionToAServiceIsA503() {
+        var exchange = exchange();
+
+        handler.handle(exchange, new ConnectException("Connection refused: /10.20.10.5:8080"))
+                .block(Duration.ofSeconds(2));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(exchange).get("code").stringValue());
+    }
+
+    @Test
+    void unreachableServiceHostIsA503() {
+        var exchange = exchange();
+
+        handler.handle(exchange, new NoRouteToHostException("No route to host: /10.20.10.5:8080"))
+                .block(Duration.ofSeconds(2));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(exchange).get("code").stringValue());
+    }
+
+    @Test
+    void wrappedConnectionFailureIsA503() {
+        var exchange = exchange();
+        var failure = new IllegalStateException("DO_NOT_EXPOSE_WRAPPER",
+                new ConnectTimeoutException("connection timed out after 2000 ms: /10.20.10.5:8080"));
+
+        handler.handle(exchange, failure).block(Duration.ofSeconds(2));
+
+        assertEquals(HttpStatus.SERVICE_UNAVAILABLE, exchange.getResponse().getStatusCode());
+        assertEquals("COMMON_SERVICE_UNAVAILABLE", errorBody(exchange).get("code").stringValue());
+        assertFalse(errorBody(exchange).toString().contains("DO_NOT_EXPOSE"));
+    }
+
+    @Test
+    void explicitOuterStatusTakesPrecedenceOverAConnectionFailureCause() {
+        var exchange = exchange();
+        var failure = new ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "DO_NOT_EXPOSE_REASON",
+                new ConnectTimeoutException("connection timed out after 2000 ms: /10.20.10.5:8080"));
+
+        handler.handle(exchange, failure).block(Duration.ofSeconds(2));
+
+        assertEquals(HttpStatus.GATEWAY_TIMEOUT, exchange.getResponse().getStatusCode());
+        assertEquals("COMMON_GATEWAY_TIMEOUT", errorBody(exchange).get("code").stringValue());
     }
 
     @Test

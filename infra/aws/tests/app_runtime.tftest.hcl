@@ -462,6 +462,16 @@ run "runtime_contract_matches_application_configs" {
     error_message = "실행 계약의 서비스 이름·업무 포트·관리 포트가 각 서비스의 application-prod.yml과 같아야 합니다."
   }
 
+  # 운영 DB 계정 이름은 로컬 예시와 같게 둡니다. 이름이 갈라지면 운영 계정을 찾거나 권한을 확인할 때 헷갈립니다
+  # (2026-11-12 mock-bank 계정이 로컬 mock_bank_app·운영 bank_app으로 갈라진 것을 발견해 맞춤).
+  assert {
+    condition = alltrue([
+      for key, service in local.application_services :
+      service.db_username == null || try(regex("(?m)^${local.database_env_prefixes[key]}_USERNAME=([a-z0-9_]+)$", file("${path.module}/../../.env.example"))[0], null) == service.db_username
+    ])
+    error_message = "실행 계약의 DB 계정 이름은 .env.example의 로컬 계정 이름과 같아야 합니다."
+  }
+
   # 운영 Task는 application-prod.yml만 읽고 기본값 없는 ${이름}을 환경 변수에서 찾습니다. 빠지면 서비스가 시작하지 못합니다.
   assert {
     condition = alltrue(flatten([

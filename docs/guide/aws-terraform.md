@@ -2,7 +2,7 @@
 
 Terraform 코드는 `infra/aws/`에서 관리합니다. Spring Boot Run과 별개이며 실제 리소스 생성은 Terraform의 `apply`로 실행합니다.
 
-**State S3와 네트워크·SG에 이어 IAM·SSM·OIDC, ECS 실행 기반, RDS·Data EC2·Redis·Kafka의 실제 적용과 기동 검증을 완료**했습니다. 앱 Task·이미지·운영 YAML 정교화, ALB·ACM과 중앙 모니터링 배치는 후속 단계입니다.
+**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3)의 실제 적용과 검증을 완료**했습니다. ECS Service와 첫 기동, CD, Cloudflare API 레코드 전환은 후속 단계(PR4)입니다.
 
 설계·구현 기준은 [Terraform 설계·구현 원칙](https://app.notion.com/p/413530b4fe5980cf9edbc37ec93b957e)에 모으고, 이 문서는 인프라 담당자의 실행·이전 절차만 다룹니다.
 
@@ -26,7 +26,7 @@ infra/aws/
 ├── .terraform-version       # Terraform 1.17.1
 ├── versions.tf              # AWS Provider 6.72.0, S3 Backend 선언
 ├── providers.tf             # 서울 리전·허용 계정·공통 태그
-├── variables.tf             # 계정·CIDR·AZ 검증, DB 초기화 접속 옵션
+├── variables.tf             # 계정·CIDR·AZ 검증, 단계별 활성화·이미지 digest·경보 이메일 입력
 ├── network.tf               # VPC·서브넷·IGW·NAT·라우팅
 ├── security.tf              # 역할별 SG·통신 규칙·규칙 소유권
 ├── runtime-contract.tf      # 서비스 이름·DB 계정·Secret ARN 공통 계약
@@ -37,10 +37,13 @@ infra/aws/
 ├── data-ec2.tf / private-dns.tf # Data EC2·별도 EBS·공유 사설 DNS
 ├── data-config.tf           # Data 설정 묶음의 S3 전달·SSM 적용
 ├── registry.tf              # 앱 이미지 저장소(ECR)·앱 로그 그룹
-├── public-ingress.tf        # 공개 API 인증서(ACM)
+├── task-definitions.tf      # 서비스 8개 Task 정의(이미지 digest·자원·비밀값·헬스 체크)
+├── public-ingress.tf        # 공개 API 인증서(ACM)·ALB·HTTPS 리스너·Gateway Target Group
+├── alarms.tf                # SNS 이메일·CloudWatch 경보
+├── monitoring.tf            # 모니터링 설정 묶음·앱 호스트 수집기·CloudWatch 대시보드
 ├── host-observability.tf    # 호스트 메모리·디스크·초기화 로그
-├── templates/               # EC2 기동·Data Compose·systemd 설정
-├── scripts/                 # 적용 순서·비밀값 준비·디스크·DB 초기화 도구
+├── templates/               # EC2 기동·Data·모니터링 Compose·systemd·monitoring/ 수집 설정
+├── scripts/                 # 설정 묶음 적용·비밀값 준비·이미지 게시·디스크·DB 초기화 도구
 ├── outputs.tf               # 식별자·실행 계약 출력, 비밀값 제외
 ├── .terraform.lock.hcl      # Provider 버전·패키지 체크섬
 ├── tests/                   # Terraform 모의 검증·Python 핵심 동작 검사
@@ -210,7 +213,7 @@ VPC의 원래 Main Route Table도 local만 유지합니다. Public 여부는 IGW
 
 ## SG 동작
 
-`security.tf`는 앱 8개와 ALB·App 호스트·Data·RDS·모니터링·로그 수집기의 **14개 역할**을 분리합니다. 현재 운영 설정·호출 코드에 필요한 기본 TCP 연결 41개를 하나의 맵에 정의하고, 연결마다 출발 SG의 송신과 도착 SG의 수신 규칙을 생성합니다. 응답 트래픽은 SG의 상태 추적이 허용하므로 역방향 신규 연결을 추가하지 않습니다.
+`security.tf`는 앱 8개와 ALB·App 호스트·Data·RDS·모니터링·로그 수집기의 **14개 역할**을 분리합니다. 현재 운영 설정·호출 코드에 필요한 기본 TCP 연결 38개를 하나의 맵에 정의하고, 연결마다 출발 SG의 송신과 도착 SG의 수신 규칙을 생성합니다. 응답 트래픽은 SG의 상태 추적이 허용하므로 역방향 신규 연결을 추가하지 않습니다.
 
 | 경계 | 허용 범위 |
 |---|---|
@@ -252,6 +255,7 @@ python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profi
 
 - Wallet 계좌번호 키(무작위 32바이트의 Base64)는 `--apply --create-wallet-key`를 줄 때만 만듭니다. 데이터가 생긴 뒤 바꾸거나, 지워진 뒤 새로 만들면 저장된 계좌번호를 풀 수 없으므로 Wallet 데이터가 생기기 전 처음 한 번만 씁니다.
 - 수출입은행에서 발급받은 환율 API 키는 `--apply --external`을 줄 때만 입력받습니다. 입력을 숨길 수 있는 터미널에서 직접 실행해야 하며, 파이프 입력처럼 입력이 화면에 보일 수 있으면 거절합니다. 키를 명령 인자·파일·채팅에 남기지 않습니다.
+- DB 앱 계정 암호 6개는 `--apply --rotate-database-passwords`를 줄 때만 새 임의 값으로 바꿉니다. SSM 값만 바뀌므로 아래 DB 작업 창에서 초기화 스크립트를 다시 실행해야 DB에 반영되고, 그 전에 시작한 Task는 DB 로그인에 실패합니다. 새 값은 출력하지 않으며 사람이 알 필요가 없습니다. Task는 시작할 때, 초기화 스크립트는 실행할 때 SSM에서 읽습니다.
 
 ```bash
 terraform -chdir=infra/aws apply stage-4.tfplan
@@ -265,7 +269,63 @@ DB 계정 초기화는 별도 작업입니다. `enable_database_bootstrap_access
 sudo python3 /opt/travelpay/data/bootstrap-database.py
 ```
 
+초기화 스크립트는 실행할 때마다 SSM의 현재 암호로 앱 계정 암호를 다시 설정하고, 끝에 계정 6개가 각자 SSM 암호로 로그인해 자기 스키마를 쓰는지 확인합니다. 이름을 바꾸기 전에 쓰던 계정(`RETIRED_ROLES`, 현재 `bank_app`)은 새 계정이 스키마를 넘겨받은 뒤 같은 트랜잭션에서 지웁니다. 옛 계정에 테이블 같은 객체가 남아 있으면 데이터를 지우지 않고 전체를 되돌립니다. 실패하면 psql의 오류 줄을 보여 주되, 실행한 문장과 SCRAM 값은 빼고 보여 줍니다.
+
+`--reset-statement-stats`를 붙이면 끝에 `pg_stat_statements` 통계를 비웁니다.
+- 통계 수집은 미리 불러온 라이브러리가 하지만, 비우는 함수는 확장을 만들어야 생깁니다. 그래서 확장이 없으면 먼저 만듭니다(통계 조회·비우기 함수만 추가).
+- RDS 관리자 계정이 이 확장을 만들거나 함수를 실행할 수 있는지는 AWS 문서로 확인하지 못했지만, 2026-11-12 실제 RDS에서 성공했습니다. 거절되면 원인을 오류로 보여 줍니다.
+- 이 단계가 실패해도 암호는 이미 바뀐 뒤라, 통계와 백업에 남은 옛 평문 암호로는 로그인할 수 없습니다.
+
+PR2 때 평문으로 보낸 DB 암호를 교체하는 작업 창은 아래 순서를 지킵니다. 교체보다 초기화를 먼저 하면 옛 암호가 그대로 유효한 채 통계만 지워집니다.
+
+1. `enable_database_bootstrap_access=true`로 plan을 만들어 저장하고 검토합니다.
+2. 그 plan으로 `prepare-parameters.py <plan> --profile <프로필> --account <계정 ID> --apply --rotate-database-passwords`를 실행하고, DB 암호 6개가 모두 `rotated`로 출력되는지 확인합니다. 이 도구는 plan에서 비밀값 목록만 읽습니다.
+3. 저장한 plan을 적용합니다. 새 설정 묶음(초기화 스크립트·계정 이름)도 이때 Data 호스트에 반영됩니다.
+4. Data 호스트에서 초기화 스크립트를 `--reset-statement-stats`와 함께 실행하고, 계정 6개 로그인 확인 문구를 봅니다.
+5. 옵션을 `false`로 되돌려 plan/apply하고, Data → RDS 연결과 DB 암호 조회가 거절되는지 확인합니다.
+
+2와 4 사이에는 SSM 값과 DB 암호가 다르므로, 그동안 앱 Task를 시작하지 않습니다(첫 기동 전에 하는 이유).
+
+```bash
+sudo python3 /opt/travelpay/data/bootstrap-database.py --reset-statement-stats
+```
+
 초기화 성공과 앱 계정의 자기 스키마 접근·타 스키마 차단을 확인한 뒤 옵션을 `false`로 되돌려 새 plan/apply합니다. 공용 namespace는 Kafka 주소 때문에 먼저 만들며, 후속 Eureka·Mock Bank도 같은 `travelpay.internal`을 재사용합니다.
+
+초기화 명령은 반드시 `aws ssm start-session`으로 접속한 그 창 안(Data 호스트)에서 실행합니다. 다른 터미널에서 실행하면 운영자 PC에서 실행되어 아무것도 바뀌지 않습니다.
+
+**운영 DB 직접 접속.** RDS는 사설망에만 있고 5432는 앱 Task의 SG에서만 받으므로, 운영자는 위 작업 창을 연 동안에만 Data 호스트를 거쳐 접속합니다. 암호는 외우거나 적어 두지 않고 쓸 때마다 SSM에서 꺼냅니다.
+
+| 서비스 | 스키마 | DB 계정 | 암호(SSM) |
+|---|---|---|---|
+| user | `user_service` | `user_app` | `/travelpay/production/USER_DB_PASSWORD` |
+| wallet | `wallet_service` | `wallet_app` | `/travelpay/production/WALLET_DB_PASSWORD` |
+| payment | `payment_service` | `payment_app` | `/travelpay/production/PAYMENT_DB_PASSWORD` |
+| exchange | `exchange_service` | `exchange_app` | `/travelpay/production/EXCHANGE_DB_PASSWORD` |
+| ledger | `ledger_service` | `ledger_app` | `/travelpay/production/LEDGER_DB_PASSWORD` |
+| mock-bank | `mock_bank` | `mock_bank_app` | `/travelpay/production/MOCK_BANK_DB_PASSWORD` |
+
+1. `enable_database_bootstrap_access=true`로 plan을 만들어 검토한 뒤 적용합니다.
+2. `terraform -chdir=infra/aws output data_runtime`에서 `instance_id`와 `database_host`를 확인합니다.
+3. 터널을 엽니다(접속하는 동안 켜 둠). Windows PowerShell은 줄 바꿈 기호 `\` 대신 백틱(`` ` ``)을 씁니다.
+
+   ```bash
+   aws ssm start-session --profile <프로필> --region ap-northeast-2 --target <instance_id> \
+     --document-name AWS-StartPortForwardingSessionToRemoteHost \
+     --parameters "host=<database_host>,portNumber=5432,localPortNumber=15432"
+   ```
+
+4. 다른 창에서 암호를 클립보드로 꺼냅니다(Linux Wayland `| wl-copy`, Windows `| Set-Clipboard`).
+
+   ```bash
+   aws ssm get-parameter --profile <프로필> --region ap-northeast-2 --name /travelpay/production/USER_DB_PASSWORD \
+     --with-decryption --query Parameter.Value --output text | wl-copy
+   ```
+
+5. DB 도구에서 `localhost:15432`, DB `travelpay`, 표의 계정, SSL `require`로 접속합니다. 터널은 주소가 `localhost`라 인증서 이름 검사(`verify-full`)는 맞지 않습니다.
+6. 끝나면 터널을 닫고 옵션을 `false`로 되돌려 plan/apply합니다.
+
+관리 작업에만 RDS 관리자 계정을 씁니다. 암호는 Secrets Manager(`master_secret_arn`)에 있고 RDS가 관리하므로 쓸 때마다 꺼냅니다. 이 경로를 쓸 수 있는 AWS 자격 증명은 인프라 관리자 프로필뿐이며, 팀원에게 열려면 포트 포워딩과 자기 서비스 암호 하나만 허용하는 별도 IAM 권한을 만들어야 합니다.
 
 `data.travelpay.internal`은 Cloud Map의 서비스·인스턴스 등록으로 생성합니다. Cloud Map 소유 영역에 Route 53 레코드를 직접 쓰는 방식은 AWS에서 거절됩니다. RDS는 비밀번호 DDL이 오류의 문맥에 남지 않도록 `log_statement=none`, `log_min_error_statement=panic`, `log_error_verbosity=terse`를 사용합니다. 오류의 상세·문맥 대신 기본 오류와 애플리케이션의 안전한 진단 정보를 확인합니다.
 
@@ -405,8 +465,9 @@ Task 정의는 `SPRING_CONFIG_NAME=application-prod`로 운영 파일만 읽습�
 | 항목 | 판단 |
 |---|---|
 | Ledger DB 커넥션 대기 | Ledger의 개발 파일과 wallet 운영 파일에는 획득 대기 2초·검증 1초가 있습니다. 담당자가 커밋 `91f28cd`("원장 DB 장애 시 503 응답과 커넥션 대기 제한")로 넣은 의도인데, Ledger 운영 파일에만 빠져 있었습니다. 운영 파일에 같은 값을 넣었습니다. DB가 응답하지 않을 때 커넥션을 얻지 못해 실패하기까지 30.0초에서 2.0초(503)로 줄어, 호출하는 쪽의 시간 제한(5~6초) 안에 들어옵니다(실측). 호출하는 쪽은 503을 "결과 모름"으로 보고 같은 키로 나중에 복구합니다 |
-| Eureka 자기 보호 | 기본값(켜짐)에서는 갱신이 기준(85%) 아래로 떨어지면 만료된 인스턴스를 지우지 않습니다. 등록 6개에서는 1개만 비정상 종료돼도(메모리 부족 종료 등) 기준 아래가 됩니다. 실험에서 1개·3개를 멈췄을 때 켜 둔 서버는 7~8분 넘게 그대로였고, 끈 서버는 4~6분 안에 지웠습니다. 새 Task가 떠도 죽은 IP가 요청을 받으므로, 서버 응답 캐시와 같은 Task 환경 변수로 끕니다 |
-| Gateway 전달 연결 대기 | Gateway(직접 담당)가 다른 서비스로 넘기는 요청에는 연결 대기 제한이 없어 기본 30초가 적용됐습니다. Eureka에 남은 죽은 인스턴스(응답 없이 패킷을 버리는 상태)로 간 요청이 30.0초 뒤 500이 됐습니다. 개발·운영 파일에 2초를 넣은 뒤 2.0초로 줄었습니다(리허설 실측). 세션 확인 연결과 같은 값입니다. 응답 대기는 서비스마다 처리 시간이 달라 제한하지 않았습니다 |
+| Eureka 자기 보호 | 기본값(켜짐)에서는 갱신이 기준(85%) 아래로 떨어지면 만료된 인스턴스를 지우지 않습니다. 등록 6개에서는 1개만 비정상 종료돼도(메모리 부족 종료 등) 기준 아래가 됩니다. 실험에서 1개·3개를 멈췄을 때 켜 둔 서버는 7~8분 넘게 그대로였고, 끈 서버는 1개일 때 3~4분, 3개일 때 4~6분 안에 지웠습니다. 새 Task가 떠도 죽은 IP가 요청을 받으므로, 서버 응답 캐시와 같은 Task 환경 변수로 끕니다 |
+| Gateway 전달 연결 대기 | Gateway(직접 담당)가 다른 서비스로 넘기는 요청에는 연결 대기 제한이 없어 기본 30초가 적용됐습니다. Eureka에 남은 죽은 인스턴스(응답 없이 패킷을 버리는 상태)로 간 요청이 30.0초 뒤 500이 됐습니다. 개발·운영 파일에 2초를 넣은 뒤 2.0초로 줄었습니다(리허설 실측). 세션 확인 연결과 같은 값입니다. 응답 대기는 서비스마다 처리 시간이 달라 제한하지 않았습니다. 연결을 맺지 못한 요청은 요청을 보내기 전의 실패라 이후 Gateway 오류 처리에서 503(`COMMON_SERVICE_UNAVAILABLE`)으로 응답하도록 고쳤습니다(로컬 실험: 연결 시간 초과 500 → 503) |
+| User DB 커넥션 대기 | User(직접 담당)는 개발·운영 두 파일 모두 Hikari 획득 대기 설정이 없어 기본 30초였습니다. 운영 풀은 최대 5개라 DB가 느려지면 Ledger와 같은 문제가 생깁니다. Ledger·Wallet과 같은 획득 대기 2초·검증 1초를 두 파일에 넣었습니다. 로그인·가입·비밀번호 변경은 해시 계산을 트랜잭션 밖에서 하므로 정상 상황에서 2초는 충분하고, Gateway 세션 확인 응답 대기(3초)보다 짧습니다. 실제 PostgreSQL을 일시 정지한 실험에서 약관 조회가 503을 받기까지 30.07초에서 2.03초로 줄었습니다 |
 | 개발 전용으로 둔 것 | 파일 로그, Swagger, 장애 주입, 가짜 환율 설정, Feign 주소(운영은 Eureka 이름으로 찾음). exchange 복구·만료 스케줄러와 예약 설정은 코드 기본값이 개발 값과 같습니다. Flyway 위치는 Boot 기본값과 같습니다 |
 | 의도된 차이 | 포트 8080, 세션 쿠키 `secure`, Swagger 끄기, Redis 기본 포트, 환율 실제 API, CORS 기본 도메인 |
 | Eureka `hostname` 고정 | 시작 스크립트가 Task IP로 인스턴스 ID(`IP:포트`)와 등록 주소를 정하므로 롤링 중 두 Task가 서로 덮어쓰지 않습니다 |
@@ -558,7 +619,7 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 
 | 대상 | 확인한 결과 |
 |---|---|
-| 적용 전 검사 | 본 root 구성 테스트 59개·bootstrap 3개, Python 검사 90개 통과(Docker·PostgreSQL 선택 실행 제외). Python 3.9에서는 시험 이미지에 `curl`이 없어 시작 스크립트 검사 3개만 실패하고, 호스트 스크립트 검사는 모두 통과. 저장소에서 잠금을 건 plan이 검토한 잠금 없는 plan과 동작·값까지 같음 |
+| 적용 전 검사 | 본 root 구성 테스트 59개·bootstrap 3개, Python 검사 90개 통과(기본 실행은 Docker·PostgreSQL 선택 실행 8개를 건너뛰며, 2026-11-12 dev 병합 결과에서 이 8개도 켜서 모두 통과). Python 3.9에서는 시험 이미지에 `curl`이 없어 시작 스크립트 검사 3개만 실패하고, 호스트 스크립트 검사는 모두 통과. 저장소에서 잠금을 건 plan이 검토한 잠금 없는 plan과 동작·값까지 같음 |
 | 적용 | 저장한 plan 적용: 추가 6·변경 5·삭제 8, 오류 없음. 삭제 8개는 SSM 문서·association 교체 2개와, 쓰이지 않게 된 모니터링 SG 규칙 3개의 수신·송신 6개. 앱 호스트 association 53초, Data association 1분 23초에 성공. 이어서 Grafana 암호 규칙만 바꾼 적용: 추가 1·변경 1·삭제 1 |
 | Redis·Kafka | 두 번의 적용 뒤에도 컨테이너 3개의 ID·시작 시각·재시작 0회가 적용 전과 같음 |
 | Data 호스트 | 두 유닛 실행·자동 시작. 모니터링 4종 준비 응답 200. Loki만 사설 IP 3100, 나머지는 루프백 |
@@ -583,5 +644,19 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
 
 이번 이미지는 기능 브랜치 커밋으로 만든 검증용입니다. 운영에는 main에 머지된 커밋의 이미지만 배포합니다. PR4에서 첫 Service를 만들기 전에 main 커밋으로 다시 빌드해 Task 정의의 digest를 바꾸고, 이후 배포는 CD가 main 커밋으로만 합니다.
+
+2026-11-12 PR2 때 평문으로 보낸 DB 앱 계정 암호를 교체하고 mock-bank 계정 이름을 맞췄습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | Gradle 전체 3,425개, 본 root 구성 테스트 59개·bootstrap 3개, Python 103개(실제 PostgreSQL 18.6 시나리오 5개 포함) 통과, 독립 리뷰 지적 반영 |
+| 암호 교체 | `--rotate-database-passwords`로 DB 암호 6개 `rotated`, 나머지 11개 `preserved` |
+| 작업 창 열기 | 추가 5·변경 5·삭제 2. mock-bank Task 정의 리비전 3(`mock_bank_app`), 리비전 2는 롤백용으로 남음. 설정 묶음에서 초기화 스크립트·`runtime.json` 두 파일만 바뀌어 컨테이너 재생성 없음 |
+| 초기화 | 계정 6개가 새 SSM 암호로 로그인해 자기 스키마 확인, `bank_app` 삭제와 스키마 소유자 이전, 쿼리 통계 비우기 성공 |
+| 작업 창 닫기 | 변경 4·삭제 3. Data → RDS 5432 차단, Data 역할의 DB 암호·관리자 Secret 조회 `AccessDeniedException`, Redis 암호 조회는 정상 |
+| 실행 중인 것 | Redis·Kafka·모니터링 컨테이너 7개와 두 유닛의 시작 시각이 적용 전과 같음 |
+| 적용 후 재검사 | 본 root plan `No changes` |
+
+처음 작업 창에서는 초기화가 실행되지 않은 채 창이 닫혀(SSM 세션·명령 기록 없음) 다시 열어 실행했습니다. 그 사이 앱 Task가 없어 영향은 없었습니다.
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).

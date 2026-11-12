@@ -164,6 +164,47 @@ class ParameterPreparationTest(unittest.TestCase):
         self.assertEqual(calls, [("put-parameter", {"Name": "/travelpay/production/GRAFANA_ADMIN_PASSWORD", "Value": "Travel pay 2026 ok",
                                                     "Type": "SecureString", "Tier": "Standard", "Overwrite": True})])
 
+    def test_database_password_rotation_preview_never_writes(self):
+        calls, reports = [], []
+        names = ["/travelpay/production/USER_DB_PASSWORD", "/travelpay/production/REDIS_CACHE_PASSWORD"]
+
+        parameters.rotate_database_passwords(lambda operation, payload: calls.append((operation, payload)), names,
+                                             apply=False, report=lambda name, status: reports.append((name, status)))
+
+        self.assertEqual(calls, [])
+        self.assertEqual(reports, [("/travelpay/production/USER_DB_PASSWORD", "would-rotate")])
+
+    def test_database_password_rotation_overwrites_only_database_passwords_with_new_values(self):
+        calls, reports = [], []
+        names = ["/travelpay/production/" + name for name in (
+            "GRAFANA_ADMIN_PASSWORD", "KOREAEXIM_API_KEY", "LEDGER_DB_PASSWORD", "REDIS_SESSION_PASSWORD",
+            "USER_DB_PASSWORD", "WALLET_ACCOUNT_NUMBER_KEY")]
+
+        parameters.rotate_database_passwords(lambda operation, payload: calls.append((operation, payload)), names,
+                                             apply=True, report=lambda name, status: reports.append((name, status)))
+
+        rotated = ["/travelpay/production/LEDGER_DB_PASSWORD", "/travelpay/production/USER_DB_PASSWORD"]
+        self.assertEqual([payload["Name"] for _, payload in calls], rotated)
+        for operation, payload in calls:
+            self.assertEqual(operation, "put-parameter")
+            self.assertEqual((payload["Type"], payload["Tier"], payload["Overwrite"]), ("SecureString", "Standard", True))
+            self.assertRegex(payload["Value"], r"^[a-f0-9]{64}$")
+        self.assertNotEqual(calls[0][1]["Value"], calls[1][1]["Value"])
+        self.assertEqual(reports, [(name, "rotated") for name in rotated])
+
+    def test_rotation_reports_each_rotated_password_before_a_later_failure(self):
+        reports = []
+
+        def aws(operation, payload):
+            if payload["Name"].endswith("/USER_DB_PASSWORD"):
+                raise RuntimeError("throttled")
+
+        names = ["/travelpay/production/LEDGER_DB_PASSWORD", "/travelpay/production/USER_DB_PASSWORD"]
+        with self.assertRaises(RuntimeError):
+            parameters.rotate_database_passwords(aws, names, apply=True,
+                                                 report=lambda name, status: reports.append((name, status)))
+        self.assertEqual(reports, [("/travelpay/production/LEDGER_DB_PASSWORD", "rotated")])
+
     def test_grafana_prompt_refuses_when_input_cannot_be_hidden(self):
         code = ("import importlib.util, sys\n"
                 "spec = importlib.util.spec_from_file_location('tool', sys.argv[1])\n"
