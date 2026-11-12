@@ -3,6 +3,7 @@ package com.travelpay.user.common.config;
 import java.io.IOException;
 import java.time.Duration;
 
+import com.zaxxer.hikari.HikariConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -61,6 +62,15 @@ class UserConfigurationFilesTest {
         var properties = Binder.get(environment).bind("travelpay.user.admin", AdminProperties.class).get();
 
         assertEquals(Duration.ofSeconds(3), properties.transactionTimeout());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"application.yml", "application-prod.yml"})
+    void databaseConnectionWaitIsBoundedBeforeTheTransactionStarts(String filename) throws IOException {
+        var hikari = Binder.get(environment(filename)).bindOrCreate("spring.datasource.hikari", HikariConfig.class);
+
+        assertEquals(2000, hikari.getConnectionTimeout());
+        assertEquals(1000, hikari.getValidationTimeout());
     }
 
     private static ServerProperties serverProperties(String filename) throws IOException {
