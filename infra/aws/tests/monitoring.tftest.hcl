@@ -79,6 +79,7 @@ variables {
   enable_app_foundation            = true
   enable_data_foundation           = true
   enable_app_runtime               = true
+  enable_app_services              = false
   app_host_count                   = 2
   ecs_ami_id                       = "ami-0123456789abcdef0"
   data_ami_id                      = "ami-0123456789abcdef1"

@@ -42,7 +42,7 @@ resource "aws_lb" "api" {
   idle_timeout = 1000
 }
 
-# Gateway Task는 PR4의 ECS Service가 IP로 등록합니다. 상태 확인은 업무 포트가 아닌 관리 포트의 readiness를 봅니다.
+# Gateway Task는 ECS Service(app-services.tf)가 IP로 등록합니다. 상태 확인은 업무 포트가 아닌 관리 포트의 readiness를 봅니다.
 resource "aws_lb_target_group" "gateway" {
   count = var.enable_app_runtime ? 1 : 0
 

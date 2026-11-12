@@ -10,6 +10,7 @@ variables {
   enable_data_foundation           = false
   alert_email                      = null
   enable_app_runtime               = false
+  enable_app_services              = false
   application_images               = null
   app_host_count                   = 0
   enable_database_bootstrap_access = false
@@ -165,6 +166,26 @@ run "reject_wildcard_environment" {
   }
 
   expect_failures = [var.github_environment]
+}
+
+run "enabled_deployment_updates_only_the_application_services" {
+  command = apply
+
+  variables {
+    enable_github_deployment = true
+  }
+
+  # Service 이름은 tests/app_runtime.tftest.hcl이 같은 목록으로 확인합니다. 둘이 어긋나면 CD가 Service를 갱신하지 못합니다.
+  assert {
+    condition = [
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      toset(statement.Resource) if contains(statement.Action, "ecs:UpdateService")
+      ] == [toset([
+        for name in ["gateway", "eureka-server", "user-service", "wallet-service", "payment-service", "exchange-service", "ledger-service", "mock-bank"] :
+        "arn:aws:ecs:ap-northeast-2:123456789012:service/travelpay-production/${name}"
+    ])]
+    error_message = "배포 역할은 travelpay-production 클러스터의 8개 앱 Service만 갱신할 수 있어야 합니다."
+  }
 }
 
 run "enabled_deployment_can_read_task_definitions" {

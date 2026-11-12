@@ -64,9 +64,10 @@ output "api_certificate" {
 }
 
 output "application_runtime" {
-  description = "Task 정의와 공개 진입점입니다. ECS Service는 아직 없으며 Cloudflare API 레코드는 PR4에서 ALB로 바꿉니다."
+  description = "Task 정의·ECS Service와 공개 진입점입니다. Cloudflare API 레코드는 공개 단계(PR4의 4-3)에서 ALB로 바꿉니다."
   value = var.enable_app_runtime ? {
     task_definitions   = { for key, task in aws_ecs_task_definition.application : key => task.arn }
+    services           = { for key, service in aws_ecs_service.application : key => service.name }
     load_balancer_dns  = aws_lb.api[0].dns_name
     gateway_target_arn = aws_lb_target_group.gateway[0].arn
   } : null

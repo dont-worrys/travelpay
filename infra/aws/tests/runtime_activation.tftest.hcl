@@ -17,6 +17,7 @@ variables {
   enable_app_foundation            = false
   enable_data_foundation           = false
   enable_app_runtime               = false
+  enable_app_services              = false
   application_images               = null
   app_host_count                   = 0
   enable_database_bootstrap_access = false

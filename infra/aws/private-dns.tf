@@ -28,7 +28,7 @@ locals {
   application_discovery_names = { eureka = "eureka", mock_bank = "mock-bank" }
 }
 
-# Task 등록은 ECS Service(PR4)가 하고, 롤링으로 IP가 바뀌므로 TTL을 Data(30초)보다 짧게 둡니다.
+# Task 등록은 ECS Service(app-services.tf)가 하고, 롤링으로 IP가 바뀌므로 TTL을 Data(30초)보다 짧게 둡니다.
 resource "aws_service_discovery_service" "application" {
   for_each = var.enable_app_foundation && var.enable_data_foundation ? local.application_discovery_names : {}
 
@@ -42,8 +42,9 @@ resource "aws_service_discovery_service" "application" {
     }
   }
 
-  # AWS ECS 문서는 사설 namespace에 ECS가 관리하는 custom 헬스 체크를 권장합니다. 컨테이너 헬스 체크를 통과한
-  # Task만 DNS에 남습니다. Provider가 안내하는 health_check_config는 Route 53 헬스 체크라 공개 namespace에만 맞습니다.
+  # AWS ECS 문서는 사설 namespace에 ECS가 관리하는 custom 헬스 체크를 권장합니다. 컨테이너 헬스 체크를 통과한 Task가
+  # 있으면 그 Task만 DNS로 응답합니다(모두 비정상이면 비정상 Task도 응답). Provider가 안내하는 health_check_config는
+  # Route 53 헬스 체크라 공개 namespace에만 맞습니다.
   # 빈 블록은 Provider가 API로 보내지 않으므로(6.72.0 소스) AWS가 1로 고정하는 값을 명시합니다.
   health_check_custom_config {
     failure_threshold = 1

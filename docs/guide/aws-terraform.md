@@ -2,7 +2,7 @@
 
 Terraform 코드는 `infra/aws/`에서 관리합니다. Spring Boot Run과 별개이며 실제 리소스 생성은 Terraform의 `apply`로 실행합니다.
 
-**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3)의 실제 적용과 검증을 완료**했습니다. ECS Service와 첫 기동, CD, Cloudflare API 레코드 전환은 후속 단계(PR4)입니다.
+**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3), DB 암호 교체·main 이미지·ECS Service 첫 기동(PR4의 4-1·4-2)의 실제 적용과 검증을 완료**했습니다. 공개 진입점(Cloudflare 레코드 전환·원본 인증·Grafana 공개), CD, 운영 검증은 후속 단계(PR4의 4-3~4-5)입니다.
 
 설계·구현 기준은 [Terraform 설계·구현 원칙](https://app.notion.com/p/413530b4fe5980cf9edbc37ec93b957e)에 모으고, 이 문서는 인프라 담당자의 실행·이전 절차만 다룹니다.
 
@@ -360,7 +360,7 @@ python3 infra/aws/scripts/publish-images.py --profile <프로필> --push
 
 ## 앱 실행 정의·공개 진입점·경보
 
-이미지 게시와 인증서 발급을 확인한 뒤 `enable_app_runtime=true`로 Task 정의 8개, ALB, 경보를 만듭니다. 이 옵션은 앱·데이터 기반이 켜져 있고 `application_images`에 8개 서비스의 digest가 모두 있어야 통과합니다. 태그 주소나 다른 저장소의 이미지는 입력 검증에서 거절합니다. ECS Service와 배포는 PR4에서 만들며 이 단계에서는 Task를 계속 실행하지 않습니다.
+이미지 게시와 인증서 발급을 확인한 뒤 `enable_app_runtime=true`로 Task 정의 8개, ALB, 경보를 만듭니다. 이 옵션은 앱·데이터 기반이 켜져 있고 `application_images`에 8개 서비스의 digest가 모두 있어야 통과합니다. 태그 주소나 다른 저장소의 이미지는 입력 검증에서 거절합니다. 이 옵션만으로는 Task를 상시 실행하지 않습니다. ECS Service는 `enable_app_services`로 따로 만듭니다(아래 앱 상시 실행).
 
 Task 정의의 설정은 두 곳에서 옵니다. 비밀이 아닌 값(DB 주소·계정 이름, Redis·Kafka·Eureka·Mock Bank 주소)은 `task-definitions.tf`의 환경 변수입니다. Redis·Kafka·Eureka·Mock Bank 주소는 사설 DNS 이름과 SG가 허용한 포트에서 만들고, DB는 인증서 이름과 맞아야 `verify-full`이 통과하므로 RDS 엔드포인트 이름을 그대로 씁니다. 서비스 이름·포트는 각 서비스의 `application-prod.yml`과 테스트로 대조합니다. 비밀값은 Task 정의에 Parameter Store ARN만 적고, Task 시작 때 서비스별 실행 역할이 꺼내 주입합니다. 각 서비스는 자기 비밀값만 받습니다. 이미지에는 설정·비밀값이 들어가지 않습니다.
 
@@ -375,7 +375,7 @@ Task 정의의 설정은 두 곳에서 옵니다. 비밀이 아닌 값(DB 주소
 | 지표 | `SPRING_APPLICATION_JSON`의 HTTP histogram | `application.yml`에만 있는 설정이며 점이 든 지표 이름은 환경 변수 이름으로 쓸 수 없습니다 |
 | 파일시스템 | 루트 읽기 전용, `/tmp`만 Task 볼륨 | 앱 파일 변조를 막습니다. Tomcat·Netty 임시 파일은 Task와 함께 지워집니다 |
 
-ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합니다. 리스너는 HTTPS만 열고 TLS 1.2·1.3 정책(`ELBSecurityPolicy-TLS13-1-2-2021-06`)과 발급 확인을 거친 인증서를 씁니다. Host가 `api.travelpay.store`인 요청만 Gateway Target Group(IP, 8080)으로 보내고 나머지는 404입니다. Target 상태는 관리 포트 18080의 readiness로 판단하며 등록 해제 대기는 30초입니다. Cloudflare는 마지막 요청 뒤 최대 900초 동안 원본 연결을 다시 쓰므로(Proxy Idle Timeout) ALB 유휴 제한은 1000초로 길게 두어 ALB가 먼저 끊는 순간의 520 오류를 피합니다. Cloudflare의 API 레코드를 ALB로 바꾸는 작업은 Gateway Service가 생기는 PR4에서 합니다.
+ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합니다. 리스너는 HTTPS만 열고 TLS 1.2·1.3 정책(`ELBSecurityPolicy-TLS13-1-2-2021-06`)과 발급 확인을 거친 인증서를 씁니다. Host가 `api.travelpay.store`인 요청만 Gateway Target Group(IP, 8080)으로 보내고 나머지는 404입니다. Target 상태는 관리 포트 18080의 readiness로 판단하며 등록 해제 대기는 30초입니다. Cloudflare는 마지막 요청 뒤 최대 900초 동안 원본 연결을 다시 쓰므로(Proxy Idle Timeout) ALB 유휴 제한은 1000초로 길게 두어 ALB가 먼저 끊는 순간의 520 오류를 피합니다. Cloudflare의 API 레코드를 ALB로 바꾸는 작업은 PR4의 4-3에서 합니다.
 
 경보는 SNS 주제 하나로 보내며 이메일 구독은 받은 메일의 확인 링크를 눌러야 활성화됩니다. 경보 이메일은 Git에서 제외한 개인 입력 파일의 `alert_email`에 둡니다.
 
@@ -395,8 +395,38 @@ ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합�
 - Ledger의 Hikari `connection-timeout`·`validation-timeout`은 `application.yml`에만 있어 운영에서는 기본값(30초·5초)이 적용됩니다. 의도인지 서비스 담당자에게 확인합니다.
 - Exchange는 환율 API 키(`KOREAEXIM_API_KEY`)가 없으면 시작하지 않습니다. 배포 전 비밀값 준비 도구의 `--external`로 저장합니다.
 - ALB 접근 로그는 켜지 않았습니다. Cloudflare만 접근할 수 있고 요청 기록은 Gateway 로그와 ALB 지표로 확인합니다.
-- SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. Cloudflare가 붙이는 비밀 헤더 확인이나 Authenticated Origin Pulls(mTLS)를 Cloudflare 전환과 함께 PR4에서 정합니다.
-- PR4의 CD가 Task 정의를 복사해 이미지만 바꾼 새 리비전을 등록하면, 이후 Terraform이 설정을 바꿀 때 `application_images`가 배포 중인 digest와 같아야 이전 이미지로 되돌아가지 않습니다. 이 규칙은 PR4에서 정합니다.
+- SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. PR4의 4-3에서 Cloudflare가 붙이는 비밀 헤더(`Origin-Auth`)를 ALB 규칙이 확인하도록 해 막습니다.
+- CD(PR4의 4-4)가 새 리비전으로 Service를 갱신하면, 이미지가 같아도 Service의 Task 정의 ARN이 Terraform이 아는 리비전과 달라집니다. 그대로 두면 다음 apply가 Terraform의 리비전으로 되돌리며 다시 배포합니다. 그래서 4-4에서 Service의 Task 정의는 CD가 소유하게 하고(`ignore_changes`), Terraform 설정을 바꾸기 전에는 운영 중인 digest를 `application_images`에 맞춥니다. CD를 켜기 전까지는 Terraform만 Service를 갱신합니다.
+
+## 앱 상시 실행(ECS Service)
+
+Task 정의·ALB와 앱 호스트 2대를 확인한 뒤 `enable_app_services=true`로 8개 ECS Service를 만듭니다(`app-services.tf`). 이 옵션은 `enable_app_runtime`과 `app_host_count=2`가 있어야 통과합니다. false로 되돌리면 Service와 실행 중인 Task를 지웁니다.
+
+| 설정 | 값 | 이유 |
+|---|---|---|
+| Task 수 | 서비스마다 1개 | 앱 호스트 2대(등록 메모리 각 6759MiB)에 8개 Task 메모리 합계 8448MiB가 들어가고, 롤링 중 가장 큰 Task(1536MiB) 하나가 더 떠도 남습니다. 호스트가 한 대만 남으면 8개가 다 들어가지 않아, ASG가 호스트를 교체할 때까지 일부 Task가 대기합니다 |
+| 배포 | 최소 100%·최대 200% 롤링, 실패 시 자동 롤백(circuit breaker) | 새 Task가 정상이 된 뒤 이전 Task를 내려 배포 중에도 1개를 유지합니다. 스케줄러가 있는 Payment·Wallet·Exchange는 두 Task에서 함께 돌아도 안전하다고 담당자가 확인했고, 선점 쿼리·유니크 제약을 코드로 대조했습니다(2026-11-12). 모든 DB 서비스가 함께 롤링해도 커넥션 풀 상한 합계는 60입니다 |
+| 배치 | 앱 호스트 Capacity Provider, App A/B 서브넷, 공인 IP 없음, 서비스별 SG | Capacity Provider는 클러스터 기본값과 같지만, 생략하면 AWS가 기본값을 Service에 기록해 다음 plan부터 갱신이 거절됩니다(provider 6.72.0 소스) |
+| 서비스 찾기 | Eureka·Mock Bank만 Cloud Map(`eureka`·`mock-bank.travelpay.internal`), 나머지는 Eureka | 다른 앱이 고정 이름으로 찾는 두 서비스입니다. 컨테이너 헬스 체크를 통과한 Task가 있으면 그 Task만 응답하고, 모두 비정상이면 비정상 Task도 응답합니다(Route 53 다중 값 응답 규칙) |
+| 공개 진입점 | Gateway만 ALB Target(IP, 8080), 기동 유예 180초 | 기동 중 ALB 상태 확인을 보지 않습니다. 컨테이너 헬스 체크는 Task 정의의 시작 유예(180초)가 같은 역할을 하므로 다른 서비스에는 두지 않습니다 |
+| apply | 안정 상태까지 대기(`wait_for_steady_state`) | 배포가 실패하거나 되돌려지면 apply가 그 이유와 함께 실패합니다(provider 6.72.0 소스) |
+
+기동 순서는 두지 않습니다.
+
+- 호스트 교체나 장애 복구 때도 Task는 순서 없이 시작하므로 앱이 이를 견뎌야 합니다.
+- Eureka 클라이언트는 서버에 닿지 못하면 30초마다 등록을 다시 시도합니다. 서버가 모르는 인스턴스라고 답하면(heartbeat 404) 다시 등록합니다(eureka-client 2.0.6 소스).
+- Eureka·Mock Bank 이름이 아직 등록되지 않았을 때의 "이름 없음" 응답은 이 영역의 SOA TTL(15초)만큼만 캐시됩니다.
+
+Eureka 재시작·재배포 때는 짧은 공백이 생길 수 있습니다.
+
+- eureka-server는 단독 서버라 받아 올 목록이 없습니다. Spring Cloud는 이 경우에도 조회를 바로 허용하므로, 새 Eureka는 시작 직후부터 비었거나 일부만 찬 목록으로 답합니다(`InstanceRegistry.openForTraffic`, Spring Cloud Netflix 5.0.3 소스).
+- 클라이언트는 200 응답이면 받은 목록으로 바꿉니다. 그래서 각 서비스가 다음 heartbeat(최대 30초)에 다시 등록할 때까지 Gateway가 일부 서비스를 찾지 못해 503을 낼 수 있습니다.
+- 서버에 닿지 못한 동안에는 받아 둔 목록을 그대로 씁니다.
+- 롤링 중에는 이전·새 Eureka가 같은 이름으로 잠시 함께 응답해 목록이 갈릴 수도 있습니다.
+
+이 시간은 4-5의 Eureka 재시작·재배포 시험에서 측정합니다. 길면 Eureka만 이전 Task를 먼저 내리는 배포나 시작 대기 설정을 검토합니다.
+
+Gateway Service가 생긴 뒤부터 원본 인증(4-3)을 넣기 전까지는, 다른 Cloudflare 영역을 거친 요청이 ALB를 통해 Gateway에 닿을 수 있습니다(앞의 SG 한계). API 레코드는 아직 ALB를 가리키지 않지만, 이 기간은 짧게 둡니다.
 
 ## AWS 모니터링(Prometheus·Loki·Grafana·Alloy)
 
@@ -450,8 +480,8 @@ aws ssm send-command --profile <프로필> --region ap-northeast-2 --instance-id
 - **권한:** Alloy는 Docker 소켓으로 컨테이너 로그를 읽으므로 사실상 호스트 root 권한입니다. 로컬과 같은 방식이며, 이미지를 digest로 고정하고 다른 권한은 모두 뺐습니다. 사용 통계 전송도 끕니다. Loki는 인증 없이 SG로만 접근을 막습니다.
 - **디스크:** 이미지는 Data 루트 볼륨(16GiB)에 받습니다. 적용 전 사용량은 2.9GiB(18%)였고, 모니터링 이미지 네 개는 로컬 기준 최대 약 3.5GB라 받은 뒤에도 75% 경보 기준보다 낮습니다. 지표·로그는 모니터링 EBS(20GiB)에 쌓습니다.
 - **이미지 받기:** 모니터링 이미지는 Docker Hub에서 받습니다. 비로그인 받기는 NAT 공인 IP 하나에 6시간 100회로 제한되며, 이번 적용에서 받는 것은 Data 4회와 앱 호스트 2회입니다.
-- **복구 스케줄러 규칙의 전제:** payment Task가 하나라고 보고 Task를 합쳐 셉니다. PR4에서 payment를 여러 Task로 늘리면 Task별로 나눠야 한 Task의 정지가 가려지지 않습니다. 스케줄러 클래스 목록(`monitoring.tf`)은 테스트가 payment-service 코드와 대조합니다.
-- **PR4 전까지:** 첫 ECS Service 전(PR4)에는 Eureka와 Mock Bank가 없습니다. 그래서 Prometheus의 대상 발견 오류가 로그에 남고, 수집 중단 규칙은 8개 서비스 모두 경보 상태입니다.
+- **복구 스케줄러 규칙의 전제:** payment Task가 하나라고 보고 Task를 합쳐 셉니다. payment를 여러 Task로 늘리면(지금은 1개) Task별로 나눠야 한 Task의 정지가 가려지지 않습니다. 스케줄러 클래스 목록(`monitoring.tf`)은 테스트가 payment-service 코드와 대조합니다.
+- **ECS Service 전:** 첫 ECS Service 전에는 Eureka와 Mock Bank가 없어 Prometheus의 대상 발견 오류가 로그에 남고, 수집 중단 규칙은 8개 서비스 모두 경보 상태였습니다. 4-2에서 Service를 만든 뒤 해소됐습니다.
 - **앱 호스트 Alloy 지표:** 호스트 주소를 찾을 수단이 없어 수집하지 않습니다. 대신 Loki의 `host` 레이블별 로그 수신으로 동작을 확인합니다.
 
 ## 운영 실행 설정(application-prod.yml) 점검
@@ -498,7 +528,7 @@ Task 정의는 `SPRING_CONFIG_NAME=application-prod`로 운영 파일만 읽습�
 - ECS 메타데이터는 가짜 서버로 대신함
 - 인터넷이 없어 환율 API 호출이 실패함
 
-실제 AWS에서의 첫 기동과 TLS 접속은 PR4에서 확인합니다.
+실제 AWS에서의 첫 기동과 RDS TLS 접속은 4-2에서 확인했습니다(실제 AWS 검증 결과).
 
 **참고로 남긴 것.**
 
@@ -609,7 +639,7 @@ NAT Gateway 1개와 공인 IPv4 1개가 실제로 실행 중입니다. 서울 �
 | 비밀값 | 키 준비 전에는 Exchange Task가 `TaskFailedToStart`(파라미터 없음)로 시작 전에 멈춤. 준비 후 Wallet 키는 32바이트로 풀리고, 환율 API 키는 공백·끝 `;` 없이 실제 API 1회 호출이 HTTP 200·23개 통화·`result=1` |
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task·사용 중 Task ENI 0개, Data 설정 묶음은 다시 적용되지 않음 |
 
-ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱의 실제 기동(RDS 인증서 검증 접속·Flyway)과 업무 통신은 ECS Service를 만드는 PR4에서 검증합니다.
+ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱의 실제 기동(RDS 인증서 검증 접속·Flyway)과 업무 통신은 ECS Service를 만드는 PR4에서 검증합니다(4-2 결과는 아래 표).
 
 2026-11-12 AWS 모니터링 단계는 다음 순서로 확인했습니다.
 
@@ -668,5 +698,22 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | Task 정의 | 8개 모두 이미지 목록 파일의 digest와 같음. Gateway·Payment·User·mock-bank는 리비전 3, 나머지는 2 |
 | 시험 실행 | Gateway·User·Payment·mock-bank 시험 Task 종료 코드 0. uid 10001, `/tmp` 쓰기, 비밀값 주입, Redis·RDS 연결 |
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
+
+2026-11-12 ECS Service 첫 기동(4-2)은 다음과 같이 확인했습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 65개·bootstrap 3개 통과(Git에서 제외한 입력 파일이 없는 사본에서도 65개 통과). 사본에 결함 21개를 하나씩 넣어 모두 테스트 실패로 잡힘. 독립 리뷰 지적 7건을 근거로 확인해 반영(설명 오류 4건, 테스트 2건, 4-4 위험 1건) |
+| plan | Service 8개 추가만, 변경·삭제 0. 서브넷·SG·Cloud Map·Target Group·Task 정의 리비전을 실제 ID와 대조. 지적 반영 뒤 다시 만든 plan이 검토한 plan과 같음 |
+| 적용 | 추가 8, 오류 없음. Service별 1분 47초~2분 48초에 안정 상태 |
+| 기동 | Task 8개 HEALTHY(2a 5개·2c 3개), 앱 기동 18~62초, ERROR 로그 0건 |
+| Flyway | DB 서비스 6개가 RDS에 마이그레이션 적용: user v3, wallet v5, payment v20261109.1, exchange v8, ledger v7, mock-bank v3 |
+| 서비스 찾기 | Eureka에 6개 서비스 UP, Cloud Map의 eureka·mock-bank HEALTHY, Gateway ALB Target healthy |
+| 업무 경로 | ALB SG를 단 시험 Task에서 Gateway로 `GET /api/v1/terms` 200(약관 응답), `GET /api/v1/wallets` 401(로그인 필요). 공개 경로(Cloudflare → ALB)는 4-3에서 확인 |
+| Kafka | Wallet이 `wallet.charge.requested`(파티션 3) 생성 |
+| 모니터링 | Prometheus 수집 대상 8개 up, Loki에 8개 서비스 로그, Grafana "서비스 지표 수집 중단" 해소, 나머지 규칙 정상 |
+| 자원 | RDS 연결 13개, 앱 호스트 메모리 사용 최대 34%, 남은 예약 메모리 871MiB·4199MiB, CloudWatch 경보 ALARM 0건 |
+| 실행 중인 것 | Data 컨테이너 7개의 시작 시각·재시작 0회가 적용 전과 같음 |
+| 적용 후 재검사 | 본 root plan `No changes`(Capacity Provider·배포 설정의 반복 차이 없음) |
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).

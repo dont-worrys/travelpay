@@ -66,6 +66,56 @@ override_resource {
 
 override_resource {
   override_during = plan
+  target          = aws_subnet.network["app_a"]
+  values          = { id = "subnet-00000000000000010" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_subnet.network["app_b"]
+  values          = { id = "subnet-00000000000000011" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_ecs_task_definition.application["wallet"]
+  values          = { arn = "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-wallet-service:1" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_ecs_task_definition.application["user"]
+  values          = { arn = "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-user-service:1" }
+}
+
+# Eureka·Mock Bank가 서로의 Cloud Map 이름에 등록되지 않는지 서로 다른 값으로 구분합니다.
+override_resource {
+  override_during = plan
+  target          = aws_service_discovery_service.application["eureka"]
+  values          = { arn = "arn:aws:servicediscovery:ap-northeast-2:123456789012:service/srv-eureka000000000" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_service_discovery_service.application["mock_bank"]
+  values          = { arn = "arn:aws:servicediscovery:ap-northeast-2:123456789012:service/srv-mockbank00000000" }
+}
+
+# Service마다 자기 SG를 쓰는지 서로 다른 값으로 구분합니다.
+override_resource {
+  override_during = plan
+  target          = aws_security_group.boundary["gateway"]
+  values          = { id = "sg-000000000000000a1" }
+}
+
+override_resource {
+  override_during = plan
+  target          = aws_security_group.boundary["wallet"]
+  values          = { id = "sg-000000000000000a2" }
+}
+
+override_resource {
+  override_during = plan
   target          = aws_iam_role.task_execution["wallet"]
   values          = { arn = "arn:aws:iam::123456789012:role/travelpay-production-wallet-service-execution" }
 }
@@ -95,6 +145,7 @@ variables {
   enable_app_foundation            = true
   enable_data_foundation           = true
   enable_app_runtime               = true
+  enable_app_services              = true
   app_host_count                   = 2
   ecs_ami_id                       = "ami-0123456789abcdef0"
   data_ami_id                      = "ami-0123456789abcdef1"
@@ -512,6 +563,131 @@ run "runtime_contract_matches_application_configs" {
   }
 }
 
+run "services_run_each_app_once_with_rolling_and_rollback" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for key, service in local.application_services : (
+        aws_ecs_service.application[key].name == service.name && aws_ecs_service.application[key].desired_count == 1
+      )
+      ]) && (
+      aws_ecs_service.application["wallet"].task_definition == "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-wallet-service:1" &&
+      aws_ecs_service.application["user"].task_definition == "arn:aws:ecs:ap-northeast-2:123456789012:task-definition/travelpay-production-user-service:1"
+    )
+    error_message = "8개 앱마다 같은 이름의 Service가 자기 Task 정의로 Task 1개를 실행해야 합니다."
+  }
+
+  # CD 배포 역할은 travelpay-production 클러스터의 이 이름들만 갱신할 수 있습니다(tests/identity.tftest.hcl이 정책 ARN을 대조).
+  assert {
+    condition = aws_ecs_cluster.main[0].name == "travelpay-production" && toset([for service in aws_ecs_service.application : service.name]) == toset([
+      "gateway", "eureka-server", "user-service", "wallet-service", "payment-service", "exchange-service", "ledger-service", "mock-bank",
+    ])
+    error_message = "Service 이름과 클러스터가 CD 배포 역할이 갱신할 수 있는 대상과 같아야 합니다."
+  }
+
+  assert {
+    condition = alltrue([
+      for service in aws_ecs_service.application : (
+        service.deployment_minimum_healthy_percent == 100 && service.deployment_maximum_percent == 200 &&
+        one(service.deployment_circuit_breaker).enable && one(service.deployment_circuit_breaker).rollback &&
+        service.wait_for_steady_state
+      )
+    ])
+    error_message = "새 Task가 정상이 된 뒤 이전 Task를 내리고, 실패하면 되돌리며, apply가 그 결과를 기다려야 합니다."
+  }
+
+  # 생략하면 AWS가 클러스터 기본값을 기록해 다음 plan부터 갱신이 거절되므로 명시해야 합니다.
+  assert {
+    condition = alltrue([
+      for service in aws_ecs_service.application :
+      [for item in service.capacity_provider_strategy : [item.capacity_provider, item.weight]] == [[aws_ecs_capacity_provider.app[0].name, 1]]
+    ])
+    error_message = "Service는 앱 호스트 Capacity Provider를 명시해야 합니다."
+  }
+
+  assert {
+    condition = alltrue([
+      for service in aws_ecs_service.application : (
+        one(service.network_configuration).subnets == toset(["subnet-00000000000000010", "subnet-00000000000000011"]) &&
+        length(one(service.network_configuration).security_groups) == 1 &&
+        one(service.network_configuration).assign_public_ip != true
+      )
+      ]) && (
+      one(aws_ecs_service.application["gateway"].network_configuration).security_groups == toset(["sg-000000000000000a1"]) &&
+      one(aws_ecs_service.application["wallet"].network_configuration).security_groups == toset(["sg-000000000000000a2"])
+    )
+    error_message = "Task는 App 서브넷에 공인 IP 없이 뜨고, 자기 역할의 SG 하나만 써야 합니다."
+  }
+
+  # RDS max_connections=100이고 연결 경보는 80입니다. 모든 DB 서비스가 한꺼번에 롤링해도 풀 상한 합계가 60을 넘지 않아야 합니다.
+  assert {
+    condition = sum([
+      for key, service in aws_ecs_service.application :
+      service.desired_count * service.deployment_maximum_percent / 100 * tonumber(local.task_environment[key].SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE)
+      if local.application_services[key].db_username != null
+    ]) <= 60
+    error_message = "롤링 중 DB 커넥션 풀 상한 합계가 60을 넘으면 안 됩니다."
+  }
+}
+
+run "only_fixed_name_services_use_cloud_map_and_only_gateway_joins_the_alb" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for key, service in aws_ecs_service.application :
+      contains(["eureka", "mock_bank"], key) ? (
+        length(service.service_registries) == 1 &&
+        one(service.service_registries).registry_arn == aws_service_discovery_service.application[key].arn
+      ) : length(service.service_registries) == 0
+    ])
+    error_message = "다른 앱이 고정 이름으로 찾는 Eureka·Mock Bank만 자기 Cloud Map 이름에 등록해야 합니다."
+  }
+
+  assert {
+    condition = (
+      [for item in aws_ecs_service.application["gateway"].load_balancer : [item.target_group_arn, item.container_name, item.container_port]] ==
+      [[aws_lb_target_group.gateway[0].arn, "gateway", 8080]] &&
+      aws_ecs_service.application["gateway"].health_check_grace_period_seconds == 180 &&
+      alltrue([
+        for key, service in aws_ecs_service.application :
+        length(service.load_balancer) == 0 && service.health_check_grace_period_seconds == null if key != "gateway"
+      ])
+    )
+    error_message = "Gateway만 업무 포트로 ALB Target에 등록하고 기동 유예 180초를 둬야 합니다(다른 서비스는 Task 정의의 시작 유예가 같은 역할)."
+  }
+}
+
+run "runtime_without_service_activation_starts_no_tasks" {
+  command = plan
+  variables {
+    enable_app_services = false
+  }
+
+  assert {
+    condition     = length(aws_ecs_service.application) == 0 && length(aws_ecs_task_definition.application) == 8
+    error_message = "Service 활성화 전에는 Task 정의만 있고 상시 실행 Task가 없어야 합니다."
+  }
+}
+
+run "services_require_app_hosts" {
+  command = plan
+  variables {
+    app_host_count = 0
+  }
+  expect_failures = [var.enable_app_services]
+}
+
+run "services_require_runtime" {
+  command = plan
+  variables {
+    enable_app_runtime = false
+    application_images = null
+  }
+  expect_failures = [var.enable_app_services]
+}
+
 run "app_host_metrics_roll_up_by_autoscaling_group" {
   command = plan
 
@@ -536,7 +712,8 @@ run "app_host_metrics_roll_up_by_autoscaling_group" {
 run "no_app_host_alarms_without_hosts" {
   command = plan
   variables {
-    app_host_count = 0
+    app_host_count      = 0
+    enable_app_services = false
   }
 
   assert {

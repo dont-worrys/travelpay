@@ -80,7 +80,7 @@ locals {
   }
 }
 
-# ECS Service와 배포는 PR4에서 만듭니다. 이 단계는 Task 정의만 등록하고 명령을 바꾼 시험 실행으로 주입 경로를 확인합니다.
+# 이 정의로 상시 실행하는 ECS Service는 app-services.tf에 있습니다.
 resource "aws_ecs_task_definition" "application" {
   for_each = var.enable_app_runtime ? local.application_services : {}
 
