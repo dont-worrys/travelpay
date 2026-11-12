@@ -20,7 +20,7 @@ Gateway는 브라우저 요청을 받아 User에 세션 검증을 요청하고, 
 | `PublicEndpoints`·`SessionAuthenticationFilter` | 공개 요청 분류와 세션 확인 결과에 따른 전달·거절 |
 | `SessionVerificationClient` | 필요한 헤더만 전달하고 검증 응답을 엄격히 해석 |
 | `SessionVerificationConfiguration`·`SessionVerificationProperties` | 내부 HTTP 클라이언트와 관측·제한 시간 설정 |
-| `GatewayErrorHandler` | 공통 JSON·HTTP 상태·Allow·no-store 처리 |
+| `GatewayErrorHandler` | 공통 JSON·HTTP 상태·Allow·no-store 처리, 서비스 연결 실패 503 |
 | `GatewayCorsConfiguration` | 허용 출처 검증과 프레임워크 CORS 거절 응답 연결 |
 
 ## 주소와 포트
@@ -149,6 +149,8 @@ const loginResponse = await fetch(`${API_BASE}/api/v1/auth/login`, {
 세 값은 독립적입니다. 전체 상한을 넘으면 검증 대기를 취소하고 503으로 종료합니다. 검증 뒤의 업무 처리 시간은 이 상한에 포함하지 않습니다. 5초는 초기 기준값이며 운영 지연과 호출 실패율을 측정해 조정합니다. 값 변경은 재기동·재배포 때 적용됩니다.
 
 User의 검증 거절 401·403·409는 상태와 본문을 전달하고, 연결 실패·시간 초과·해석할 수 없는 검증 응답 등은 503입니다. 두 오류 경로 모두 `Cache-Control: no-store`를 적용하고, 일시 장애만으로 SESSION 쿠키를 삭제하지 않습니다. 지원하지 않는 실제 메서드는 405와 Gateway의 `Allow` 목록으로 거절합니다. 업무 API 자체의 메서드·권한 판단은 해당 서비스가 맡습니다.
+
+다른 서비스로 넘기는 요청의 연결 대기는 2초(`spring.cloud.gateway.server.webflux.httpclient.connect-timeout`, 로컬·배포 같은 값)입니다. 기본값 30초면 Eureka 목록에 남은 종료된 인스턴스로 간 요청이 30초씩 묶입니다. 연결을 맺지 못하면(연결 거부·연결 시간 초과·경로 없음) 503 `COMMON_SERVICE_UNAVAILABLE`로 응답합니다. 이 경우는 요청이 서비스에 닿기 전의 실패입니다. 다만 각 서비스도 DB 시간 초과처럼 요청을 받은 뒤의 장애에 같은 코드를 쓰므로, 응답만으로는 다시 보내도 안전한지 알 수 없습니다. 돈이 움직이는 요청은 같은 `Idempotency-Key`로만 다시 보냅니다. 연결된 뒤의 응답 대기는 서비스마다 처리 시간이 달라 제한하지 않습니다.
 
 Gateway 수신 기본 한도는 8KiB이고, User는 로컬·배포 모두 16KiB로 두어 Gateway가 붙이는 내부 헤더의 여유를 확보했습니다. 테스트용 큰 쿠키는 검증 입력이며 실제 앱이 추가 쿠키를 발급하는 구조가 아닙니다.
 
