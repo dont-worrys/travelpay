@@ -130,7 +130,7 @@ variable "data_ami_id" {
 }
 
 variable "enable_app_runtime" {
-  description = "이미지 게시와 공개 인증서 발급(ISSUED)을 확인한 뒤 Task 정의·ALB를 만듭니다. ECS Service는 만들지 않습니다."
+  description = "이미지 게시와 공개 인증서 발급(ISSUED)을 확인한 뒤 Task 정의·ALB를 만듭니다. ECS Service는 enable_app_services로 따로 켭니다."
   type        = bool
   default     = false
   nullable    = false
@@ -138,6 +138,30 @@ variable "enable_app_runtime" {
   validation {
     condition     = !var.enable_app_runtime || (var.enable_app_foundation && var.enable_data_foundation)
     error_message = "Task 정의는 ECR·로그 그룹(앱 기반)과 DB·사설 DNS(데이터 기반)를 쓰므로 두 기반을 먼저 켜야 합니다."
+  }
+}
+
+variable "enable_app_services" {
+  description = "Task 정의·ALB와 앱 호스트를 확인한 뒤 8개 ECS Service로 앱을 상시 실행합니다. false로 되돌리면 Service와 Task를 지웁니다."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.enable_app_services || (var.enable_app_runtime && var.app_host_count > 0)
+    error_message = "ECS Service는 Task 정의·ALB(enable_app_runtime)와 Task를 띄울 앱 호스트(app_host_count=2)가 있어야 만들 수 있습니다."
+  }
+}
+
+variable "enable_public_entry" {
+  description = "Cloudflare 원본 인증 값(ORIGIN_AUTH)과 Grafana 인증서 발급을 확인한 뒤 ALB에 원본 인증 헤더 검사와 Grafana 공개 경로를 켭니다."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.enable_public_entry || var.enable_app_services
+    error_message = "공개 진입점은 상시 실행 중인 앱(enable_app_services)이 있어야 켤 수 있습니다."
   }
 }
 

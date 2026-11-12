@@ -63,7 +63,8 @@ services:
         bind: {create_host_path: false}
     logging: *bounded-logs
 
-  # 외부에 공개하지 않고 SSM 포트 포워딩으로만 접속합니다. 관리자 암호는 Parameter Store 값을 파일로 받습니다.
+  # 공개 진입점을 켜면 ALB가 사설 IP의 3000으로 보냅니다(Cloudflare Access·원본 인증 헤더를 거친 요청만). 그 전에는 SSM 포트
+  # 포워딩으로만 접속합니다. 관리자 암호는 Parameter Store 값을 파일로 받습니다.
   grafana:
     image: ${grafana_image}
     restart: unless-stopped
@@ -77,8 +78,13 @@ services:
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
       GF_PLUGINS_PREINSTALL_DISABLED: "true"
+%{ if grafana_public_url != "" ~}
+      # 로그인 뒤 이동·링크를 공개 주소로 만들고, 세션 쿠키는 HTTPS에서만 보냅니다.
+      GF_SERVER_ROOT_URL: ${grafana_public_url}
+      GF_SECURITY_COOKIE_SECURE: "true"
+%{ endif ~}
     mem_limit: 768m
-    ports: ["127.0.0.1:3000:3000"]
+    ports: ${grafana_ports}
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
     volumes:

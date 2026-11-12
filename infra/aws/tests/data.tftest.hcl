@@ -33,6 +33,8 @@ variables {
   enable_app_foundation            = true
   enable_data_foundation           = true
   enable_app_runtime               = false
+  enable_app_services              = false
+  enable_public_entry              = false
   application_images               = null
   ecs_ami_id                       = "ami-0123456789abcdef0"
   data_ami_id                      = "ami-0123456789abcdef1"
