@@ -710,7 +710,7 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 대상 | 확인한 결과 |
 |---|---|
 | 적용 전 검사 | Gradle 전체 3,425개, 본 root 구성 테스트 59개·bootstrap 3개, Python 103개(실제 PostgreSQL 18.6 시나리오 5개 포함) 통과, 독립 리뷰 지적 반영 |
-| 암호 교체 | `--rotate-database-passwords`로 DB 암호 6개 `rotated`, 나머지 11개 `preserved` |
+| 암호 교체 | `--rotate-database-passwords`로 비밀값 11개 모두 기존 값 확인(`preserved`) 뒤 DB 암호 6개 `rotated` |
 | 작업 창 열기 | 추가 5·변경 5·삭제 2. mock-bank Task 정의 리비전 3(`mock_bank_app`), 리비전 2는 롤백용으로 남음. 설정 묶음에서 초기화 스크립트·`runtime.json` 두 파일만 바뀌어 컨테이너 재생성 없음 |
 | 초기화 | 계정 6개가 새 SSM 암호로 로그인해 자기 스키마 확인, `bank_app` 삭제와 스키마 소유자 이전, 쿼리 통계 비우기 성공 |
 | 작업 창 닫기 | 변경 4·삭제 3. Data → RDS 5432 차단, Data 역할의 DB 암호·관리자 Secret 조회 `AccessDeniedException`, Redis 암호 조회는 정상 |
