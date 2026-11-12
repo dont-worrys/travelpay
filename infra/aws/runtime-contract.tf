@@ -15,7 +15,7 @@ locals {
     payment   = { name = "payment-service", port = 8080, management_port = 8080, schema = "payment_service", db_username = "payment_app", secret_names = ["PAYMENT_DB_PASSWORD"] }
     exchange  = { name = "exchange-service", port = 8080, management_port = 8080, schema = "exchange_service", db_username = "exchange_app", secret_names = ["EXCHANGE_DB_PASSWORD", "REDIS_CACHE_PASSWORD", "KOREAEXIM_API_KEY"] }
     ledger    = { name = "ledger-service", port = 8080, management_port = 8080, schema = "ledger_service", db_username = "ledger_app", secret_names = ["LEDGER_DB_PASSWORD"] }
-    mock_bank = { name = "mock-bank", port = 8090, management_port = 8090, schema = "mock_bank", db_username = "bank_app", secret_names = ["MOCK_BANK_DB_PASSWORD"] }
+    mock_bank = { name = "mock-bank", port = 8090, management_port = 8090, schema = "mock_bank", db_username = "mock_bank_app", secret_names = ["MOCK_BANK_DB_PASSWORD"] }
   }
 
   # Data 호스트의 Grafana 관리자 암호입니다. 앱 비밀값과 같은 경로·준비 도구를 쓰고 Data 역할만 읽습니다.

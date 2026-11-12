@@ -255,6 +255,7 @@ python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profi
 
 - Wallet 계좌번호 키(무작위 32바이트의 Base64)는 `--apply --create-wallet-key`를 줄 때만 만듭니다. 데이터가 생긴 뒤 바꾸거나, 지워진 뒤 새로 만들면 저장된 계좌번호를 풀 수 없으므로 Wallet 데이터가 생기기 전 처음 한 번만 씁니다.
 - 수출입은행에서 발급받은 환율 API 키는 `--apply --external`을 줄 때만 입력받습니다. 입력을 숨길 수 있는 터미널에서 직접 실행해야 하며, 파이프 입력처럼 입력이 화면에 보일 수 있으면 거절합니다. 키를 명령 인자·파일·채팅에 남기지 않습니다.
+- DB 앱 계정 암호 6개는 `--apply --rotate-database-passwords`를 줄 때만 새 임의 값으로 바꿉니다. SSM 값만 바뀌므로 아래 DB 작업 창에서 초기화 스크립트를 다시 실행해야 DB에 반영되고, 그 전에 시작한 Task는 DB 로그인에 실패합니다. 새 값은 출력하지 않으며 사람이 알 필요가 없습니다. Task는 시작할 때, 초기화 스크립트는 실행할 때 SSM에서 읽습니다.
 
 ```bash
 terraform -chdir=infra/aws apply stage-4.tfplan
@@ -266,6 +267,27 @@ DB 계정 초기화는 별도 작업입니다. `enable_database_bootstrap_access
 
 ```bash
 sudo python3 /opt/travelpay/data/bootstrap-database.py
+```
+
+초기화 스크립트는 실행할 때마다 SSM의 현재 암호로 앱 계정 암호를 다시 설정하고, 끝에 계정 6개가 각자 SSM 암호로 로그인해 자기 스키마를 쓰는지 확인합니다. 이름을 바꾸기 전에 쓰던 계정(`RETIRED_ROLES`, 현재 `bank_app`)은 새 계정이 스키마를 넘겨받은 뒤 같은 트랜잭션에서 지웁니다. 옛 계정에 테이블 같은 객체가 남아 있으면 데이터를 지우지 않고 전체를 되돌립니다. 실패하면 psql의 오류 줄을 보여 주되, 실행한 문장과 SCRAM 값은 빼고 보여 줍니다.
+
+`--reset-statement-stats`를 붙이면 끝에 `pg_stat_statements` 통계를 비웁니다.
+- 통계 수집은 미리 불러온 라이브러리가 하지만, 비우는 함수는 확장을 만들어야 생깁니다. 그래서 확장이 없으면 먼저 만듭니다(통계 조회·비우기 함수만 추가).
+- RDS 관리자 계정이 이 확장을 만들거나 함수를 실행할 수 있는지는 문서로 확인하지 못했습니다. 거절되면 원인을 오류로 보여 줍니다.
+- 이 단계가 실패해도 암호는 이미 바뀐 뒤라, 통계와 백업에 남은 옛 평문 암호로는 로그인할 수 없습니다.
+
+PR2 때 평문으로 보낸 DB 암호를 교체하는 작업 창은 아래 순서를 지킵니다. 교체보다 초기화를 먼저 하면 옛 암호가 그대로 유효한 채 통계만 지워집니다.
+
+1. `enable_database_bootstrap_access=true`로 plan을 만들어 저장하고 검토합니다.
+2. 그 plan으로 `prepare-parameters.py <plan> --profile <프로필> --account <계정 ID> --apply --rotate-database-passwords`를 실행하고, DB 암호 6개가 모두 `rotated`로 출력되는지 확인합니다. 이 도구는 plan에서 비밀값 목록만 읽습니다.
+3. 저장한 plan을 적용합니다. 새 설정 묶음(초기화 스크립트·계정 이름)도 이때 Data 호스트에 반영됩니다.
+4. Data 호스트에서 초기화 스크립트를 `--reset-statement-stats`와 함께 실행하고, 계정 6개 로그인 확인 문구를 봅니다.
+5. 옵션을 `false`로 되돌려 plan/apply하고, Data → RDS 연결과 DB 암호 조회가 거절되는지 확인합니다.
+
+2와 4 사이에는 SSM 값과 DB 암호가 다르므로, 그동안 앱 Task를 시작하지 않습니다(첫 기동 전에 하는 이유).
+
+```bash
+sudo python3 /opt/travelpay/data/bootstrap-database.py --reset-statement-stats
 ```
 
 초기화 성공과 앱 계정의 자기 스키마 접근·타 스키마 차단을 확인한 뒤 옵션을 `false`로 되돌려 새 plan/apply합니다. 공용 namespace는 Kafka 주소 때문에 먼저 만들며, 후속 Eureka·Mock Bank도 같은 `travelpay.internal`을 재사용합니다.

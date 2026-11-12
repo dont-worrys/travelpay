@@ -2,8 +2,9 @@
 """검토한 plan의 앱 비밀값을 SSM에 준비합니다. 기존 값은 덮어쓰지 않습니다.
 
 DB·Redis·Grafana 관리자 암호는 새로 만듭니다. Wallet 계좌번호 키는 --create-wallet-key를 줄 때만 만들고,
-외부에서 발급받은 키는 --external을 줄 때만 화면에 표시하지 않고 입력받습니다. Grafana 관리자 암호는
---set-grafana-password를 줄 때만 운영자가 정한 값으로 바꿉니다(기존 값을 덮어쓰는 유일한 경우).
+외부에서 발급받은 키는 --external을 줄 때만 화면에 표시하지 않고 입력받습니다. 기존 값을 덮어쓰는 경우는 두 가지뿐입니다.
+Grafana 관리자 암호는 --set-grafana-password를 줄 때 운영자가 정한 값으로, DB 앱 계정 암호 6개는
+--rotate-database-passwords를 줄 때 새 임의 값으로 바꿉니다.
 """
 
 import argparse
@@ -81,6 +82,19 @@ def set_grafana_password(aws, value):
                           "Tier": "Standard", "Overwrite": True})
 
 
+def rotate_database_passwords(aws, names, apply=False, report=lambda name, status: None):
+    # SSM 값만 바뀌므로 DB에는 초기화 스크립트를 다시 실행해야 반영됩니다. 그 전에 시작하는 Task는 DB 로그인에 실패합니다.
+    for name in names:
+        if not name.endswith("_DB_PASSWORD"):
+            continue
+        if not apply:
+            report(name, "would-rotate")
+            continue
+        aws("put-parameter", {"Name": name, "Value": generate(name), "Type": "SecureString", "Tier": "Standard",
+                              "Overwrite": True})
+        report(name, "rotated")
+
+
 def parameter_names(contract, account):
     names = []
     for name, arn in contract.items():
@@ -103,7 +117,8 @@ def history_enabled(run_text):
 
 def failure_message(error):
     reason = str(error) if isinstance(error, ParameterPreparationError) else type(error).__name__
-    return f"Parameter preparation failed: {reason}. 기존 값을 덮어쓰지 않습니다."
+    return (f"Parameter preparation failed: {reason}. 위에 created·rotated·updated로 출력된 항목은 바뀌었고, "
+            "실패한 항목은 바뀌었을 수 있습니다.")
 
 
 def run_json(command, payload=None, env=None):
@@ -167,6 +182,9 @@ def main():
     parser.add_argument("--set-grafana-password", action="store_true",
                         help="--apply와 함께 주면 Grafana 관리자 암호를 화면에 표시하지 않고 두 번 입력받아 바꿉니다. "
                              "실행 중인 Grafana에 반영하는 절차는 가이드를 따릅니다.")
+    parser.add_argument("--rotate-database-passwords", action="store_true",
+                        help="--apply와 함께 주면 DB 앱 계정 암호 6개를 새 임의 값으로 바꿉니다. DB에는 초기화 스크립트를 다시 "
+                             "실행해야 반영되므로 가이드의 DB 작업 창 안에서만 씁니다.")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9]{12}", args.account):
         raise ParameterPreparationError("대상 계정 ID를 확인하세요.")
@@ -193,8 +211,12 @@ def main():
     def aws(operation, payload):
         return run(base + ["ssm", operation], payload)
 
-    prepare(aws, names, args.apply, read_external if args.external else None, args.create_wallet_key,
-            report=lambda name, status: print(f"{name}: {status}", flush=True))
+    def report(name, status):
+        print(f"{name}: {status}", flush=True)
+
+    prepare(aws, names, args.apply, read_external if args.external else None, args.create_wallet_key, report=report)
+    if args.rotate_database_passwords:
+        rotate_database_passwords(aws, names, args.apply, report=report)
     if args.set_grafana_password:
         if args.apply:
             set_grafana_password(aws, read_grafana_password())
