@@ -112,6 +112,17 @@ travelpay:
       fault-injection:
         # 비우면 끔. LOST·DELAY면 출금 첫 시도에만 Mock-Fault 헤더를 보낸다. 그 외 값·prod 프로필에서 값 있음은 기동 실패
         mode: ${BANK_FAULT_INJECTION_MODE:}
+      # 은행 코드별 서킷 브레이커 (출금·환불만, 거래 조회는 거치지 않음). 값이 없거나 범위를 벗어나면 기동 실패
+      # 느린 호출 판정은 쓰지 않으며 코드에서 끈다 (BankCircuitBreakerConfig 참고)
+      circuit-breaker:
+        # 최근 호출 5건(최소 5건 모인 뒤)이 모두 결과 모름이면 연다. 업무 거절(FAILED)·응답 이상(4xx 등)은 실패로 세지 않는다
+        sliding-window-size: 5
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 100
+        # 열린 뒤 이 시간 동안 보내지 않고, 지나면 자동으로 반열림
+        wait-duration-in-open-state: 10s
+        # 반열림에서 시험으로 보낼 호출 수
+        permitted-number-of-calls-in-half-open-state: 1
     ledger:
       # 로컬 테스트용 직접 주소. 비우면 Eureka에서 ledger-service를 찾는다
       url: ${LEDGER_SERVICE_URL:}

@@ -97,6 +97,17 @@ travelpay:
     # 은행 장애 주입(fault-injection)은 로컬 검증 전용이라 넣지 않는다
     bank:
       url: ${MOCK_BANK_URL}
+      # 은행 코드별 서킷 브레이커 (출금·환불만, 거래 조회는 거치지 않음). 값이 없거나 범위를 벗어나면 기동 실패
+      # 느린 호출 판정은 쓰지 않으며 코드에서 끈다 (BankCircuitBreakerConfig 참고)
+      circuit-breaker:
+        # 최근 호출 5건(최소 5건 모인 뒤)이 모두 결과 모름이면 연다. 업무 거절(FAILED)·응답 이상(4xx 등)은 실패로 세지 않는다
+        sliding-window-size: 5
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 100
+        # 열린 뒤 이 시간 동안 보내지 않고, 지나면 자동으로 반열림
+        wait-duration-in-open-state: 10s
+        # 반열림에서 시험으로 보낼 호출 수
+        permitted-number-of-calls-in-half-open-state: 1
     ledger:
       url: ${LEDGER_SERVICE_URL:}
     user:
