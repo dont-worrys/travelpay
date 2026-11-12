@@ -2,6 +2,7 @@ package com.travelpay.payment.application.merchant;
 
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerLookup;
 import com.travelpay.payment.domain.merchant.SettlementStatus;
+import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 
 import java.util.List;
@@ -37,8 +38,14 @@ final class SettlementReviewRules {
             case REJECTED -> decision(SettlementStatus.FAILED, exhausted ? ledger.declineReason() : ERROR_REASON,
                     reviewReason, ledger, "정산 취소");
             case NOT_FOUND -> decision(SettlementStatus.FAILED, exhausted ? TIMEOUT_REASON : ERROR_REASON,
-                    reviewReason, ledger, exhausted ? "정산 시간 초과 취소" : "정산 취소");
+                    reviewReason, ledger, exhausted ? "정산 시간 초과 취소(원장 취소 기록)" : "정산 취소");
         };
+    }
+
+    /** 재시도를 다 쓴 정산이 원장에 없으면 FAILED로 확정하기 전에 원장 취소가 필요 */
+    static boolean requiresLedgerCancel(SettlementReviewReason reviewReason, PaymentLedgerLookup ledger) {
+        return reviewReason == SettlementReviewReason.RETRY_EXHAUSTED
+                && ledger.status() == ReviewLedgerStatus.NOT_FOUND;
     }
 
     private static Decision decision(SettlementStatus toStatus, String failureReason,

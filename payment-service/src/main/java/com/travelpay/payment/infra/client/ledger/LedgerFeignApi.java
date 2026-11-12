@@ -23,6 +23,10 @@ public interface LedgerFeignApi {
     ApiResponse<TransactionResultResponse> getTransaction(@RequestParam("referenceType") String referenceType,
                                                           @RequestParam("referenceId") UUID referenceId);
 
+    /** reference를 취소 기록으로 막습니다. 거래가 없으면 201(REJECTED, CANCELLED_BY_REQUESTER), 이미 있으면 내용과 상관없이 200으로 그 거래를 돌려줍니다. */
+    @PostMapping("/transactions/cancel")
+    ApiResponse<TransactionResultResponse> cancel(@RequestBody CancelRequest request);
+
     @PostMapping("/accounts")
     ApiResponse<List<AccountResponse>> openAccounts(@RequestBody OpenAccountsRequest request);
 
@@ -36,6 +40,9 @@ public interface LedgerFeignApi {
             UUID originalTransactionId,
             List<Entry> entries
     ) {
+    }
+
+    record CancelRequest(String referenceType, UUID referenceId, UUID userId, String description) {
     }
 
     record Entry(

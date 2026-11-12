@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -108,6 +109,9 @@ class SettlementReviewServiceTest {
                                                SettlementStatus expectedStatus, String expectedFailureReason) {
         Settlement settlement = givenManualReview(reason);
         when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID)).thenReturn(ledger);
+        // 재시도 소진 + 기록 없음은 처리할 때 원장 취소를 먼저 보냄(취소가 기록되면 조회 때와 같이 기록 없음)
+        lenient().when(ledgerClient.cancelSettlementTransaction(SETTLEMENT_ID, MASTER_ID))
+                .thenReturn(PaymentLedgerLookup.notFound());
 
         // 단건 조회의 예상 결과와 실제 처리 결과가 같아야 함
         SettlementReviewDetailResult detail = service.getReview(MASTER_ID, SETTLEMENT_ID);
@@ -142,14 +146,62 @@ class SettlementReviewServiceTest {
         verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
     }
 
+    // 원장에 취소를 기록한 뒤에만 항목을 풀어 줌. 늦게 온 마지막 요청이 반영되지 않으므로 다음 정산에서 이중 지급이 없음
     @Test
     void failedReleasesPaymentsForNextSettlement() {
         givenManualReview(SettlementReviewReason.RETRY_EXHAUSTED);
         when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+        when(ledgerClient.cancelSettlementTransaction(SETTLEMENT_ID, MASTER_ID))
+                .thenReturn(PaymentLedgerLookup.notFound());
 
         service.resolve(MASTER_ID, SETTLEMENT_ID, null);
 
+        verify(ledgerClient).cancelSettlementTransaction(SETTLEMENT_ID, MASTER_ID);
         verify(settlementItemRepository).deleteAllBySettlementId(SETTLEMENT_ID);
+    }
+
+    // 조회와 취소 사이에 마지막 요청이 늦게 커밋되면 그 거래로 지급 완료, 항목은 유지
+    @Test
+    void paysWhenLateCommitWinsOverCancel() {
+        Settlement settlement = givenManualReview(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+        when(ledgerClient.cancelSettlementTransaction(SETTLEMENT_ID, MASTER_ID))
+                .thenReturn(PaymentLedgerLookup.posted(LEDGER_TRANSACTION_ID, EXPECTED_ENTRIES));
+
+        SettlementResolveResult result = service.resolve(MASTER_ID, SETTLEMENT_ID, null);
+
+        assertEquals(SettlementStatus.PAID, result.status());
+        assertEquals(SettlementStatus.PAID, settlement.getStatus());
+        assertEquals(LEDGER_TRANSACTION_ID, settlement.getLedgerTransactionId());
+        verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
+    }
+
+    // 취소됐는지 모르면 확정하지 않음(항목도 그대로). 다시 처리하면 같은 취소를 다시 보냄
+    @Test
+    void keepsSettlementWhenLedgerCancelFails() {
+        Settlement settlement = givenManualReview(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+        when(ledgerClient.cancelSettlementTransaction(SETTLEMENT_ID, MASTER_ID))
+                .thenThrow(new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE));
+
+        assertError(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE, () -> service.resolve(MASTER_ID, SETTLEMENT_ID, null));
+
+        assertEquals(SettlementStatus.MANUAL_REVIEW, settlement.getStatus());
+        verify(settlementRepository, never()).save(any());
+        verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
+        verify(resolutionRepository, never()).save(any());
+    }
+
+    // 요청 거부는 원장이 이미 4xx로 답해 늦은 커밋이 없으므로 취소하지 않고 FAILED
+    @Test
+    void doesNotCancelNotAcceptedSettlement() {
+        Settlement settlement = givenManualReview(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+
+        service.resolve(MASTER_ID, SETTLEMENT_ID, null);
+
+        assertEquals(SettlementStatus.FAILED, settlement.getStatus());
+        verify(ledgerClient, never()).cancelSettlementTransaction(any(), any());
     }
 
     // 처리할 수 없는 경우

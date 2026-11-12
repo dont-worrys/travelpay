@@ -46,7 +46,7 @@ class ManualReviewRulesTest {
                         "재시도 한도 초과, 원장 거절 확인 → 결제 거절"),
                 ManualReviewRules.decidePayment(RETRY_EXHAUSTED, REJECTED, PAYMENT_ENTRIES));              // P2
         assertEquals(new PaymentDecision(true, PaymentStatus.DECLINED, "결제 처리 시간이 초과되어 취소되었습니다.",
-                        "재시도 한도 초과, 원장 기록 없음 → 결제 시간 초과 취소"),
+                        "재시도 한도 초과, 원장 기록 없음 → 결제 시간 초과 취소(원장 취소 기록)"),
                 ManualReviewRules.decidePayment(RETRY_EXHAUSTED, NOT_FOUND, PAYMENT_ENTRIES));             // P3
         assertEquals(new PaymentDecision(true, PaymentStatus.DECLINED, "결제 처리 중 오류로 취소되었습니다.",
                         "원장 요청 거부, 원장 거절 확인 → 결제 취소"),
@@ -65,6 +65,15 @@ class ManualReviewRulesTest {
                                 new Entry(USER_WALLET, "KRW", "DEBIT", 500L, "PAYMENT_OUT"),
                                 new Entry(MERCHANT_WALLET, "KRW", "CREDIT", 500L, "PAYMENT_IN"))),
                         PAYMENT_ENTRIES));                                                                // P5 내용 다름
+    }
+
+    // 원장 취소는 재시도를 다 쓴 결제가 원장에 없을 때만(P3). 요청 거부는 원장이 이미 답해 늦은 커밋이 없음
+    @Test
+    void requiresLedgerCancelOnlyForExhaustedPaymentMissingFromLedger() {
+        assertTrue(ManualReviewRules.requiresLedgerCancel(RETRY_EXHAUSTED, NOT_FOUND));
+        assertFalse(ManualReviewRules.requiresLedgerCancel(RETRY_EXHAUSTED, PAYMENT_POSTED));
+        assertFalse(ManualReviewRules.requiresLedgerCancel(RETRY_EXHAUSTED, REJECTED));
+        assertFalse(ManualReviewRules.requiresLedgerCancel(LEDGER_REQUEST_NOT_ACCEPTED, NOT_FOUND));
     }
 
     @Test

@@ -90,7 +90,7 @@ public class SettlementReviewService {
     public SettlementResolveResult resolve(UUID actorId, UUID settlementId, String memo) {
         Settlement settlement = findManualReview(settlementId);
         SettlementReviewReason reviewReason = settlement.getReviewReason();
-        PaymentLedgerLookup ledger = ledgerClient.findSettlementTransaction(settlementId);
+        PaymentLedgerLookup ledger = settlementLedgerForResolve(reviewReason, settlementId, actorId);
         Decision decision = SettlementReviewRules.decide(reviewReason, ledger, expectedEntries(settlement));
         if (!decision.resolvable()) {
             log.error("원장 보정 필요: 원장 거래 내용이 정산과 다름 settlementId={} reviewReason={} "
@@ -124,6 +124,19 @@ public class SettlementReviewService {
         log.info("정산 MANUAL_REVIEW 처리 settlementId={} reviewReason={} ledger={} → {} actorId={}",
                 settlementId, reviewReason, ledger.status(), result.status(), actorId);
         return result;
+    }
+
+    // 재시도를 다 쓴 정산이 원장에 없으면 취소 기록을 먼저 남기고 그 응답으로 처리. FAILED 뒤 재요청은 새 reference라
+    // 마지막 요청이 늦게 커밋되면 이중 지급이 되므로 막는다. 취소 여부를 모르면 503(상태 유지)
+    private PaymentLedgerLookup settlementLedgerForResolve(SettlementReviewReason reviewReason, UUID settlementId,
+                                                           UUID actorId) {
+        PaymentLedgerLookup found = ledgerClient.findSettlementTransaction(settlementId);
+        if (!SettlementReviewRules.requiresLedgerCancel(reviewReason, found)) {
+            return found;
+        }
+        PaymentLedgerLookup afterCancel = ledgerClient.cancelSettlementTransaction(settlementId, actorId);
+        log.info("정산 MANUAL_REVIEW 처리 전 원장 취소 settlementId={} result={}", settlementId, afterCancel.status());
+        return afterCancel;
     }
 
     private Settlement findManualReview(UUID settlementId) {
