@@ -84,7 +84,7 @@ jobs:
           - python: "3.9"
             postgres: "1"
           # 인프라 담당자 PC에서 도는 도구(비밀값 준비·이미지 게시)는 최신 버전으로도 확인합니다.
-          - python: "3.14"
+          - python: "3.15"
             postgres: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

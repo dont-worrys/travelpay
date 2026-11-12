@@ -11,7 +11,7 @@ PR이 `dev`·`main`을 대상으로 열리거나 갱신될 때와 `dev`·`main`�
 | `ci.yml` | Gradle build | `./gradlew build`로 모든 서비스의 컴파일·테스트. 서비스 통합 테스트는 Testcontainers로 Docker를 씁니다 |
 | `ci.yml` | Terraform | `infra/aws` 형식(`fmt -check`), 본 root와 State bootstrap root의 `validate`·`test`. State·AWS 자격 증명 없이 모의 provider로 검사합니다 |
 | `ci.yml` | Python 3.9 | 인프라 스크립트 테스트. 3.9는 Data·앱 호스트(AL2023)의 `python3` 버전이며, DB 초기화 SQL을 실제 PostgreSQL로 검사합니다 |
-| `ci.yml` | Python 3.14 | 같은 테스트를 인프라 담당자 PC 도구(비밀값 준비·이미지 게시)용 최신 버전으로 |
+| `ci.yml` | Python 3.15 | 같은 테스트를 인프라 담당자 PC 도구(비밀값 준비·이미지 게시)용 최신 버전으로 |
 | `ci-container.yml` | Image and monitoring | 실행 이미지를 실제로 빌드해 실행 사용자·권한·시작 스크립트를 확인하고, 운영 Alloy·Loki 설정으로 로그 레이블을 확인합니다. 오래 걸리므로 Dockerfile·시작 스크립트·Gradle 빌드 설정·모니터링 설정이 바뀐 경우에만 돕니다 |
 
 실패하면 Actions 화면의 해당 작업 로그를 봅니다. Gradle 테스트가 실패하면 테스트 보고서(`gradle-test-reports`)를 7일 동안 내려받을 수 있습니다. 로컬에서 같은 검사를 돌리는 명령은 각 작업의 `run` 줄과 같습니다.
@@ -36,4 +36,4 @@ curl -s https://api.github.com/repos/<소유자>/<저장소>/git/ref/tags/<태�
 
 ### 머지 조건으로 걸기(선택)
 
-저장소 설정의 브랜치 보호 규칙에서 `Gradle build`, `Terraform`, `Python 3.9`, `Python 3.14`를 필수 검사로 지정할 수 있습니다. `Image and monitoring`은 관련 파일이 바뀐 PR에서만 돌기 때문에 필수로 지정하면 다른 PR이 머지되지 않습니다.
+저장소 설정의 브랜치 보호 규칙에서 `Gradle build`, `Terraform`, `Python 3.9`, `Python 3.15`를 필수 검사로 지정할 수 있습니다. `Image and monitoring`은 관련 파일이 바뀐 PR에서만 돌기 때문에 필수로 지정하면 다른 PR이 머지되지 않습니다.
