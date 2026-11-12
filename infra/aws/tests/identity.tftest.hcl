@@ -8,6 +8,9 @@ mock_provider "aws" {
 variables {
   enable_app_foundation            = false
   enable_data_foundation           = false
+  alert_email                      = null
+  enable_app_runtime               = false
+  application_images               = null
   app_host_count                   = 0
   enable_database_bootstrap_access = false
   enable_github_deployment         = false
@@ -92,9 +95,10 @@ run "host_ssm_policy_cannot_read_application_secrets" {
       sort(jsondecode(aws_iam_role_policy.ssm_boundary["data"].policy).Statement[1].NotResource) == sort([
         "arn:aws:ssm:ap-northeast-2:123456789012:parameter/travelpay/production/REDIS_SESSION_PASSWORD",
         "arn:aws:ssm:ap-northeast-2:123456789012:parameter/travelpay/production/REDIS_CACHE_PASSWORD",
+        "arn:aws:ssm:ap-northeast-2:123456789012:parameter/travelpay/production/GRAFANA_ADMIN_PASSWORD",
       ])
     )
-    error_message = "Data 호스트는 기본적으로 두 Redis 비밀값만 읽고 재귀 경로 조회는 차단해야 합니다."
+    error_message = "Data 호스트는 기본적으로 두 Redis 비밀값과 Grafana 관리자 암호만 읽고 재귀 경로 조회는 차단해야 합니다."
   }
 }
 
@@ -161,4 +165,42 @@ run "reject_wildcard_environment" {
   }
 
   expect_failures = [var.github_environment]
+}
+
+run "enabled_deployment_can_read_task_definitions" {
+  command = apply
+
+  variables {
+    enable_github_deployment = true
+  }
+
+  # DescribeTaskDefinition은 리소스 단위 권한을 지원하지 않아 "*" 외의 Resource로는 허용되지 않습니다.
+  assert {
+    condition = alltrue([
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      statement.Resource == ["*"] if contains(statement.Action, "ecs:DescribeTaskDefinition")
+      ]) && length([
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      statement if contains(statement.Action, "ecs:DescribeTaskDefinition")
+    ]) == 1
+    error_message = "배포 역할이 기준 Task Definition을 조회할 수 있어야 합니다."
+  }
+}
+
+run "enabled_deployment_cannot_register_privileged_tasks" {
+  command = apply
+
+  variables {
+    enable_github_deployment = true
+  }
+
+  # 값이 true인 요청만 거부해야 privileged 키가 없는 일반 등록이 막히지 않습니다.
+  assert {
+    condition = length([
+      for statement in jsondecode(aws_iam_role_policy.github_deploy[0].policy).Statement :
+      statement if statement.Effect == "Deny" && statement.Action == ["ecs:RegisterTaskDefinition"] &&
+      try(statement.Condition.Bool["ecs:privileged"], "") == "true"
+    ]) == 1
+    error_message = "배포 역할은 privileged 컨테이너가 있는 Task Definition을 등록할 수 없어야 합니다."
+  }
 }

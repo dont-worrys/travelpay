@@ -7,12 +7,21 @@ locals {
     for name, group in local.host_log_group_names :
     name => "arn:aws:logs:${local.runtime_region}:${var.aws_account_id}:log-group:${group}:*"
   }
+  # 앱 호스트는 ASG가 교체해 인스턴스 ID가 바뀌므로 ASG 이름 차원을 붙이고 그룹 단위로도 합칩니다(alarms.tf가 사용).
+  # ASG 이름은 Agent가 EC2 태그 조회(ec2:DescribeTags, ECS 호스트 관리형 정책에 포함)로 얻습니다.
+  # Data는 ASG에 속하지 않으므로 기존 설정을 그대로 둡니다. 바꾸면 Data 설정 묶음이 다시 적용됩니다.
+  host_metric_dimensions = {
+    app_host = {
+      append_dimensions      = { AutoScalingGroupName = "$${aws:AutoScalingGroupName}", InstanceId = "$${aws:InstanceId}" }
+      aggregation_dimensions = [["AutoScalingGroupName"]]
+    }
+    data = { append_dimensions = { InstanceId = "$${aws:InstanceId}" } }
+  }
   host_cloudwatch_configs = {
     for role, group in local.host_log_group_names : role => jsonencode({
       agent = { metrics_collection_interval = 60 }
-      metrics = {
-        namespace         = "Travelpay/Hosts"
-        append_dimensions = { InstanceId = "$${aws:InstanceId}" }
+      metrics = merge(local.host_metric_dimensions[role], {
+        namespace = "Travelpay/Hosts"
         metrics_collected = {
           mem = { measurement = ["mem_used_percent"] }
           disk = {
@@ -20,7 +29,7 @@ locals {
             resources   = role == "data" ? ["/", "/srv/travelpay/kafka", "/srv/travelpay/monitoring"] : ["/"],
           }
         }
-      }
+      })
       logs = {
         logs_collected = {
           files = {

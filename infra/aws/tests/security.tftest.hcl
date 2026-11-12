@@ -100,6 +100,9 @@ override_resource {
 variables {
   enable_app_foundation            = false
   enable_data_foundation           = false
+  alert_email                      = null
+  enable_app_runtime               = false
+  application_images               = null
   app_host_count                   = 0
   enable_database_bootstrap_access = false
   enable_github_deployment         = false
@@ -153,9 +156,6 @@ run "service_connections_match_the_allowed_matrix" {
         ["monitoring", "eureka", 8761],
         ["monitoring", "mock_bank", 8090],
         ["log_collector", "monitoring", 3100],
-        ["monitoring", "log_collector", 12345],
-        ["monitoring", "monitoring", 9090],
-        ["monitoring", "monitoring", 3100],
       ] : "${aws_security_group.boundary[edge[0]].id}>${aws_security_group.boundary[edge[1]].id}:${edge[2]}-${edge[2]}/tcp"
     ])
     error_message = "실제 업무·수집 호출에 필요한 연결만 정확한 방향과 TCP 포트로 허용해야 합니다."
@@ -248,7 +248,7 @@ run "database_bootstrap_access_is_explicit" {
       if rule.security_group_id == aws_security_group.boundary["data"].id &&
       rule.referenced_security_group_id == aws_security_group.boundary["rds"].id &&
       rule.from_port == 5432 && rule.to_port == 5432 && rule.ip_protocol == "tcp"
-    ]) == 1 && length(aws_vpc_security_group_ingress_rule.internal) == 42 && length(aws_vpc_security_group_egress_rule.internal) == 42
+    ]) == 1 && length(aws_vpc_security_group_ingress_rule.internal) == 39 && length(aws_vpc_security_group_egress_rule.internal) == 39
     error_message = "초기화 옵션은 Data→RDS5432 한 연결만 양방향으로 추가해야 합니다."
   }
 }

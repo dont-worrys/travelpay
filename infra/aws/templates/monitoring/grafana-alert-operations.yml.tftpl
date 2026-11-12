@@ -1,0 +1,98 @@
+# TRAVELPAY 운영 Grafana 알림 규칙 - 수집·복구 동작 감시
+#
+# 송금 알림 규칙(transfer-alerts.yml)은 지표가 없을 때(NoData) OK로 두므로 서비스가 꺼지거나 수집이 끊기면 조용해지고,
+# 복구 스케줄러가 멈추면 게이지가 마지막 값에 머뭅니다. 이 두 공백을 아래 규칙이 따로 감시합니다.
+# 알림 채널(contact point)은 두지 않아 Grafana Alerting 화면과 API에서 상태(Normal / Firing)만 확인합니다.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: production-health
+    folder: TRAVELPAY
+    interval: 30s
+    rules:
+      # Eureka에서 빠진 서비스는 up 시계열 자체가 사라지므로, 서비스 목록을 0으로 채워 사라진 서비스도 0개로 셉니다.
+      # 쿼리가 항상 값을 돌려주므로 NoData는 Prometheus 쪽 이상입니다.
+      - uid: service-metrics-missing
+        title: 서비스 지표 수집 중단
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                sum by (service) (up{job="spring-jvm",environment="production"} == 1)
+%{ for service in services ~}
+                or label_replace(vector(0), "service", "${service}", "", "")
+%{ endfor ~}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        noDataState: Alerting
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: critical
+          domain: platform
+        annotations:
+          summary: '{{ $labels.service }} 지표를 2분 넘게 수집하지 못했습니다.'
+          description: >-
+            정상 수집 대상이 0개입니다. ECS Service의 실행 Task 수, Eureka 등록 상태, Task 로그와
+            Prometheus Targets 화면을 확인합니다. 송금 알림 규칙은 이 상태에서 NoData(OK)로 보입니다.
+
+      # 복구 스케줄러는 10초마다 실행되고 Spring이 실행마다 tasks_scheduled_execution 횟수를 올립니다.
+      # 2분 동안 한 번도 끝나지 않으면 스케줄러가 멈췄거나 한 번의 실행이 끝나지 않는 것입니다.
+      # payment-service가 수집되는데 스케줄러의 실행 기록이 아예 없을 때(비활성·클래스 이름 변경)도 0으로 채워 같이 알립니다.
+      # Task가 하나(desiredCount=1)라 Task별로 나누지 않고 합칩니다. 시작 직후 첫 실행(10초 뒤)까지의 공백은 for 2분이 넘깁니다.
+      - uid: payment-recovery-scheduler-stalled
+        title: 결제·송금 복구 스케줄러 정지
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                sum by (code_namespace) (increase(tasks_scheduled_execution_seconds_count{job="spring-jvm",environment="production",service="payment-service",code_function="recover"}[2m]))
+%{ for scheduler in recovery_schedulers ~}
+                or label_replace(count(up{job="spring-jvm",environment="production",service="payment-service"} == 1) * 0, "code_namespace", "${scheduler}", "", "")
+%{ endfor ~}
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    type: lt
+                    params: [1]
+        # payment-service가 없으면 위 수집 중단 규칙이 알립니다.
+        noDataState: OK
+        execErrState: Error
+        for: 2m
+        labels:
+          severity: critical
+          domain: transfer
+        annotations:
+          summary: '{{ $labels.code_namespace }}가 2분 넘게 실행을 마치지 못했습니다.'
+          description: >-
+            송금·결제 상태 게이지는 이 스케줄러가 갱신하므로 함께 멈춥니다. payment-service의 ERROR 로그,
+            DB 연결(HikariCP)과 스케줄러 스레드 상태를 확인합니다. 실행 기록 지표가 없어도 같은 상태가 되므로
+            스케줄러 설정과 클래스 이름이 monitoring.tf의 목록과 같은지도 확인합니다.

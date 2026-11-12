@@ -1,0 +1,60 @@
+# TRAVELPAY 운영 Prometheus 설정입니다. 로컬(infra/monitoring/prometheus)과 같은 job·label 이름을 써서
+# 같은 대시보드·알림 규칙이 그대로 동작합니다. 대상 주소만 운영 방식으로 찾습니다.
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+
+  - job_name: loki
+    static_configs:
+      - targets: [loki:3100]
+
+  - job_name: alloy
+    static_configs:
+      - targets: [alloy:12345]
+
+  # 업무 서비스는 Task IP가 롤링마다 바뀌므로 Eureka 등록 정보로 찾습니다.
+  # Gateway처럼 관리 포트를 따로 여는 서비스는 Eureka 메타데이터(management.port)의 포트로 수집합니다.
+  - job_name: spring-jvm
+    metrics_path: /actuator/prometheus
+    eureka_sd_configs:
+      - server: ${eureka_url}
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: [__meta_eureka_app_name]
+        target_label: service
+        action: lowercase
+      - source_labels: [__meta_eureka_app_instance_ip_addr, __meta_eureka_app_instance_metadata_management_port]
+        regex: (.+);([0-9]+)
+        target_label: __address__
+        replacement: $1:$2
+      - target_label: environment
+        replacement: production
+
+  # Eureka 서버 자신과 Mock Bank는 Eureka에 등록하지 않으므로 Cloud Map 사설 DNS로 찾습니다.
+  - job_name: spring-jvm-dns
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+%{ for target in dns_targets ~}
+      - names: [${target.dns_name}]
+        type: A
+        port: ${target.port}
+        refresh_interval: 15s
+%{ endfor ~}
+    relabel_configs:
+      - target_label: job
+        replacement: spring-jvm
+%{ for target in dns_targets ~}
+      - source_labels: [__meta_dns_name]
+        regex: ${replace(target.dns_name, ".", "\\.")}
+        target_label: service
+        replacement: ${target.service}
+%{ endfor ~}
+      - target_label: environment
+        replacement: production

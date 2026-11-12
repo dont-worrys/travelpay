@@ -23,7 +23,8 @@ class DatabaseBootstrapPostgresTest(unittest.TestCase):
                         "--network", "none", "--memory", "512m", "--cpus", "1",
                         "--tmpfs", "/var/lib/postgresql:rw,size=512m",
                         "--env", "POSTGRES_HOST_AUTH_METHOD=trust", "--env", "POSTGRES_DB=travelpay",
-                        "postgres:18.6-bookworm"], check=True, capture_output=True)
+                        "postgres:18.6-bookworm", "postgres", "-c", "shared_preload_libraries=pg_stat_statements"],
+                       check=True, capture_output=True)
         try:
             def sql(statement, user="postgres"):
                 return subprocess.run(["docker", "exec", "--interactive", name, "psql", "-X", "--no-password",
@@ -37,11 +38,27 @@ class DatabaseBootstrapPostgresTest(unittest.TestCase):
             else:
                 self.fail("PostgreSQL 테스트 컨테이너가 준비되지 않았습니다.")
             self.assertEqual(sql("CREATE ROLE bootstrap_admin LOGIN CREATEROLE CREATEDB; ALTER DATABASE travelpay OWNER TO bootstrap_admin;").returncode, 0)
+            self.assertEqual(sql("CREATE EXTENSION pg_stat_statements;").returncode, 0)
+            # 소켓은 그대로 두고 TCP 접속만 SCRAM 암호 인증을 요구합니다.
+            hba = subprocess.run(["docker", "exec", name, "sh", "-c",
+                                  'printf "local all all trust\\nhost all all 127.0.0.1/32 scram-sha-256\\n" > "$PGDATA/pg_hba.conf"'],
+                                 capture_output=True, timeout=30)
+            self.assertEqual(hba.returncode, 0, hba.stderr)
+            self.assertEqual(sql("SELECT pg_reload_conf();").returncode, 0)
+
+            def login(user, password):
+                return subprocess.run(["docker", "exec", "--env", "PGPASSWORD=" + password, name, "psql", "-X",
+                                       "--no-password", "-h", "127.0.0.1", "-U", user, "-d", "travelpay", "-c", "SELECT 1;"],
+                                      capture_output=True, text=True, timeout=30)
             databases = {"user": {"schema": "user_service", "username": "user_app"},
                          "wallet": {"schema": "wallet_service", "username": "wallet_app"}}
             command = database.build_sql("travelpay", databases, {"user": "a" * 64, "wallet": "b" * 64})
             first = sql(command, "bootstrap_admin")
             self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(login("user_app", "a" * 64).returncode, 0)
+            self.assertNotEqual(login("user_app", "c" * 64).returncode, 0)
+            self.assertEqual(sql("SELECT count(*) FROM pg_stat_statements WHERE query LIKE '%" + "a" * 64 + "%';").stdout.strip(), "0")
+            self.assertNotEqual(sql("SELECT count(*) FROM pg_stat_statements WHERE query LIKE '%SCRAM-SHA-256$%';").stdout.strip(), "0")
             self.assertEqual(sql("CREATE TABLE user_service.sentinel(id int); INSERT INTO user_service.sentinel VALUES(7);", "user_app").returncode, 0)
             again = sql(command, "bootstrap_admin")
             self.assertEqual(again.returncode, 0, again.stderr)

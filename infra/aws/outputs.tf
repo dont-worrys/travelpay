@@ -45,6 +45,46 @@ output "application_capacity" {
   } : null
 }
 
+output "application_repositories" {
+  description = "이미지 게시 도구가 사용하는 서비스별 ECR 주소입니다."
+  value       = { for key, repository in aws_ecr_repository.application : key => repository.repository_url }
+}
+
+output "api_certificate" {
+  description = "Cloudflare에 추가할 ACM DNS 검증 레코드입니다. 프록시 없이(DNS only) 추가하고 발급 뒤에도 갱신용으로 유지합니다."
+  value = var.enable_app_foundation ? {
+    arn    = aws_acm_certificate.api[0].arn
+    domain = aws_acm_certificate.api[0].domain_name
+    validation_records = [
+      for option in aws_acm_certificate.api[0].domain_validation_options : {
+        name = option.resource_record_name, type = option.resource_record_type, value = option.resource_record_value
+      }
+    ]
+  } : null
+}
+
+output "application_runtime" {
+  description = "Task 정의와 공개 진입점입니다. ECS Service는 아직 없으며 Cloudflare API 레코드는 PR4에서 ALB로 바꿉니다."
+  value = var.enable_app_runtime ? {
+    task_definitions   = { for key, task in aws_ecs_task_definition.application : key => task.arn }
+    load_balancer_dns  = aws_lb.api[0].dns_name
+    gateway_target_arn = aws_lb_target_group.gateway[0].arn
+  } : null
+}
+
+output "monitoring" {
+  description = "Grafana는 공개하지 않으므로 SSM 포트 포워딩으로 접속합니다(로컬 http://localhost:3000). AWS 기본 지표는 CloudWatch 대시보드로 봅니다."
+  value = var.enable_data_foundation ? {
+    grafana_port_forward = "aws ssm start-session --target ${aws_instance.data[0].id} --document-name AWS-StartPortForwardingSession --parameters portNumber=3000,localPortNumber=3000"
+    cloudwatch_dashboard = aws_cloudwatch_dashboard.operations[0].dashboard_name
+  } : null
+}
+
+output "alerts_topic_arn" {
+  description = "CloudWatch 경보를 보내는 SNS 주제입니다. 이메일 구독은 받는 사람이 확인해야 활성화됩니다."
+  value       = one(aws_sns_topic.alerts[*].arn)
+}
+
 output "data_runtime" {
   description = "Data 접속·초기화용 비밀값 없는 실행 계약입니다. 관리자 암호 대신 Secret ARN만 제공합니다."
   value = var.enable_data_foundation ? {
@@ -55,5 +95,11 @@ output "data_runtime" {
     database_host     = aws_db_instance.main[0].address
     master_secret_arn = one(aws_db_instance.main[0].master_user_secret).secret_arn
     volumes           = { for name, volume in aws_ebs_volume.data : name => volume.id }
+    config_bundle = {
+      bucket         = aws_s3_bucket.data_config[0].id
+      key            = aws_s3_object.data_bundle[0].key
+      sha256         = sha256(local.data_bundle_json)
+      association_id = aws_ssm_association.data_apply[0].association_id
+    }
   } : null
 }

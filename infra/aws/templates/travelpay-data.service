@@ -15,6 +15,10 @@ UMask=0077
 ExecStartPre=/usr/bin/python3 /opt/travelpay/data/mount-data-volumes.py
 ExecStartPre=/usr/bin/python3 /opt/travelpay/data/prepare-data.py
 ExecStart=/usr/bin/docker compose --env-file runtime.env up --detach --wait --wait-timeout 240
+# 설정 묶음을 적용할 때 서비스를 멈추지 않고 바뀐 컨테이너만 다시 만듭니다.
+ExecReload=/usr/bin/python3 /opt/travelpay/data/mount-data-volumes.py
+ExecReload=/usr/bin/python3 /opt/travelpay/data/prepare-data.py
+ExecReload=/usr/bin/docker compose --env-file runtime.env up --detach --wait --wait-timeout 240
 ExecStop=/usr/bin/docker compose --env-file runtime.env stop --timeout 60
 TimeoutStartSec=900
 TimeoutStopSec=90
