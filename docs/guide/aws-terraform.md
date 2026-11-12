@@ -273,7 +273,7 @@ sudo python3 /opt/travelpay/data/bootstrap-database.py
 
 `--reset-statement-stats`를 붙이면 끝에 `pg_stat_statements` 통계를 비웁니다.
 - 통계 수집은 미리 불러온 라이브러리가 하지만, 비우는 함수는 확장을 만들어야 생깁니다. 그래서 확장이 없으면 먼저 만듭니다(통계 조회·비우기 함수만 추가).
-- RDS 관리자 계정이 이 확장을 만들거나 함수를 실행할 수 있는지는 문서로 확인하지 못했습니다. 거절되면 원인을 오류로 보여 줍니다.
+- RDS 관리자 계정이 이 확장을 만들거나 함수를 실행할 수 있는지는 AWS 문서로 확인하지 못했지만, 2026-11-12 실제 RDS에서 성공했습니다. 거절되면 원인을 오류로 보여 줍니다.
 - 이 단계가 실패해도 암호는 이미 바뀐 뒤라, 통계와 백업에 남은 옛 평문 암호로는 로그인할 수 없습니다.
 
 PR2 때 평문으로 보낸 DB 암호를 교체하는 작업 창은 아래 순서를 지킵니다. 교체보다 초기화를 먼저 하면 옛 암호가 그대로 유효한 채 통계만 지워집니다.
@@ -291,6 +291,41 @@ sudo python3 /opt/travelpay/data/bootstrap-database.py --reset-statement-stats
 ```
 
 초기화 성공과 앱 계정의 자기 스키마 접근·타 스키마 차단을 확인한 뒤 옵션을 `false`로 되돌려 새 plan/apply합니다. 공용 namespace는 Kafka 주소 때문에 먼저 만들며, 후속 Eureka·Mock Bank도 같은 `travelpay.internal`을 재사용합니다.
+
+초기화 명령은 반드시 `aws ssm start-session`으로 접속한 그 창 안(Data 호스트)에서 실행합니다. 다른 터미널에서 실행하면 운영자 PC에서 실행되어 아무것도 바뀌지 않습니다.
+
+**운영 DB 직접 접속.** RDS는 사설망에만 있고 5432는 앱 Task의 SG에서만 받으므로, 운영자는 위 작업 창을 연 동안에만 Data 호스트를 거쳐 접속합니다. 암호는 외우거나 적어 두지 않고 쓸 때마다 SSM에서 꺼냅니다.
+
+| 서비스 | 스키마 | DB 계정 | 암호(SSM) |
+|---|---|---|---|
+| user | `user_service` | `user_app` | `/travelpay/production/USER_DB_PASSWORD` |
+| wallet | `wallet_service` | `wallet_app` | `/travelpay/production/WALLET_DB_PASSWORD` |
+| payment | `payment_service` | `payment_app` | `/travelpay/production/PAYMENT_DB_PASSWORD` |
+| exchange | `exchange_service` | `exchange_app` | `/travelpay/production/EXCHANGE_DB_PASSWORD` |
+| ledger | `ledger_service` | `ledger_app` | `/travelpay/production/LEDGER_DB_PASSWORD` |
+| mock-bank | `mock_bank` | `mock_bank_app` | `/travelpay/production/MOCK_BANK_DB_PASSWORD` |
+
+1. `enable_database_bootstrap_access=true`로 plan을 만들어 검토한 뒤 적용합니다.
+2. `terraform -chdir=infra/aws output data_runtime`에서 `instance_id`와 `database_host`를 확인합니다.
+3. 터널을 엽니다(접속하는 동안 켜 둠). Windows PowerShell은 줄 바꿈 기호 `\` 대신 백틱(`` ` ``)을 씁니다.
+
+   ```bash
+   aws ssm start-session --profile <프로필> --region ap-northeast-2 --target <instance_id> \
+     --document-name AWS-StartPortForwardingSessionToRemoteHost \
+     --parameters "host=<database_host>,portNumber=5432,localPortNumber=15432"
+   ```
+
+4. 다른 창에서 암호를 클립보드로 꺼냅니다(Linux Wayland `| wl-copy`, Windows `| Set-Clipboard`).
+
+   ```bash
+   aws ssm get-parameter --profile <프로필> --region ap-northeast-2 --name /travelpay/production/USER_DB_PASSWORD \
+     --with-decryption --query Parameter.Value --output text | wl-copy
+   ```
+
+5. DB 도구에서 `localhost:15432`, DB `travelpay`, 표의 계정, SSL `require`로 접속합니다. 터널은 주소가 `localhost`라 인증서 이름 검사(`verify-full`)는 맞지 않습니다.
+6. 끝나면 터널을 닫고 옵션을 `false`로 되돌려 plan/apply합니다.
+
+관리 작업에만 RDS 관리자 계정을 씁니다. 암호는 Secrets Manager(`master_secret_arn`)에 있고 RDS가 관리하므로 쓸 때마다 꺼냅니다. 이 경로를 쓸 수 있는 AWS 자격 증명은 인프라 관리자 프로필뿐이며, 팀원에게 열려면 포트 포워딩과 자기 서비스 암호 하나만 허용하는 별도 IAM 권한을 만들어야 합니다.
 
 `data.travelpay.internal`은 Cloud Map의 서비스·인스턴스 등록으로 생성합니다. Cloud Map 소유 영역에 Route 53 레코드를 직접 쓰는 방식은 AWS에서 거절됩니다. RDS는 비밀번호 DDL이 오류의 문맥에 남지 않도록 `log_statement=none`, `log_min_error_statement=panic`, `log_error_verbosity=terse`를 사용합니다. 오류의 상세·문맥 대신 기본 오류와 애플리케이션의 안전한 진단 정보를 확인합니다.
 
@@ -609,5 +644,19 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
 
 이번 이미지는 기능 브랜치 커밋으로 만든 검증용입니다. 운영에는 main에 머지된 커밋의 이미지만 배포합니다. PR4에서 첫 Service를 만들기 전에 main 커밋으로 다시 빌드해 Task 정의의 digest를 바꾸고, 이후 배포는 CD가 main 커밋으로만 합니다.
+
+2026-11-12 PR2 때 평문으로 보낸 DB 앱 계정 암호를 교체하고 mock-bank 계정 이름을 맞췄습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | Gradle 전체 3,425개, 본 root 구성 테스트 59개·bootstrap 3개, Python 103개(실제 PostgreSQL 18.6 시나리오 5개 포함) 통과, 독립 리뷰 지적 반영 |
+| 암호 교체 | `--rotate-database-passwords`로 DB 암호 6개 `rotated`, 나머지 11개 `preserved` |
+| 작업 창 열기 | 추가 5·변경 5·삭제 2. mock-bank Task 정의 리비전 3(`mock_bank_app`), 리비전 2는 롤백용으로 남음. 설정 묶음에서 초기화 스크립트·`runtime.json` 두 파일만 바뀌어 컨테이너 재생성 없음 |
+| 초기화 | 계정 6개가 새 SSM 암호로 로그인해 자기 스키마 확인, `bank_app` 삭제와 스키마 소유자 이전, 쿼리 통계 비우기 성공 |
+| 작업 창 닫기 | 변경 4·삭제 3. Data → RDS 5432 차단, Data 역할의 DB 암호·관리자 Secret 조회 `AccessDeniedException`, Redis 암호 조회는 정상 |
+| 실행 중인 것 | Redis·Kafka·모니터링 컨테이너 7개와 두 유닛의 시작 시각이 적용 전과 같음 |
+| 적용 후 재검사 | 본 root plan `No changes` |
+
+처음 작업 창에서는 초기화가 실행되지 않은 채 창이 닫혀(SSM 세션·명령 기록 없음) 다시 열어 실행했습니다. 그 사이 앱 Task가 없어 영향은 없었습니다.
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).
