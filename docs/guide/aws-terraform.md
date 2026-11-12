@@ -572,4 +572,16 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 기타 | CloudWatch 대시보드 위젯 11개, association 두 개 Success, 이전 SSM 문서 삭제 |
 | 적용 후 재검사 | 본 root plan `No changes` |
 
+2026-11-12 운영 실행 설정 점검 반영은 다음과 같이 확인했습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 이미지 게시 | 커밋 `53e270f` 기준 8개를 태그 `53e270f9d4a3`으로 게시. ECR digest의 Ledger·Gateway 이미지 jar에서 바뀐 설정(커넥션 대기 2000·검증 1000, 전달 연결 대기 2000) 확인 |
+| 적용 | 저장한 plan 적용: Task 정의 8개 새 리비전(2), 다른 리소스 변경 없음. 이전 리비전(1)은 롤백용으로 남음 |
+| Task 정의 | 8개 모두 새 digest, Eureka에 자기 보호 끄기와 응답 캐시 5초 |
+| 시험 실행 | 8개 서비스 모두 새 이미지로 시험 Task 실행, 종료 코드 0. uid 10001, 루트 읽기 전용, `/tmp` 쓰기, 비밀값 주입, Task IP 확인, 허용 대상(RDS·Redis·Kafka) 연결 |
+| 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
+
+이번 이미지는 기능 브랜치 커밋으로 만든 검증용입니다. 운영에는 main에 머지된 커밋의 이미지만 배포합니다. PR4에서 첫 Service를 만들기 전에 main 커밋으로 다시 빌드해 Task 정의의 digest를 바꾸고, 이후 배포는 CD가 main 커밋으로만 합니다.
+
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).
