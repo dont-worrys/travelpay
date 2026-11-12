@@ -11,6 +11,7 @@ variables {
   alert_email                      = null
   enable_app_runtime               = false
   enable_app_services              = false
+  enable_public_entry              = false
   application_images               = null
   app_host_count                   = 0
   enable_database_bootstrap_access = false
@@ -166,6 +167,26 @@ run "reject_wildcard_environment" {
   }
 
   expect_failures = [var.github_environment]
+}
+
+run "origin_auth_secret_is_prepared_but_no_role_reads_it" {
+  command = plan
+
+  # 비밀값 준비 도구가 이 계약으로 값을 만들고, Terraform만 읽어 ALB 규칙에 넣습니다.
+  assert {
+    condition     = output.runtime_secret_parameters["ORIGIN_AUTH"] == "arn:aws:ssm:ap-northeast-2:123456789012:parameter/travelpay/production/ORIGIN_AUTH"
+    error_message = "원본 인증 값은 비밀값 준비 계약에 있어야 합니다."
+  }
+
+  assert {
+    condition = alltrue([
+      for policy in aws_iam_role_policy.task_execution : !strcontains(policy.policy, "ORIGIN_AUTH")
+      ]) && !contains(
+      jsondecode(aws_iam_role_policy.ssm_boundary["data"].policy).Statement[1].NotResource,
+      "arn:aws:ssm:ap-northeast-2:123456789012:parameter/travelpay/production/ORIGIN_AUTH",
+    )
+    error_message = "Task 실행 역할과 Data 호스트는 원본 인증 값을 읽을 수 없어야 합니다."
+  }
 }
 
 run "enabled_deployment_updates_only_the_application_services" {

@@ -153,6 +153,18 @@ variable "enable_app_services" {
   }
 }
 
+variable "enable_public_entry" {
+  description = "Cloudflare 원본 인증 값(ORIGIN_AUTH)과 Grafana 인증서 발급을 확인한 뒤 ALB에 원본 인증 헤더 검사와 Grafana 공개 경로를 켭니다."
+  type        = bool
+  default     = false
+  nullable    = false
+
+  validation {
+    condition     = !var.enable_public_entry || var.enable_app_services
+    error_message = "공개 진입점은 상시 실행 중인 앱(enable_app_services)이 있어야 켤 수 있습니다."
+  }
+}
+
 variable "application_images" {
   description = "서비스별 배포 이미지입니다. publish-images.py가 기록한 application-images.auto.tfvars.json의 digest 주소입니다."
   type        = map(string)

@@ -54,6 +54,19 @@ class ParameterPreparationTest(unittest.TestCase):
         self.assertEqual(len(base64.b64decode(first, validate=True)), 32)
         self.assertNotEqual(first, second)
 
+    def test_origin_auth_is_created_as_a_value_alb_header_rules_match_exactly(self):
+        # ALB 헤더 조건은 *·?를 와일드카드로 보고 128자까지라, 와일드카드 문자가 없는 16진수 64자여야 값 그대로 비교됩니다.
+        calls = []
+
+        def aws(operation, payload):
+            calls.append((operation, payload))
+            return {"Parameters": []} if operation == "describe-parameters" else {}
+
+        parameters.prepare(aws, ["/travelpay/production/ORIGIN_AUTH"], apply=True)
+        write = calls[-1][1]
+        self.assertEqual((write["Name"], write["Type"], write["Overwrite"]), ("/travelpay/production/ORIGIN_AUTH", "SecureString", False))
+        self.assertRegex(write["Value"], r"^[a-f0-9]{64}$")
+
     def test_external_key_is_stored_only_when_requested_and_never_generated(self):
         calls = []
 
@@ -77,10 +90,10 @@ class ParameterPreparationTest(unittest.TestCase):
         account = "123456789012"
         names = [f"{prefix}_DB_PASSWORD" for prefix in ["USER", "WALLET", "PAYMENT", "EXCHANGE", "LEDGER", "MOCK_BANK"]]
         names += ["REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD", "WALLET_ACCOUNT_NUMBER_KEY", "GRAFANA_ADMIN_PASSWORD",
-                  "KOREAEXIM_API_KEY"]
+                  "ORIGIN_AUTH", "KOREAEXIM_API_KEY"]
         contract = {name: f"arn:aws:ssm:ap-northeast-2:{account}:parameter/travelpay/production/{name}" for name in names}
         ordered = parameters.parameter_names(contract, account)
-        self.assertEqual(len(ordered), 11)
+        self.assertEqual(len(ordered), 12)
         self.assertEqual(ordered[-1], "/travelpay/production/KOREAEXIM_API_KEY")
         missing_wallet_with_extra_database = {name: arn for name, arn in contract.items() if name != "WALLET_ACCOUNT_NUMBER_KEY"}
         missing_wallet_with_extra_database["AUDIT_DB_PASSWORD"] = f"arn:aws:ssm:ap-northeast-2:{account}:parameter/travelpay/production/AUDIT_DB_PASSWORD"
@@ -90,6 +103,7 @@ class ParameterPreparationTest(unittest.TestCase):
             {**contract, "USER_DB_PASSWORD": f"arn:aws:ssm:ap-northeast-2:999999999999:parameter/travelpay/production/USER_DB_PASSWORD"},
             {name: arn for name, arn in contract.items() if name != "KOREAEXIM_API_KEY"},
             {name: arn for name, arn in contract.items() if name != "GRAFANA_ADMIN_PASSWORD"},
+            {name: arn for name, arn in contract.items() if name != "ORIGIN_AUTH"},
         ]:
             with self.subTest(names=sorted(broken)), self.assertRaises(parameters.ParameterPreparationError):
                 parameters.parameter_names(broken, account)

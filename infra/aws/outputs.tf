@@ -63,6 +63,19 @@ output "api_certificate" {
   } : null
 }
 
+output "grafana_certificate" {
+  description = "Cloudflare에 추가할 Grafana 인증서의 ACM DNS 검증 레코드입니다. API 인증서와 같이 프록시 없이(DNS only) 추가하고 유지합니다."
+  value = var.enable_app_foundation ? {
+    arn    = aws_acm_certificate.grafana[0].arn
+    domain = aws_acm_certificate.grafana[0].domain_name
+    validation_records = [
+      for option in aws_acm_certificate.grafana[0].domain_validation_options : {
+        name = option.resource_record_name, type = option.resource_record_type, value = option.resource_record_value
+      }
+    ]
+  } : null
+}
+
 output "application_runtime" {
   description = "Task 정의·ECS Service와 공개 진입점입니다. Cloudflare API 레코드는 공개 단계(PR4의 4-3)에서 ALB로 바꿉니다."
   value = var.enable_app_runtime ? {
@@ -74,8 +87,9 @@ output "application_runtime" {
 }
 
 output "monitoring" {
-  description = "Grafana는 공개하지 않으므로 SSM 포트 포워딩으로 접속합니다(로컬 http://localhost:3000). AWS 기본 지표는 CloudWatch 대시보드로 봅니다."
+  description = "공개 진입점을 켜면 Grafana는 Cloudflare Access를 거친 공개 주소로, 그 전에는 SSM 포트 포워딩(로컬 http://localhost:3000)으로 접속합니다. AWS 기본 지표는 CloudWatch 대시보드로 봅니다."
   value = var.enable_data_foundation ? {
+    grafana_url          = var.enable_public_entry ? "https://${local.grafana_domain_name}" : null
     grafana_port_forward = "aws ssm start-session --target ${aws_instance.data[0].id} --document-name AWS-StartPortForwardingSession --parameters portNumber=3000,localPortNumber=3000"
     cloudwatch_dashboard = aws_cloudwatch_dashboard.operations[0].dashboard_name
   } : null

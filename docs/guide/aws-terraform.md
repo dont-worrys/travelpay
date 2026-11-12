@@ -2,7 +2,7 @@
 
 Terraform 코드는 `infra/aws/`에서 관리합니다. Spring Boot Run과 별개이며 실제 리소스 생성은 Terraform의 `apply`로 실행합니다.
 
-**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3), DB 암호 교체·main 이미지·ECS Service 첫 기동(PR4의 4-1·4-2)의 실제 적용과 검증을 완료**했습니다. 공개 진입점(Cloudflare 레코드 전환·원본 인증·Grafana 공개), CD, 운영 검증은 후속 단계(PR4의 4-3~4-5)입니다.
+**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3), DB 암호 교체·main 이미지·ECS Service 첫 기동·공개 진입점(PR4의 4-1~4-3)의 실제 적용과 검증을 완료**했습니다. CI·CD와 운영 검증은 후속 단계(PR4의 4-4·4-5)입니다.
 
 설계·구현 기준은 [Terraform 설계·구현 원칙](https://app.notion.com/p/413530b4fe5980cf9edbc37ec93b957e)에 모으고, 이 문서는 인프라 담당자의 실행·이전 절차만 다룹니다.
 
@@ -223,7 +223,7 @@ VPC의 원래 Main Route Table도 local만 유지합니다. Public 여부는 IGW
 | 수집 | 모니터링 → 앱 메트릭, 로그 수집기 → Loki 등 필요한 내부 연결 |
 | 외부 HTTPS | App 호스트·Data·Exchange·모니터링의 TCP 443 송신 |
 
-관리 포트·Grafana는 인터넷에 공개하지 않고 SSH 포트도 열지 않습니다. 운영 접속은 후속 IAM·Compute 구현에서 SSM으로 연결합니다. Cloudflare 목록은 코드에 확인한 값을 기록하며, 변경 시 ALB 규칙과 Gateway 신뢰 설정을 함께 검토합니다.
+관리 포트는 인터넷에 공개하지 않고 SSH 포트도 열지 않습니다. Grafana는 공개 진입점을 켠 뒤 Cloudflare Access와 원본 인증 헤더를 거친 요청만 받습니다(공개 진입점 절). 운영 접속은 SSM으로 합니다. Cloudflare 목록은 코드에 확인한 값을 기록하며, 변경 시 ALB 규칙과 Gateway 신뢰 설정을 함께 검토합니다.
 
 SG 본체와 개별 규칙을 분리해 상호 참조에 따른 생성 순환을 피합니다. `aws_vpc_security_group_rules_exclusive`가 선언한 규칙 전체를 관리하고 VPC 기본 SG는 닫습니다. 다른 도구·수동 규칙을 같은 SG에 섞으면 다음 apply에서 제거될 수 있으므로 보존할 변경을 먼저 코드에 반영합니다.
 
@@ -251,7 +251,7 @@ python3 infra/aws/scripts/check-runtime-plan.py infra/aws/stage-4.tfplan --profi
 python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profile travelpay --account 123456789012
 ```
 
-비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가하면 DB 6개·Redis 2개·Grafana 관리자 암호를 SecureString으로 만듭니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. AWS CLI 기록(`cli_history`)이 켜져 있으면 요청 내용이 로컬 기록에 남으므로 쓰기를 거절합니다.
+비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가하면 DB 6개·Redis 2개·Grafana 관리자 암호·원본 인증 값(`ORIGIN_AUTH`)을 SecureString으로 만듭니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. AWS CLI 기록(`cli_history`)이 켜져 있으면 요청 내용이 로컬 기록에 남으므로 쓰기를 거절합니다.
 
 - Wallet 계좌번호 키(무작위 32바이트의 Base64)는 `--apply --create-wallet-key`를 줄 때만 만듭니다. 데이터가 생긴 뒤 바꾸거나, 지워진 뒤 새로 만들면 저장된 계좌번호를 풀 수 없으므로 Wallet 데이터가 생기기 전 처음 한 번만 씁니다.
 - 수출입은행에서 발급받은 환율 API 키는 `--apply --external`을 줄 때만 입력받습니다. 입력을 숨길 수 있는 터미널에서 직접 실행해야 하며, 파이프 입력처럼 입력이 화면에 보일 수 있으면 거절합니다. 키를 명령 인자·파일·채팅에 남기지 않습니다.
@@ -426,7 +426,37 @@ Eureka 재시작·재배포 때는 짧은 공백이 생길 수 있습니다.
 
 이 시간은 4-5의 Eureka 재시작·재배포 시험에서 측정합니다. 길면 Eureka만 이전 Task를 먼저 내리는 배포나 시작 대기 설정을 검토합니다.
 
-Gateway Service가 생긴 뒤부터 원본 인증(4-3)을 넣기 전까지는, 다른 Cloudflare 영역을 거친 요청이 ALB를 통해 Gateway에 닿을 수 있습니다(앞의 SG 한계). API 레코드는 아직 ALB를 가리키지 않지만, 이 기간은 짧게 둡니다.
+Gateway Service가 생긴 뒤부터 원본 인증(4-3)을 넣기 전까지는, 다른 Cloudflare 영역을 거친 요청이 ALB를 통해 Gateway에 닿을 수 있었습니다(앞의 SG 한계). 이 공백은 같은 날 4-3 적용으로 닫혔습니다.
+
+## 공개 진입점(Cloudflare·원본 인증·Grafana 공개)
+
+`api.travelpay.store`와 `grafana.travelpay.store`는 Cloudflare 프록시를 거쳐 ALB로 들어옵니다. ALB에는 원본 인증 헤더 검사와 Grafana 경로를 `enable_public_entry=true`로 켭니다. 이 옵션은 앱이 상시 실행 중(`enable_app_services`)이어야 통과합니다.
+
+| 구간 | 하는 일 |
+|---|---|
+| Cloudflare | 프록시(주황 구름), SSL Full (strict). Transform Rule이 두 이름의 요청에 `Origin-Auth: <ORIGIN_AUTH>`를 붙입니다. Grafana는 Access(팀원 이메일, 일회용 코드)를 먼저 통과해야 합니다 |
+| ALB SG | Cloudflare IPv4 주소의 443만 받습니다 |
+| ALB 규칙 | Host와 `Origin-Auth` 값이 모두 맞을 때만 Gateway·Grafana로 보내고, 아니면 기본 응답 404 |
+| Gateway | `Origin-Auth`를 지운 뒤 업무 서비스로 넘깁니다(`InternalHeaderResetFilter`) |
+| Grafana | Data 호스트 사설 IP 3000(SG가 ALB에서 온 연결만 허용), 공개 주소를 `root_url`로, 세션 쿠키는 HTTPS에서만 |
+
+Cloudflare 주소 허용만으로는 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿습니다. 그래서 우리 영역만 아는 헤더를 함께 확인합니다.
+
+- Cloudflare 문서는 원본 보호 방법으로 "HTTP Header Validation"과 Cloudflare IP 허용을 들고, 각각을 "Moderately secure"로 분류합니다. 여기서는 두 가지를 함께 씁니다.
+- AWS도 CloudFront가 붙인 사용자 헤더를 ALB 규칙으로 확인하는 같은 방식을 안내합니다.
+- 더 강한 방법인 Cloudflare Tunnel과 Authenticated Origin Pulls(mTLS)는 원본에 데몬을 따로 운영하거나 인증서를 따로 관리해야 해서 쓰지 않았습니다.
+
+`ORIGIN_AUTH`는 비밀값 준비 도구가 만듭니다. ALB 헤더 조건은 대소문자를 구분하지 않고 `*`·`?`를 와일드카드로 보며 128자까지라서, 소문자 16진수 64자로 만듭니다. Terraform이 읽어 ALB 규칙에 넣으므로 이 값은 ALB 규칙 설정과 State에도 남습니다. 저장한 plan 파일에도 평문으로 들어가므로 적용 직후 지웁니다. plan 출력에서는 두 규칙의 조건 전체가 `(sensitive value)`로 가려집니다. 호스트·Task 역할은 이 값을 읽지 못합니다. 읽은 값이 이 형식이 아니면(손으로 `*`를 넣은 경우 등) plan이 멈춥니다. 값을 바꾸면 Cloudflare 규칙과 ALB 규칙이 같은 값이 될 때까지 요청이 404가 됩니다.
+
+Grafana 인증서는 쓰고 있는 API 인증서를 바꾸지 않도록 따로 발급합니다. 같은 HTTPS 리스너에 추가 인증서로 붙이고, ALB가 요청의 서버 이름(SNI)으로 고릅니다. 운영 대시보드는 환경이 production 하나뿐이라 환경 선택을 숨기고, 로컬·부하 시험을 설명하는 문구를 운영 문구로 바꿉니다(`monitoring.tf`).
+
+적용 순서는 다음과 같습니다. 인증서가 발급돼야 ALB에 붙일 수 있어서 Terraform을 두 번 적용합니다.
+
+1. Terraform 1차: Grafana 인증서를 만들고 비밀값 계약에 `ORIGIN_AUTH`를 더합니다. `terraform output grafana_certificate`의 검증 레코드를 Cloudflare에 DNS only로 추가합니다.
+2. 비밀값 준비 도구로 `ORIGIN_AUTH`를 만듭니다. Cloudflare SSL 모드를 Full (strict)로 바꿉니다. Transform Rule은 Save as Draft로 저장합니다. 바로 켜면 `api`가 아직 가리키는 이전 원본에도 이 값이 전달되기 때문입니다.
+3. Zero Trust에 One-time PIN 로그인 방법을 추가하고(새 조직에는 자동으로 추가되지 않음), `grafana.travelpay.store` Access 앱과 팀원 이메일 허용 정책을 만듭니다.
+4. Terraform 2차: `enable_public_entry=true`로 ALB 헤더 검사, Grafana 인증서·Target Group·규칙·SG, Grafana 설정을 적용합니다.
+5. Cloudflare에서 `api`·`grafana`를 ALB DNS 이름으로 CNAME(프록시 켬)하고, 저장해 둔 Transform Rule을 Deploy합니다.
 
 ## AWS 모니터링(Prometheus·Loki·Grafana·Alloy)
 
@@ -436,7 +466,7 @@ Data 호스트의 모니터링은 Redis·Kafka와 Compose 프로젝트, systemd 
 
 | 위치 | 구성 | 공개 범위 |
 |---|---|---|
-| Data 호스트(Compose 프로젝트 `travelpay-production-monitoring`) | Prometheus(7일·8GB), Loki(7일), Grafana, Alloy(Data 호스트 컨테이너 로그) | Loki만 사설 IP 3100(SG가 로그 수집기 역할에서 온 연결만 허용), 나머지는 호스트 루프백 |
+| Data 호스트(Compose 프로젝트 `travelpay-production-monitoring`) | Prometheus(7일·8GB), Loki(7일), Grafana, Alloy(Data 호스트 컨테이너 로그) | Loki는 사설 IP 3100(SG가 로그 수집기 역할에서 온 연결만 허용). Grafana는 루프백, 공개 진입점을 켜면 사설 IP 3000도(SG가 ALB에서 온 연결만 허용). 나머지는 호스트 루프백 |
 | 앱 호스트(systemd) | Alloy(ECS Task 로그) | 준비 확인용 12345만 호스트 루프백 |
 
 - **지표:** Prometheus가 Eureka로 업무 서비스를 찾습니다. Gateway는 Eureka 메타데이터의 관리 포트 18080으로 수집합니다. Eureka 서버와 Mock Bank는 Cloud Map 사설 DNS로 찾습니다. 레이블은 로컬과 같은 `job=spring-jvm`, `service`, `environment=production`이므로 로컬 대시보드를 그대로 씁니다. 가짜 Eureka 응답과 실제 Prometheus로 주소와 레이블을 확인했습니다.
@@ -454,9 +484,9 @@ Grafana 알림 규칙은 네 개입니다. 알림 채널(contact point)은 두�
 | 서비스 지표 수집 중단 | 서비스별 정상 수집 대상이 0개인 상태가 2분 지속. Eureka에서 사라진 서비스도 0으로 셈 | 경보 |
 | 결제·송금 복구 스케줄러 정지 | `recover` 스케줄러의 실행 횟수가 2분 동안 늘지 않은 상태가 2분 지속. payment-service는 수집되는데 실행 기록 지표가 없는 경우(스케줄러 비활성, 클래스 이름 변경)도 포함 | 정상(payment-service 중단은 수집 중단 규칙이 알림) |
 
-Grafana는 외부에 공개하지 않고 관리자 계정 `admin` 하나로 씁니다. 암호는 Parameter Store의 `GRAFANA_ADMIN_PASSWORD`이며, 비밀값 준비 도구가 처음에 무작위 값으로 만듭니다. 이 값이 없으면 모니터링 유닛이 시작하지 않으므로, 이 단계는 plan을 저장한 뒤 apply 전에 준비 도구를 `--apply`로 실행합니다. 기존 값은 그대로 두고 없는 값만 만듭니다.
+Grafana는 관리자 계정 `admin` 하나로 씁니다. 암호는 Parameter Store의 `GRAFANA_ADMIN_PASSWORD`이며, 비밀값 준비 도구가 처음에 무작위 값으로 만듭니다. 이 값이 없으면 모니터링 유닛이 시작하지 않으므로, 이 단계는 plan을 저장한 뒤 apply 전에 준비 도구를 `--apply`로 실행합니다. 기존 값은 그대로 두고 없는 값만 만듭니다.
 
-접속은 SSM 포트 포워딩으로 합니다. 작업 PC에 AWS CLI용 Session Manager 플러그인(1.2.764.0 이상)이 필요합니다. 출력의 명령을 실행한 뒤 `http://localhost:3000`에 `admin`과 Parameter Store의 암호로 로그인합니다.
+공개 진입점을 켠 뒤에는 `https://grafana.travelpay.store`에서 Cloudflare Access 이메일 코드 확인을 거쳐 `admin`과 Parameter Store의 암호로 로그인합니다. 그 전이나 Cloudflare 장애 때는 SSM 포트 포워딩으로 접속합니다. 작업 PC에 AWS CLI용 Session Manager 플러그인(1.2.764.0 이상)이 필요하고, 출력의 명령을 실행한 뒤 `http://localhost:3000`에 로그인합니다. 공개 주소를 `root_url`로 두므로 로그인 뒤 이동이 공개 주소로 향할 수 있습니다. 세션 쿠키를 HTTPS 전용으로 두므로, `http://localhost`를 안전한 주소로 취급하지 않는 브라우저에서는 포트 포워딩 로그인이 유지되지 않을 수 있습니다.
 
 ```bash
 terraform -chdir=infra/aws output -json monitoring
@@ -715,5 +745,22 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 자원 | RDS 연결 13개, 앱 호스트 메모리 사용 최대 34%, 남은 예약 메모리 871MiB·4199MiB, CloudWatch 경보 ALARM 0건 |
 | 실행 중인 것 | Data 컨테이너 7개의 시작 시각·재시작 0회가 적용 전과 같음 |
 | 적용 후 재검사 | 본 root plan `No changes`(Capacity Provider·배포 설정의 반복 차이 없음) |
+
+2026-11-12 공개 진입점(4-3)은 다음과 같이 확인했습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 70개·bootstrap 3개·Python 104개 통과(Git에서 제외한 입력 파일이 없는 사본에서도 70개 통과). 사본에 결함 21개를 하나씩 넣어 모두 테스트 실패로 잡힘. 독립 리뷰 지적 4건 반영 |
+| 1차 적용 | 추가 1(Grafana 인증서). 검증 레코드 추가 뒤 발급(ISSUED). 비밀값 준비 도구가 `ORIGIN_AUTH`만 새로 만들고 나머지 11개는 그대로 |
+| 2차 적용 | 추가 8·변경 4·교체 1(Data 설정 묶음 association, 33초에 성공). 묶음에서 바뀐 파일은 운영 대시보드와 Grafana 실행 정의 두 개 |
+| ALB | API·Grafana 규칙 모두 Host와 `Origin-Auth`(SSM 값과 일치)가 맞을 때만 전달하고 나머지는 404. 기본 인증서는 API, Grafana 인증서는 추가 인증서. Grafana Target(Data 사설 IP:3000) healthy |
+| Data 호스트 | Grafana만 다시 시작(나머지 6개는 시작 시각·재시작 0회 그대로). 루프백·사설 IP 바인딩, 공개 주소·보안 쿠키 설정, 익명 401. 운영 대시보드 환경 선택 숨김, local·로컬·부하 문구 0건 |
+| 공개 경로 | Cloudflare를 거친 `GET /api/v1/terms` 200, 로그인이 필요한 API 401. `grafana`는 Access 로그인으로 302, 허용한 이메일의 일회용 코드를 거쳐 Grafana `admin` 로그인 성공(운영자 확인). Cloudflare를 거치지 않고 ALB에 직접 접속하면 연결 시간 초과 |
+| 원본 인증 | Transform Rule을 잠시 끄자 `api`가 3번 모두 ALB 기본 응답(404, `text/plain`, `Not Found`)이었고, 다시 켜자 3번 모두 200으로 돌아옴 |
+| CORS | `https://travelpay.store` 허용(인증 정보 포함), 다른 출처 403 |
+| 비밀값 | 적용 출력, 작업용 파일, 최근 30분 앱 로그(8개 서비스)에서 0건. 저장한 plan 파일은 적용 직후 삭제 |
+| 적용 후 재검사 | 본 root plan `No changes` |
+
+Transform Rule은 DNS 전환 전에 이미 켜져 있었습니다. 그동안 `api`는 임시 원본에 TCP 연결이 되지 않아 522였으므로, HTTP 요청이 원본으로 전달되지는 않은 것으로 봅니다. Gateway가 실제 접속자 IP(`CF-Connecting-IP`)를 쓰는지는 Gateway가 요청마다 로그를 남기지 않아 확인하지 못했으며, 4-5의 로그인 시도 제한 시험에서 확인합니다.
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).
