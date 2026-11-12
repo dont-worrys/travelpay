@@ -59,7 +59,7 @@ class TransferControllerTest {
         UUID transferId = UUID.randomUUID();
         when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
                 .thenReturn(new TransferResponse(transferId, TransferDirection.SENT, SENDER.userId(), RECEIVER_ID,
-                        10_000L, "KRW", TransferStatus.REQUESTED, "저녁값",
+                        10_000L, "KRW", TransferStatus.REQUESTED, null, "저녁값",
                         Instant.parse("2026-10-28T01:02:03.123456Z")));
 
         mvc(SENDER).perform(post("/api/v1/transfers")
@@ -149,6 +149,24 @@ class TransferControllerTest {
         verifyNoInteractions(transferService);
     }
 
+    /** 사용자 송금 API는 회원만 쓰며, MASTER는 서비스를 호출하기 전에 403입니다. */
+    @Test
+    void forbidsMasterBeforeCallingService() throws Exception {
+        AuthenticatedUser master = new AuthenticatedUser(SENDER.userId(), AuthRole.MASTER);
+
+        mvc(master).perform(get("/api/v1/transfers"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("COMMON_FORBIDDEN"));
+        mvc(master).perform(post("/api/v1/transfers")
+                        .header(TransferController.IDEMPOTENCY_KEY_HEADER, "key-1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_BODY))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("COMMON_FORBIDDEN"));
+        verifyNoInteractions(transferService);
+    }
+
     @Test
     void returnsNotFoundForTransferOutsideUserScope() throws Exception {
         UUID transferId = UUID.randomUUID();
@@ -165,7 +183,7 @@ class TransferControllerTest {
         UUID transferId = UUID.randomUUID();
         when(transferService.cancel(SENDER.userId(), transferId))
                 .thenReturn(new TransferResponse(transferId, TransferDirection.SENT, SENDER.userId(), RECEIVER_ID,
-                        10_000L, "KRW", TransferStatus.CANCELLED, null, Instant.parse("2026-10-29T01:02:03Z")));
+                        10_000L, "KRW", TransferStatus.CANCELLED, null, null, Instant.parse("2026-10-29T01:02:03Z")));
 
         mvc(SENDER).perform(post("/api/v1/transfers/{transferId}/cancel", transferId))
                 .andExpect(status().isOk())
@@ -263,7 +281,7 @@ class TransferControllerTest {
     void listsTransfersWithCommonPageResponse() throws Exception {
         UUID transferId = UUID.randomUUID();
         var item = new TransferResponse(transferId, TransferDirection.RECEIVED, RECEIVER_ID, SENDER.userId(),
-                10_000L, "KRW", TransferStatus.REQUESTED, null, Instant.parse("2026-10-28T01:02:03Z"));
+                10_000L, "KRW", TransferStatus.REQUESTED, null, null, Instant.parse("2026-10-28T01:02:03Z"));
         when(transferService.list(SENDER.userId(), TransferDirection.RECEIVED, 0, 20))
                 .thenReturn(new PageResponse<>(List.of(item), 0, 20, 1, 1));
 
@@ -289,7 +307,7 @@ class TransferControllerTest {
     private void givenTransferResult(TransferStatus status) {
         when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
                 .thenReturn(new TransferResponse(UUID.randomUUID(), TransferDirection.SENT, SENDER.userId(),
-                        RECEIVER_ID, 10_000L, "KRW", status, "저녁값", Instant.parse("2026-10-30T01:02:03Z")));
+                        RECEIVER_ID, 10_000L, "KRW", status, null, "저녁값", Instant.parse("2026-10-30T01:02:03Z")));
     }
 
     private ResultActions postTransfer() throws Exception {

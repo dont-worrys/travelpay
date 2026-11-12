@@ -2,8 +2,11 @@ package com.travelpay.payment.transfer.controller;
 
 import java.util.UUID;
 
+import com.travelpay.common.auth.AuthRole;
 import com.travelpay.common.auth.AuthenticatedUser;
 import com.travelpay.common.auth.web.CurrentUser;
+import com.travelpay.common.error.BusinessException;
+import com.travelpay.common.error.CommonErrorCode;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.transfer.application.TransferService;
@@ -30,7 +33,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 송금 외부 API입니다.
+ * 송금 외부 API입니다. 회원(USER)만 사용하며, MASTER는 403입니다(wallet-service 회원 API와 같은 방식).
  * 응답 본문은 공통 ApiResponse이며, 문서의 응답 코드 설명(Swagger의 ApiResponse)은 이름이 겹쳐 전체 이름으로 씁니다.
  */
 @Tag(name = "송금", description = "사용자 간 지갑 송금 요청·조회·취소")
@@ -70,6 +73,8 @@ public class TransferController {
                             + "`TRANSFER_UNSUPPORTED_CURRENCY`, `COMMON_INVALID_REQUEST`(본문 검증 실패)"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
                     description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
+                    description = "`COMMON_FORBIDDEN` MASTER는 사용자 송금 API를 쓸 수 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
                     description = "`TRANSFER_IDEMPOTENCY_KEY_REUSED` 같은 키로 다른 내용의 송금 요청"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "422",
@@ -95,7 +100,7 @@ public class TransferController {
             @RequestHeader(name = IDEMPOTENCY_KEY_HEADER, required = false) String idempotencyKey,
             @Valid @RequestBody TransferCreateRequest request
     ) {
-        TransferResponse response = transferService.request(user.userId(), idempotencyKey, request);
+        TransferResponse response = transferService.request(requireTransferUser(user), idempotencyKey, request);
         boolean unsettled = response.status() == TransferStatus.PROCESSING
                 || response.status() == TransferStatus.MANUAL_REVIEW;
         HttpStatus status = unsettled ? HttpStatus.ACCEPTED : HttpStatus.CREATED;
@@ -108,6 +113,8 @@ public class TransferController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "조회 성공"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
                     description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
+                    description = "`COMMON_FORBIDDEN` MASTER는 사용자 송금 API를 쓸 수 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
                     description = "`TRANSFER_NOT_FOUND` 송금이 없거나 당사자가 아님")
     })
@@ -116,7 +123,7 @@ public class TransferController {
             @CurrentUser AuthenticatedUser user,
             @Parameter(description = "송금 ID") @PathVariable UUID transferId
     ) {
-        return ApiResponse.success(transferService.get(user.userId(), transferId));
+        return ApiResponse.success(transferService.get(requireTransferUser(user), transferId));
     }
 
     /** 송금 전 수취인 확인용이며, 마스킹한 이름과 송금 가능 여부만 반환합니다. */
@@ -129,6 +136,8 @@ public class TransferController {
                     description = "`TRANSFER_SELF_TRANSFER` 본인 조회"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
                     description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
+                    description = "`COMMON_FORBIDDEN` MASTER는 사용자 송금 API를 쓸 수 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
                     description = "`TRANSFER_RECEIVER_NOT_FOUND` 활성 회원이 아니거나 지갑 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "429",
@@ -145,7 +154,7 @@ public class TransferController {
             @CurrentUser AuthenticatedUser user,
             @Parameter(description = "수취인 회원 ID") @PathVariable UUID receiverId
     ) {
-        return ApiResponse.success(transferService.findRecipient(user.userId(), receiverId));
+        return ApiResponse.success(transferService.findRecipient(requireTransferUser(user), receiverId));
     }
 
     /** 접수 상태의 송금만 취소하며, 이미 취소된 송금은 현재 상태를 그대로 반환합니다. */
@@ -157,6 +166,8 @@ public class TransferController {
                     description = "취소 완료 또는 이미 취소됨(`CANCELLED`)"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
                     description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
+                    description = "`COMMON_FORBIDDEN` MASTER는 사용자 송금 API를 쓸 수 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
                     description = "`TRANSFER_NOT_FOUND` 송금이 없거나 송금인이 아님"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
@@ -167,7 +178,7 @@ public class TransferController {
             @CurrentUser AuthenticatedUser user,
             @Parameter(description = "송금 ID") @PathVariable UUID transferId
     ) {
-        return ApiResponse.success(transferService.cancel(user.userId(), transferId));
+        return ApiResponse.success(transferService.cancel(requireTransferUser(user), transferId));
     }
 
     /** 생성 시각 내림차순 고정이며, page는 0부터 시작합니다. */
@@ -178,7 +189,9 @@ public class TransferController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
                     description = "`COMMON_INVALID_REQUEST` page < 0, size < 1, 잘못된 direction"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
-                    description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음")
+                    description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
+                    description = "`COMMON_FORBIDDEN` MASTER는 사용자 송금 API를 쓸 수 없음")
     })
     @GetMapping
     public ApiResponse<PageResponse<TransferResponse>> list(
@@ -190,6 +203,14 @@ public class TransferController {
             @Parameter(description = "페이지 크기(기본 20, 100을 넘으면 100으로 조회)")
             @RequestParam(defaultValue = "20") @Min(1) int size
     ) {
-        return ApiResponse.success(transferService.list(user.userId(), direction, page, size));
+        return ApiResponse.success(transferService.list(requireTransferUser(user), direction, page, size));
+    }
+
+    /** 사용자 송금 API는 회원(USER)만 씁니다. 관리자 송금 API(/api/v1/admin/transfers)는 별도로 MASTER만 허용합니다. */
+    private static UUID requireTransferUser(AuthenticatedUser user) {
+        if (user.role() == AuthRole.MASTER) {
+            throw new BusinessException(CommonErrorCode.FORBIDDEN);
+        }
+        return user.userId();
     }
 }

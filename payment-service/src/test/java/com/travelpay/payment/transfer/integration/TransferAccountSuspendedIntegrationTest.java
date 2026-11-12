@@ -72,7 +72,11 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
 
         mvc.perform(asUser(get("/api/v1/transfers/{id}", transferId), senderId))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.status").value("FAILED"));
+                .andExpect(jsonPath("$.data.status").value("FAILED"))
+                .andExpect(jsonPath("$.data.failureReason").value("ACCOUNT_UNAVAILABLE"));
+        mvc.perform(asUser(get("/api/v1/transfers/{id}", transferId), receiverId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.failureReason").value("ACCOUNT_UNAVAILABLE"));
         mvc.perform(asUser(post("/api/v1/transfers/{id}/cancel", transferId), senderId))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
@@ -117,7 +121,10 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
 
         requestTransfer("tc22-unknown-422")
                 .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.data.status").value("MANUAL_REVIEW"));
+                .andExpect(jsonPath("$.data.status").value("MANUAL_REVIEW"))
+                // 운영용 검토 사유는 사용자 응답에 없고, 실패 사유는 FAILED에만 있습니다.
+                .andExpect(jsonPath("$.data.failureReason").doesNotExist())
+                .andExpect(jsonPath("$.data.reviewReason").doesNotExist());
 
         Map<String, Object> row = row(onlyTransferIdOf(senderId));
         assertEquals("MANUAL_REVIEW", row.get("status"));

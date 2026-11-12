@@ -8,7 +8,13 @@
   python measure.py <LABEL> <VUS> --extra-service payment2=http://localhost:8086   # 추가 인스턴스 지표도 수집
   python measure.py <LABEL> <VUS> --script transfer-query.js [--query mixed]       # 송금 조회
   python measure.py <LABEL> <VUS> --mode hot --lock-holders                        # 원장 잠금 보유 시간 분해
+  python measure.py <LABEL> <VUS> --duration 1800 --recon db                       # 대사를 DB 읽기 전용 SQL로(대량)
+  python measure.py <LABEL> <VUS> --recon both                                     # API·DB 대사를 둘 다 하고 결과 비교
 결과: results/<LABEL>-vus<VUS>.json(k6) + results/<LABEL>-vus<VUS>-metrics.json(서비스·DB 지표, 대사)
+
+대사 방식(--recon): api(기본)는 관리자 송금 목록·원장 기간 목록 API를 끝까지 읽습니다. 관리자 목록이 페이지 번호
+방식이라 수십만 건이면 1시간 가까이 걸리므로 소량 측정에 씁니다. db는 같은 구간·불변식을 Postgres 컨테이너에서
+읽기 전용 SQL 한 번으로 확인합니다. both는 둘 다 하고 metrics의 reconciliationDb.compare에 차이를 남깁니다.
 
 측정 구간은 k6가 실제로 테스트를 시작한 시각(끝난 시각 - testRunDurationMs) + 예열부터 측정 시간만큼입니다.
 서비스 지표는 그 구간 양끝에 가장 가까운 표본의 차이로 계산합니다(서버 쪽 평균 처리 시간 = 합계 차이 / 횟수 차이).
@@ -394,22 +400,62 @@ def fetch_ledger(created_from, created_to):
             return list(items.values())
 
 
-def reconcile(data, balances_before, created_from, created_to, recovery_timeout):
-    """측정 구간 송금과 원장 거래를 맞춰 보고 불변식 위반을 모읍니다."""
+def reconcile(data, balances_before, created_from, created_to, recovery_timeout, method):
+    """PROCESSING 복구를 기다린 뒤 method(api|db|both)로 대사합니다. both면 두 결과와 비교를 함께 돌려줍니다."""
     recovery_seconds = wait_processing(created_from, created_to, recovery_timeout)
     time.sleep(5)   # 원장 거래 기록 트랜잭션 제한(3초)보다 넉넉히 지난 닫힌 구간을 읽는다
-    transfers = fetch_transfers(created_from, created_to)
+    ledger_from = created_from.replace(microsecond=0) - timedelta(seconds=1)
     ledger_to = datetime.now(timezone.utc).replace(microsecond=0)
-    ledger = fetch_ledger(created_from.replace(microsecond=0) - timedelta(seconds=1), ledger_to)
+    participants = {pair["senderId"] for pair in data["pairs"]} | {pair["receiverId"] for pair in data["pairs"]}
+    participants.add(data["hotReceiverId"])
+    balances_after = {user: krw_balance(user) for user in participants}
+
+    results = {}
+    for name, run in (("db", reconcile_db), ("api", reconcile_api)):
+        if method not in (name, "both"):
+            continue
+        started = time.monotonic()
+        result = run(created_from, created_to, ledger_from, ledger_to)
+        result["violations"] += balance_violations(balances_before, balances_after, result.pop("net"))
+        result.update({"method": name, "elapsedSeconds": round(time.monotonic() - started, 1),
+                       "recoverySeconds": recovery_seconds,
+                       "balanceTotal": {"before": sum(balances_before.values()),
+                                        "after": sum(balances_after.values())}})
+        results[name] = result
+    if method != "both":
+        return results[method], None
+    keys = ("transfers", "statuses", "ledgerTransactions", "balanceTotal")
+    diff = {key: {"api": results["api"][key], "db": results["db"][key]}
+            for key in keys if results["api"][key] != results["db"][key]}
+    if bool(results["api"]["violations"]) != bool(results["db"]["violations"]):
+        diff["hasViolations"] = {"api": bool(results["api"]["violations"]), "db": bool(results["db"]["violations"])}
+    return results["api"], {"db": results["db"], "compare": {"match": not diff, "compared": list(keys) + ["hasViolations"],
+                                                             "diff": diff}}
+
+
+def balance_violations(balances_before, balances_after, net):
+    """참여자 KRW 잔액(지갑 API)이 음수가 아닌지, 측정 전 잔액 + COMPLETED 송금 순변동과 같은지 봅니다."""
+    violations = []
+    for user, after in balances_after.items():
+        expected = balances_before[user] + net.get(user, 0)
+        if after < 0:
+            violations.append(f"음수 잔액 {user}: {after}")
+        if after != expected:
+            violations.append(f"잔액 불일치 {user}: 기대 {expected} 실제 {after}")
+    if sum(balances_after.values()) != sum(balances_before.values()):
+        violations.append(f"잔액 합계 변화 {sum(balances_before.values())} → {sum(balances_after.values())}")
+    return violations
+
+
+def reconcile_api(created_from, created_to, ledger_from, ledger_to):
+    """API 대사: 관리자 송금 목록(페이지 번호)과 원장 기간 목록(커서)을 모두 읽어 맞춥니다. 수만 건까지 권장."""
+    transfers = fetch_transfers(created_from, created_to)
+    ledger = fetch_ledger(ledger_from, ledger_to)
     by_reference = {}
     for item in ledger:
         by_reference.setdefault(item["referenceId"], []).append(item)
 
-    violations, statuses = [], {}
-    completed_ids = set()
-    participants = {pair["senderId"] for pair in data["pairs"]} | {pair["receiverId"] for pair in data["pairs"]}
-    participants.add(data["hotReceiverId"])
-    expected_balance = dict(balances_before)
+    violations, statuses, net = [], {}, {}
     for transfer in transfers:
         transfer_id, status = transfer["transferId"], transfer["status"]
         statuses[status] = statuses.get(status, 0) + 1
@@ -418,14 +464,13 @@ def reconcile(data, balances_before, created_from, created_to, recovery_timeout)
         if len(records) > 1:
             violations.append(f"원장 거래가 2건 이상 {transfer_id}")
         if status == "COMPLETED":
-            completed_ids.add(transfer_id)
             if len(posted) != 1:
                 violations.append(f"COMPLETED인데 원장 POSTED가 {len(posted)}건 {transfer_id}")
             elif not entries_match(posted[0], transfer):
                 violations.append(f"원장 항목이 송금과 다름 {transfer_id}")
             amount = transfer["amount"]
-            expected_balance[transfer["senderId"]] = expected_balance.get(transfer["senderId"], 0) - amount
-            expected_balance[transfer["receiverId"]] = expected_balance.get(transfer["receiverId"], 0) + amount
+            net[transfer["senderId"]] = net.get(transfer["senderId"], 0) - amount
+            net[transfer["receiverId"]] = net.get(transfer["receiverId"], 0) + amount
         elif status == "FAILED" and posted:
             violations.append(f"FAILED인데 원장 POSTED {transfer_id}")
         elif status == "PROCESSING":
@@ -435,24 +480,109 @@ def reconcile(data, balances_before, created_from, created_to, recovery_timeout)
                if item["status"] == "POSTED" and item["referenceId"] not in transfer_ids]
     if orphans:
         violations.append(f"송금 없이 원장만 POSTED {len(orphans)}건 (예: {orphans[:3]})")
+    return {"transfers": len(transfers), "statuses": statuses, "ledgerTransactions": len(ledger),
+            "violations": violations, "net": net}
 
-    balances_after = {user: krw_balance(user) for user in participants}
-    for user in participants:
-        if balances_after[user] < 0:
-            violations.append(f"음수 잔액 {user}: {balances_after[user]}")
-        if balances_after[user] != expected_balance.get(user, balances_before[user]):
-            violations.append(f"잔액 불일치 {user}: 기대 {expected_balance.get(user)} 실제 {balances_after[user]}")
-    if sum(balances_after.values()) != sum(balances_before.values()):
-        violations.append(f"잔액 합계 변화 {sum(balances_before.values())} → {sum(balances_after.values())}")
 
-    return {
-        "transfers": len(transfers),
-        "statuses": statuses,
-        "ledgerTransactions": len(ledger),
-        "recoverySeconds": recovery_seconds,
-        "balanceTotal": {"before": sum(balances_before.values()), "after": sum(balances_after.values())},
-        "violations": violations,
-    }
+# DB 대사: API 대사와 같은 구간·같은 불변식을 읽기 전용 트랜잭션의 SELECT 한 번으로 확인합니다(쓰기 없음).
+# 송금 구간은 관리자 목록과 같은 created_at [from, to), 원장 구간은 원장 기간 목록과 같은 created_at [from, to).
+# API 대사에 없는 원장 쪽 점검(같은 키 중복, 차변≠대변, 지갑별 순변동, 사용자 계정 음수)도 함께 봅니다.
+# CTE 행 수 추정이 1로 잡혀 CTE끼리 중첩 루프로 조인되면 수만 건에서도 수십 초가 걸려(2026-11-12 확인: 2,589건 41초 →
+# 끈 뒤 4초), 이 트랜잭션에서만 중첩 루프를 끕니다(SET LOCAL, 세션 설정이라 데이터 쓰기 아님).
+RECON_SQL = """
+BEGIN TRANSACTION READ ONLY;
+SET LOCAL enable_nestloop = off;
+WITH t AS (
+  SELECT * FROM payment_service.transfer WHERE created_at >= '{transfer_from}' AND created_at < '{transfer_to}'),
+l AS (
+  SELECT * FROM ledger_service.ledger_transactions
+  WHERE reference_type = 'TRANSFER' AND created_at >= '{ledger_from}' AND created_at < '{ledger_to}'),
+tl AS (
+  SELECT t.id, t.status, count(l.id) AS records, count(l.id) FILTER (WHERE l.status = 'POSTED') AS posted
+  FROM t LEFT JOIN l ON l.reference_id = t.id GROUP BY t.id, t.status),
+le AS MATERIALIZED (
+  SELECT l.id AS transaction_id, l.reference_id, l.status, en.direction, en.entry_type, en.amount, en.currency,
+         a.owner_type, a.wallet_id
+  FROM l JOIN ledger_service.ledger_entries en ON en.transaction_id = l.id
+  JOIN ledger_service.ledger_accounts a ON a.id = en.account_id),
+e AS (
+  SELECT t.id, count(*) AS cnt,
+    bool_or(le.owner_type = 'USER' AND le.wallet_id = t.source_wallet_id AND le.direction = 'DEBIT'
+            AND le.entry_type = 'TRANSFER_OUT' AND le.amount = t.amount AND le.currency = t.currency) AS has_debit,
+    bool_or(le.owner_type = 'USER' AND le.wallet_id = t.target_wallet_id AND le.direction = 'CREDIT'
+            AND le.entry_type = 'TRANSFER_IN' AND le.amount = t.amount AND le.currency = t.currency) AS has_credit
+  FROM t JOIN le ON le.reference_id = t.id AND le.status = 'POSTED'
+  WHERE t.status = 'COMPLETED' GROUP BY t.id),
+completed AS (SELECT * FROM t WHERE status = 'COMPLETED'),
+net AS (
+  SELECT user_id, sum(delta) AS delta FROM (
+    SELECT sender_id AS user_id, -amount AS delta FROM completed
+    UNION ALL SELECT receiver_id, amount FROM completed) x GROUP BY user_id),
+wallet_net AS (
+  SELECT coalesce(p.wallet_id, q.wallet_id) AS wallet_id, p.delta AS transfer_delta, q.delta AS ledger_delta FROM
+    (SELECT wallet_id, sum(delta) AS delta FROM (
+       SELECT source_wallet_id AS wallet_id, -amount AS delta FROM completed
+       UNION ALL SELECT target_wallet_id, amount FROM completed) x GROUP BY wallet_id) p
+  FULL JOIN
+    (SELECT le.wallet_id, sum(CASE le.direction WHEN 'CREDIT' THEN le.amount ELSE -le.amount END) AS delta
+     FROM le JOIN t ON t.id = le.reference_id
+     WHERE le.status = 'POSTED' AND le.owner_type = 'USER' GROUP BY le.wallet_id) q
+  ON p.wallet_id = q.wallet_id),
+checks AS (
+  SELECT 'multipleLedger' AS name, id FROM tl WHERE records > 1
+  UNION ALL SELECT 'completedNotPosted', id FROM tl WHERE status = 'COMPLETED' AND posted <> 1
+  UNION ALL SELECT 'entryMismatch', tl.id FROM tl LEFT JOIN e ON e.id = tl.id
+            WHERE tl.status = 'COMPLETED' AND tl.posted = 1 AND (e.id IS NULL OR e.cnt <> 2 OR NOT e.has_debit OR NOT e.has_credit)
+  UNION ALL SELECT 'failedPosted', id FROM tl WHERE status = 'FAILED' AND posted > 0
+  UNION ALL SELECT 'processingLeft', id FROM tl WHERE status = 'PROCESSING'
+  UNION ALL SELECT 'orphanLedger', reference_id FROM l
+            WHERE status = 'POSTED' AND NOT EXISTS (SELECT 1 FROM t WHERE t.id = l.reference_id)
+  UNION ALL SELECT 'duplicateKey', min(id::text)::uuid FROM t GROUP BY sender_id, idempotency_key HAVING count(*) > 1
+  UNION ALL SELECT 'unbalancedLedger', reference_id FROM le GROUP BY transaction_id, reference_id
+            HAVING sum(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END) <> 0
+  UNION ALL SELECT 'walletNetMismatch', wallet_id FROM wallet_net WHERE transfer_delta IS DISTINCT FROM ledger_delta
+  UNION ALL SELECT 'negativeUserAccount', id FROM ledger_service.ledger_accounts WHERE owner_type = 'USER' AND balance < 0)
+SELECT json_build_object(
+  'transfers', (SELECT count(*) FROM t),
+  'statuses', (SELECT coalesce(json_object_agg(status, n), '{{}}') FROM (SELECT status, count(*) AS n FROM t GROUP BY status) s),
+  'ledgerTransactions', (SELECT count(*) FROM l),
+  'net', (SELECT coalesce(json_object_agg(user_id, delta), '{{}}') FROM net),
+  'checks', (SELECT coalesce(json_object_agg(name, json_build_object('count', n, 'examples', examples)), '{{}}')
+             FROM (SELECT name, count(*) AS n, (array_agg(id))[1:3] AS examples FROM checks GROUP BY name) c));
+ROLLBACK;
+"""
+DB_CHECK_LABELS = {
+    "multipleLedger": "원장 거래가 2건 이상",
+    "completedNotPosted": "COMPLETED인데 원장 POSTED가 1건이 아님",
+    "entryMismatch": "원장 항목이 송금과 다름",
+    "failedPosted": "FAILED인데 원장 POSTED",
+    "processingLeft": "복구 후에도 PROCESSING",
+    "orphanLedger": "송금 없이 원장만 POSTED",
+    "duplicateKey": "같은 송금인·Idempotency-Key 중복",
+    "unbalancedLedger": "원장 거래 차변≠대변",
+    "walletNetMismatch": "지갑별 순변동(송금 COMPLETED ↔ 원장 항목) 불일치",
+    "negativeUserAccount": "원장 사용자 계정 음수 잔액",
+}
+
+
+def reconcile_db(created_from, created_to, ledger_from, ledger_to):
+    """DB 대사: Postgres 컨테이너 psql로 RECON_SQL을 실행합니다(읽기 전용). 수십만 건 규모 측정용."""
+    sql = RECON_SQL.format(transfer_from=iso(created_from), transfer_to=iso(created_to),
+                           ledger_from=iso(ledger_from), ledger_to=iso(ledger_to))
+    command = ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB,
+               "-qAt", "-v", "ON_ERROR_STOP=1"]
+    try:
+        done = subprocess.run(command, input=sql, capture_output=True, text=True, encoding="utf-8", timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SystemExit(f"DB 대사 실패: {error}")
+    lines = [line for line in done.stdout.splitlines() if line.strip()]
+    if done.returncode != 0 or not lines:
+        raise SystemExit(f"DB 대사 실패(종료 코드 {done.returncode}): {done.stderr.strip()[:500]}")
+    row = json.loads(lines[-1])
+    violations = [f"{DB_CHECK_LABELS.get(name, name)} {check['count']}건 (예: {check['examples']})"
+                  for name, check in sorted(row["checks"].items())]
+    return {"transfers": row["transfers"], "statuses": row["statuses"],
+            "ledgerTransactions": row["ledgerTransactions"], "violations": violations, "net": row["net"]}
 
 
 def entries_match(record, transfer):
@@ -487,6 +617,8 @@ def main():
     parser.add_argument("--lock-holders", action="store_true",
                         help="원장 잠금 holder 상태를 짧은 간격으로 표본 수집 (잠금 보유 시간 분해, --mode hot과 함께)")
     parser.add_argument("--lock-holder-interval", type=float, default=0.05, help="holder 표본 간격(초)")
+    parser.add_argument("--recon", default="api", choices=["api", "db", "both"],
+                        help="대사 방식: api(기본, 소량), db(읽기 전용 SQL, 대량), both(둘 다 하고 비교)")
     args = parser.parse_args()
     is_request = args.script == "transfer-request.js"
 
@@ -567,13 +699,20 @@ def main():
         print("[4/4] 대사: PROCESSING 복구 대기 → 송금·원장·잔액 대조")
         created_from = run_started - timedelta(seconds=5)
         created_to = datetime.fromtimestamp(k6_ended + 5, timezone.utc)
-        metrics["reconciliation"] = reconcile(data, balances_before, created_from, created_to, args.recovery_timeout)
+        metrics["reconciliation"], extra = reconcile(data, balances_before, created_from, created_to,
+                                                     args.recovery_timeout, args.recon)
+        if extra:
+            metrics["reconciliationDb"] = extra["db"]
+            metrics["reconciliationDb"]["compare"] = extra["compare"]
     else:
         print("[4/4] 조회 측정이라 대사는 하지 않습니다")
 
     metrics_result.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
-    violations = (metrics.get("reconciliation") or {}).get("violations") or []
+    recon_db = metrics.get("reconciliationDb") or {}
+    violations = ((metrics.get("reconciliation") or {}).get("violations") or []) + (recon_db.get("violations") or [])
+    if not recon_db.get("compare", {}).get("match", True):
+        violations.append("API 대사와 DB 대사 결과가 다름")
     failures = summary["statusCounts"]["429"] + summary["statusCounts"]["4xxOther"] + \
         summary["statusCounts"]["5xx"] + summary["statusCounts"]["noResponse"]
     if violations or failures:

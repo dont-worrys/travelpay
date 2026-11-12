@@ -144,15 +144,21 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
     }
 
     /**
-     * TC-26-I7(현재 동작 기록): payment-service는 역할을 검사하지 않아 MASTER 헤더도 목록 조회가 됩니다.
-     * 역할 제한은 Gateway 정책에 맡겨져 있으며, wallet-service는 MASTER를 403으로 막습니다. 정책 확인이 필요한 항목입니다.
+     * TC-26-I7: 사용자 송금 API 5개는 MASTER면 403 COMMON_FORBIDDEN이고(wallet-service 회원 API와 같음),
+     * 다른 서비스를 호출하거나 송금을 남기지 않습니다. 관리자 송금 API의 MASTER 허용은 AdminTransferApiIntegrationTest에서 확인합니다.
      */
-    @Test
-    void masterRoleIsNotRestrictedByPaymentService() throws Exception {
-        mvc.perform(get("/api/v1/transfers")
+    @ParameterizedTest
+    @ValueSource(strings = {"LIST", "DETAIL", "CREATE", "CANCEL", "RECIPIENT"})
+    void masterRoleIsForbiddenOnUserTransferApi(String endpoint) throws Exception {
+        mvc.perform(endpoint(endpoint)
                         .header(AuthHeaders.USER_ID, senderId.toString())
                         .header(AuthHeaders.USER_ROLE, "MASTER"))
-                .andExpect(status().isOk());
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("COMMON_FORBIDDEN"));
+
+        verifyNoInteractions(walletFeignApi, userFeignApi, ledgerFeignApi);
+        assertEquals(0L, countTransfersOf(senderId));
     }
 
     private MockHttpServletRequestBuilder endpoint(String name) {

@@ -5,10 +5,14 @@ import java.util.UUID;
 
 import com.travelpay.payment.transfer.domain.Transfer;
 import com.travelpay.payment.transfer.domain.TransferDirection;
+import com.travelpay.payment.transfer.domain.TransferFailureReason;
 import com.travelpay.payment.transfer.domain.TransferStatus;
 import io.swagger.v3.oas.annotations.media.Schema;
 
-/** 지갑 ID·멱등성 키 등 내부 식별 정보는 응답에 포함하지 않습니다. */
+/**
+ * 지갑 ID·멱등성 키 등 내부 식별 정보는 응답에 포함하지 않습니다.
+ * 실패 사유는 사용자용 값만 노출하며(송금 요청 422 오류 코드와 같은 이름), 운영용 검토 사유(reviewReason)는 노출하지 않습니다.
+ */
 public record TransferResponse(
         @Schema(description = "송금 ID")
         UUID transferId,
@@ -31,6 +35,12 @@ public record TransferResponse(
                 - CANCELLED: 취소됨
                 - MANUAL_REVIEW: 자동 처리 중단, 운영자 확인 필요""")
         TransferStatus status,
+        @Schema(description = """
+                실패 사유. FAILED일 때만 값이 있고 그 밖의 상태는 null
+                - INSUFFICIENT_BALANCE: 송금인 잔액 부족
+                - ACCOUNT_UNAVAILABLE: 송금인 또는 수취인 계정을 쓸 수 없음
+                - NOT_PROCESSED: 처리되지 않음(자금 이동 없음)""", nullable = true)
+        TransferFailureReason failureReason,
         @Schema(description = "메모", nullable = true)
         String memo,
         @Schema(description = "생성 시각(UTC, ISO-8601)", example = "2026-11-02T01:02:03.123456Z")
@@ -49,6 +59,7 @@ public record TransferResponse(
                 transfer.getAmount(),
                 transfer.getCurrency(),
                 transfer.getStatus(),
+                transfer.getStatus() == TransferStatus.FAILED ? transfer.getFailureReason() : null,
                 transfer.getMemo(),
                 transfer.getCreatedAt()
         );
