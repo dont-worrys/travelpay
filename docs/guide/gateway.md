@@ -183,6 +183,7 @@ Gateway는 외부 W3C·B3 부모 trace를 추출하지 않고 새 traceId를 시
 | API DNS | Cloudflare의 `api` 레코드를 ALB DNS 이름에 연결 |
 | TLS | 프런트·API HTTPS, Cloudflare Full (strict), ALB에 API 호스트와 일치하는 인증서 |
 | 공개 진입 | ALB 443은 Cloudflare에서, Gateway API 포트는 ALB에서 접근하도록 보안 그룹 제한 |
+| 원본 인증 | Cloudflare가 붙이는 `Origin-Auth` 비밀 헤더를 ALB 규칙이 확인. Gateway는 이 헤더를 업무 서비스로 넘기기 전에 지움 |
 | IP 신뢰 | `GATEWAY_CLOUDFLARE_PROXY_ADDRESSES`에 실제 ALB 연결 서브넷 CIDR 지정 |
 | 관리 포트 | 기본 18080, ALB 헬스체크·Prometheus가 접근하는 내부망으로 제한 |
 | 업무 앱 | User·Wallet 등은 허용된 내부 호출자에서만 접근, 외부 포트 공개 금지 |
