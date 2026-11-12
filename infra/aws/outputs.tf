@@ -77,7 +77,7 @@ output "grafana_certificate" {
 }
 
 output "application_runtime" {
-  description = "Task 정의·ECS Service와 공개 진입점입니다. Cloudflare API 레코드는 공개 단계(PR4의 4-3)에서 ALB로 바꿉니다."
+  description = "Terraform이 등록한 Task 정의(실행 중인 리비전은 CD가 정하므로 다를 수 있음)·ECS Service와 공개 진입점입니다."
   value = var.enable_app_runtime ? {
     task_definitions   = { for key, task in aws_ecs_task_definition.application : key => task.arn }
     services           = { for key, service in aws_ecs_service.application : key => service.name }

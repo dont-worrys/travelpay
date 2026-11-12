@@ -62,6 +62,32 @@ variable "github_repository" {
   }
 }
 
+# 2026-07-15 이후 만든 저장소의 OIDC subject에는 소유자·저장소 ID가 들어갑니다(이름을 다시 쓰는 다른 저장소와 구분).
+# 값은 공개 API(GET /repos/dont-worrys/travelpay)의 owner.id·id입니다.
+variable "github_owner_id" {
+  description = "GitHub 저장소 소유자(조직)의 숫자 ID입니다."
+  type        = string
+  default     = "348131411"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_owner_id))
+    error_message = "GitHub 소유자 ID는 숫자여야 합니다."
+  }
+}
+
+variable "github_repository_id" {
+  description = "GitHub 저장소의 숫자 ID입니다."
+  type        = string
+  default     = "1433947730"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.github_repository_id))
+    error_message = "GitHub 저장소 ID는 숫자여야 합니다."
+  }
+}
+
 variable "github_environment" {
   description = "배포 브랜치·승인 보호를 적용할 GitHub Environment 이름입니다."
   type        = string

@@ -2,7 +2,7 @@
 
 Terraform 코드는 `infra/aws/`에서 관리합니다. Spring Boot Run과 별개이며 실제 리소스 생성은 Terraform의 `apply`로 실행합니다.
 
-**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3), DB 암호 교체·main 이미지·ECS Service 첫 기동·공개 진입점(PR4의 4-1~4-3)의 실제 적용과 검증을 완료**했습니다. CI·CD와 운영 검증은 후속 단계(PR4의 4-4·4-5)입니다.
+**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3), DB 암호 교체·main 이미지·ECS Service 첫 기동·공개 진입점(PR4의 4-1~4-3)의 실제 적용과 검증을 완료**했습니다. PR4의 4-4에서 CI를 dev에 반영하고 CD의 AWS·GitHub 연결을 적용했습니다. 첫 자동 배포와 운영 검증(4-5)은 후속 단계입니다.
 
 설계·구현 기준은 [Terraform 설계·구현 원칙](https://app.notion.com/p/413530b4fe5980cf9edbc37ec93b957e)에 모으고, 이 문서는 인프라 담당자의 실행·이전 절차만 다룹니다.
 
@@ -38,12 +38,13 @@ infra/aws/
 ├── data-config.tf           # Data 설정 묶음의 S3 전달·SSM 적용
 ├── registry.tf              # 앱 이미지 저장소(ECR)·앱 로그 그룹
 ├── task-definitions.tf      # 서비스 8개 Task 정의(이미지 digest·자원·비밀값·헬스 체크)
+├── app-services.tf          # 8개 ECS Service(롤링·자동 롤백, 실행 리비전은 CD가 정함)
 ├── public-ingress.tf        # 공개 API 인증서(ACM)·ALB·HTTPS 리스너·Gateway Target Group
 ├── alarms.tf                # SNS 이메일·CloudWatch 경보
 ├── monitoring.tf            # 모니터링 설정 묶음·앱 호스트 수집기·CloudWatch 대시보드
 ├── host-observability.tf    # 호스트 메모리·디스크·초기화 로그
 ├── templates/               # EC2 기동·Data·모니터링 Compose·systemd·monitoring/ 수집 설정
-├── scripts/                 # 설정 묶음 적용·비밀값 준비·이미지 게시·디스크·DB 초기화 도구
+├── scripts/                 # 설정 묶음 적용·비밀값 준비·이미지 게시·CD 배포·디스크·DB 초기화 도구
 ├── outputs.tf               # 식별자·실행 계약 출력, 비밀값 제외
 ├── .terraform.lock.hcl      # Provider 버전·패키지 체크섬
 ├── tests/                   # Terraform 모의 검증·Python 핵심 동작 검사
@@ -255,7 +256,7 @@ python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profi
 
 - Wallet 계좌번호 키(무작위 32바이트의 Base64)는 `--apply --create-wallet-key`를 줄 때만 만듭니다. 데이터가 생긴 뒤 바꾸거나, 지워진 뒤 새로 만들면 저장된 계좌번호를 풀 수 없으므로 Wallet 데이터가 생기기 전 처음 한 번만 씁니다.
 - 수출입은행에서 발급받은 환율 API 키는 `--apply --external`을 줄 때만 입력받습니다. 입력을 숨길 수 있는 터미널에서 직접 실행해야 하며, 파이프 입력처럼 입력이 화면에 보일 수 있으면 거절합니다. 키를 명령 인자·파일·채팅에 남기지 않습니다.
-- DB 앱 계정 암호 6개는 `--apply --rotate-database-passwords`를 줄 때만 새 임의 값으로 바꿉니다. SSM 값만 바뀌므로 아래 DB 작업 창에서 초기화 스크립트를 다시 실행해야 DB에 반영되고, 그 전에 시작한 Task는 DB 로그인에 실패합니다. 새 값은 출력하지 않으며 사람이 알 필요가 없습니다. Task는 시작할 때, 초기화 스크립트는 실행할 때 SSM에서 읽습니다.
+- DB 앱 계정 암호 6개는 `--apply --rotate-database-passwords`를 줄 때만 새 임의 값으로 바꿉니다. SSM 값만 바뀌므로 아래 DB 작업 창에서 초기화 스크립트를 다시 실행해야 DB에 반영되고, 그 전에 시작한 Task는 DB 로그인에 실패합니다. 새 값은 출력하지 않으며 사람이 알 필요가 없습니다. Task는 시작할 때, 초기화 스크립트는 실행할 때 SSM에서 읽습니다. 앱이 실행 중일 때 교체했다면 초기화 스크립트를 실행한 뒤 CD의 **Run workflow**에서 DB를 쓰는 서비스를 `services`에 지정해 새 Task로 다시 띄웁니다.
 
 ```bash
 terraform -chdir=infra/aws apply stage-4.tfplan
@@ -396,7 +397,7 @@ ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합�
 - Exchange는 환율 API 키(`KOREAEXIM_API_KEY`)가 없으면 시작하지 않습니다. 배포 전 비밀값 준비 도구의 `--external`로 저장합니다.
 - ALB 접근 로그는 켜지 않았습니다. Cloudflare만 접근할 수 있고 요청 기록은 Gateway 로그와 ALB 지표로 확인합니다.
 - SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. PR4의 4-3에서 Cloudflare가 붙이는 비밀 헤더(`Origin-Auth`)를 ALB 규칙이 확인하도록 해 막습니다.
-- CD(PR4의 4-4)가 새 리비전으로 Service를 갱신하면, 이미지가 같아도 Service의 Task 정의 ARN이 Terraform이 아는 리비전과 달라집니다. 그대로 두면 다음 apply가 Terraform의 리비전으로 되돌리며 다시 배포합니다. 그래서 4-4에서 Service의 Task 정의는 CD가 소유하게 하고(`ignore_changes`), Terraform 설정을 바꾸기 전에는 운영 중인 digest를 `application_images`에 맞춥니다. CD를 켜기 전까지는 Terraform만 Service를 갱신합니다.
+- CD(PR4의 4-4)가 새 리비전으로 Service를 갱신하면 Service의 Task 정의 ARN이 Terraform이 아는 리비전과 달라집니다. 그대로 두면 다음 apply가 Terraform의 리비전(이전 이미지)으로 되돌립니다. 그래서 Service가 실행할 리비전은 CD가 정하고 Terraform은 바꾸지 않습니다(`ignore_changes`). 자세한 동작은 [자동 배포(CD) 연결](#자동-배포cd-연결)에 있습니다.
 
 ## 앱 상시 실행(ECS Service)
 
@@ -409,7 +410,7 @@ Task 정의·ALB와 앱 호스트 2대를 확인한 뒤 `enable_app_services=tru
 | 배치 | 앱 호스트 Capacity Provider, App A/B 서브넷, 공인 IP 없음, 서비스별 SG | Capacity Provider는 클러스터 기본값과 같지만, 생략하면 AWS가 기본값을 Service에 기록해 다음 plan부터 갱신이 거절됩니다(provider 6.72.0 소스) |
 | 서비스 찾기 | Eureka·Mock Bank만 Cloud Map(`eureka`·`mock-bank.travelpay.internal`), 나머지는 Eureka | 다른 앱이 고정 이름으로 찾는 두 서비스입니다. 컨테이너 헬스 체크를 통과한 Task가 있으면 그 Task만 응답하고, 모두 비정상이면 비정상 Task도 응답합니다(Route 53 다중 값 응답 규칙) |
 | 공개 진입점 | Gateway만 ALB Target(IP, 8080), 기동 유예 180초 | 기동 중 ALB 상태 확인을 보지 않습니다. 컨테이너 헬스 체크는 Task 정의의 시작 유예(180초)가 같은 역할을 하므로 다른 서비스에는 두지 않습니다 |
-| apply | 안정 상태까지 대기(`wait_for_steady_state`) | 배포가 실패하거나 되돌려지면 apply가 그 이유와 함께 실패합니다(provider 6.72.0 소스) |
+| apply | 안정 상태까지 대기(`wait_for_steady_state`), 실행 리비전은 바꾸지 않음(`ignore_changes`) | 배포가 실패하거나 되돌려지면 apply가 그 이유와 함께 실패합니다(provider 6.72.0 소스). Service 생성 뒤 실행 리비전은 CD가 정합니다 |
 
 기동 순서는 두지 않습니다.
 
@@ -457,6 +458,29 @@ Grafana 인증서는 쓰고 있는 API 인증서를 바꾸지 않도록 따로 �
 3. Zero Trust에 One-time PIN 로그인 방법을 추가하고(새 조직에는 자동으로 추가되지 않음), `grafana.travelpay.store` Access 앱과 팀원 이메일 허용 정책을 만듭니다.
 4. Terraform 2차: `enable_public_entry=true`로 ALB 헤더 검사, Grafana 인증서·Target Group·규칙·SG, Grafana 설정을 적용합니다.
 5. Cloudflare에서 `api`·`grafana`를 ALB DNS 이름으로 CNAME(프록시 켬)하고, 저장해 둔 Transform Rule을 Deploy합니다.
+
+## 자동 배포(CD) 연결
+
+GitHub Actions CD(`.github/workflows/deploy.yml`)가 main 커밋을 배포할 수 있게 AWS와 GitHub를 연결합니다. 배포 흐름·대상·순서는 [CI·CD 가이드](ci-cd.md#cd운영-배포)에 있습니다.
+
+| 구성 | 내용 |
+|---|---|
+| OIDC 신뢰 | 배포 역할은 이 저장소 `production` 환경의 토큰만 믿습니다. 저장소가 2026-07-15 이후 만들어져 GitHub가 subject에 소유자·저장소 숫자 ID를 넣으므로(`repo:dont-worrys@348131411/travelpay@1433947730:environment:production`) 그 형식으로 확인합니다. 이름만 쓰는 이전 형식으로는 이 저장소의 토큰이 맞지 않습니다(GitHub OIDC 문서의 immutable subject claims, 저장소 OIDC 설정 API의 `use_immutable_subject: true`·`sub_claim_prefix`로 확인) |
+| 배포 권한 | `enable_github_deployment=true`일 때만 붙습니다. 8개 앱 ECR 저장소의 이미지 조회(`DescribeImages`)·푸시, 8개 Service 조회·갱신, Task 정의 조회·등록, 앱 Task 역할 전달. privileged 컨테이너 등록은 거부합니다 |
+| Service | 실행할 리비전은 CD가 정하고 Terraform은 바꾸지 않습니다(`ignore_changes = [task_definition]`) |
+| Task 정의 | CD는 패밀리의 최신 리비전에서 이미지만 바꾼 새 리비전을 등록합니다(최신 리비전이 이미 그 이미지면 그대로 씀). 태그는 복사하지 않습니다(Service가 Task에 태그를 전파하지 않음, `propagateTags=NONE`) |
+
+연결 순서는 다음과 같습니다. 배포 권한을 붙이기 전에 GitHub 환경 보호를 먼저 확인합니다. 이 환경이 없으면 워크플로가 처음 참조할 때 보호 없이 새로 만들어져, 어느 브랜치의 실행이든 이 역할을 받을 수 있기 때문입니다. GitHub 설정은 저장소 관리자 권한이 필요합니다.
+
+1. GitHub 저장소 **Settings → Environments → production**을 확인합니다(2026-11-10에 만들어 둠).
+   - **Deployment branches and tags:** Selected branches and tags에 `main` 하나만 있어야 합니다(Ref type: Branch). dev나 기능 브랜치에서 시작한 실행은 이 환경을 쓰지 못해 실패합니다. 공개 API로도 확인할 수 있습니다: `curl -s https://api.github.com/repos/dont-worrys/travelpay/environments/production/deployment-branch-policies`
+   - **Environment secrets:** `AWS_DEPLOY_ROLE_ARN`에 `terraform output -json runtime_identity`의 `github_deployment_role` 값을 넣습니다. 공개 저장소의 로그에 계정 ID가 보이지 않도록 변수가 아닌 비밀값으로 둡니다.
+   - 승인자(Required reviewers)는 두지 않습니다. main 머지가 이미 리뷰를 거치고, 머지하면 바로 배포하기로 했습니다.
+2. `runtime.auto.tfvars.json`에 `"enable_github_deployment": true`를 넣고 plan을 검토한 뒤 적용합니다. 바뀌는 것은 배포 역할의 신뢰 조건·권한, 경보 2개입니다. Service는 바뀌지 않습니다.
+3. CD를 담은 PR을 dev에 머지합니다. dev 머지로는 배포하지 않습니다.
+4. dev를 main에 머지하면 첫 CD가 돕니다. 실행 화면에서 Plan의 배포 대상, Deploy의 서비스별 완료를 확인합니다.
+
+Terraform으로 Task 설정(환경 변수·크기 등)을 바꾸면 apply는 새 리비전만 등록하고 Service는 그대로 둡니다. 반영하려면 apply 뒤 CD의 **Run workflow**에서 `main`을 고르고 `services`에 해당 서비스 키를 넣어 실행합니다. CD는 그 최신 리비전에 현재 main 커밋의 이미지를 넣어 배포합니다. Terraform이 등록한 리비전의 이미지(`application_images`)는 이전 값일 수 있으므로, `aws ecs update-service --task-definition`으로 그 리비전을 직접 지정하지 않습니다. 이름·클러스터처럼 Service를 새로 만드는 설정을 바꿔 Terraform이 Service를 다시 만든 경우에도 같은 방법으로 다시 배포합니다. 그 밖의 Service 설정 변경은 제자리에서 바뀌며 CD가 배포한 리비전을 그대로 둡니다.
 
 ## AWS 모니터링(Prometheus·Loki·Grafana·Alloy)
 
@@ -762,5 +786,18 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 적용 후 재검사 | 본 root plan `No changes` |
 
 Transform Rule은 DNS 전환 전에 이미 켜져 있었습니다. 그동안 `api`는 임시 원본에 TCP 연결이 되지 않아 522였으므로, HTTP 요청이 원본으로 전달되지는 않은 것으로 봅니다. Gateway가 실제 접속자 IP(`CF-Connecting-IP`)를 쓰는지는 Gateway가 요청마다 로그를 남기지 않아 확인하지 못했으며, 4-5의 로그인 시도 제한 시험에서 확인합니다.
+
+2026-11-12 자동 배포(CD) 연결(4-4)은 다음과 같이 확인했습니다. 첫 실제 배포 결과는 main 머지 뒤 기록합니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 72개·bootstrap 3개·Python 152개 통과(Git에서 제외한 입력 파일이 없는 사본), actionlint 1.7.12로 워크플로 3개 통과. 사본에 결함 48개를 하나씩 넣어 모두 테스트 실패로 잡힘. 독립 리뷰 2회(지적 13건·4건) 반영: 다시 실행 때 같은 배포 반복 방지, 지정 서비스 강제 재배포, 배포 ID로 완료 판단, 끝나지 않은 배포를 다음 실행이 다시 대상으로 잡고 진행 중인 배포가 끝난 뒤 바꿈. 실제 Task 정의 8개로 만든 등록 입력이 AWS CLI 입력 검증을 통과(요청은 닫힌 로컬 주소로 보내 등록하지 않음) |
+| 배포 대상 선택 | main 커밋(`4f3ac30`)으로 실제 AWS·Git을 조회해 `ledger`·`payment`만 선택(실행 중 이미지 `c22b3046ee28` 이후 이미지 변경). 이전 커밋(`53e270f`)으로 실행하면 더 새 커밋의 이미지가 실행 중이라며 멈춤 |
+| plan | 추가 1·변경 4·삭제 0(배포 역할 신뢰 조건·권한 정책, 경보 2개). Service 변경 없음. 리뷰 반영 뒤 다시 만든 plan이 검토한 plan과 같음 |
+| 적용 | 추가 1·변경 4, 오류 없음. 저장한 plan 파일은 적용 직후 삭제 |
+| 배포 역할 | 신뢰 조건 `repo:dont-worrys@348131411/travelpay@1433947730:environment:production`, STS audience. 정책 1개(관리형 정책 0개). IAM 정책 시뮬레이터로 배포에 쓰는 호출 8가지 허용, 다른 저장소·다른 Service·호스트 역할 전달·privileged 등록·SSM 비밀값·Service 생성은 거부 |
+| GitHub 환경 | `production`의 배포 브랜치 규칙이 `main`(Branch) 하나(공개 API로 확인). 환경 비밀값 `AWS_DEPLOY_ROLE_ARN`은 운영자가 등록 |
+| 경보 | `gateway-5xx`가 Gateway Target Group 차원으로 바뀌어 Grafana Target의 5xx를 세지 않음. ALB가 이 차원의 지표를 발행함을 확인 |
+| 적용 후 재검사 | 본 root plan `No changes` |
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).

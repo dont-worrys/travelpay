@@ -21,7 +21,10 @@ mock_provider "aws" {
     defaults = { arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:listener/app/travelpay-production/0123456789abcdef/0123456789abcdef" }
   }
   mock_resource "aws_lb_target_group" {
-    defaults = { arn = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/travelpay-production-gateway/0123456789abcdef" }
+    defaults = {
+      arn        = "arn:aws:elasticloadbalancing:ap-northeast-2:123456789012:targetgroup/travelpay-production-gateway/0123456789abcdef"
+      arn_suffix = "targetgroup/travelpay-production-gateway/0123456789abcdef"
+    }
   }
   mock_resource "aws_acm_certificate" {
     defaults = { arn = "arn:aws:acm:ap-northeast-2:123456789012:certificate/00000000-0000-0000-0000-000000000000" }
@@ -511,6 +514,11 @@ run "alarms_cover_database_hosts_and_entry_point" {
       aws_cloudwatch_metric_alarm.service["data_disk_root"].dimensions == tomap({ InstanceId = "i-0123456789abcdef0", path = "/", fstype = "xfs" }) &&
       aws_cloudwatch_metric_alarm.service["app_memory"].dimensions == tomap({ AutoScalingGroupName = "travelpay-production-app" }) &&
       aws_cloudwatch_metric_alarm.service["alb_5xx"].dimensions == tomap({ LoadBalancer = "app/travelpay-production/0123456789abcdef" }) &&
+      # Grafana도 같은 ALB에 있으므로 Gateway 응답 5xx는 Gateway Target Group으로 좁힙니다.
+      aws_cloudwatch_metric_alarm.service["gateway_5xx"].dimensions == tomap({
+        LoadBalancer = "app/travelpay-production/0123456789abcdef"
+        TargetGroup  = "targetgroup/travelpay-production-gateway/0123456789abcdef"
+      }) &&
       aws_cloudwatch_metric_alarm.service["rds_connections"].dimensions == tomap({ DBInstanceIdentifier = "travelpay-production" })
     )
     error_message = "경보 차원이 Agent·RDS·ALB가 실제로 발행하는 지표의 차원과 같아야 합니다."

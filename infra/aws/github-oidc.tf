@@ -3,6 +3,13 @@ resource "aws_iam_openid_connect_provider" "github" {
   client_id_list = ["sts.amazonaws.com"]
 }
 
+# 저장소가 2026-07-15 이후 만들어져 GitHub가 소유자·저장소 이름 뒤에 숫자 ID를 붙인 subject를 씁니다(GitHub OIDC 문서의
+# immutable subject claims). 이름만 쓰는 이전 형식은 이 저장소의 토큰과 맞지 않습니다.
+locals {
+  github_repository_parts = split("/", var.github_repository)
+  github_subject          = "repo:${local.github_repository_parts[0]}@${var.github_owner_id}/${local.github_repository_parts[1]}@${var.github_repository_id}:environment:${var.github_environment}"
+}
+
 resource "aws_iam_role" "github_deploy" {
   name = "${local.runtime_name_prefix}-github-deploy"
   assume_role_policy = jsonencode({
@@ -14,7 +21,7 @@ resource "aws_iam_role" "github_deploy" {
       Condition = {
         StringEquals = {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-          "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:environment:${var.github_environment}"
+          "token.actions.githubusercontent.com:sub" = local.github_subject
         }
       }
     }]
@@ -33,9 +40,11 @@ resource "aws_iam_role_policy" "github_deploy" {
       { Effect = "Allow", Action = ["ecr:GetAuthorizationToken"], Resource = ["*"] },
       {
         Effect = "Allow"
+        # DescribeImages는 실행 중 이미지의 소스 커밋(태그)과 이미 올린 커밋 태그를 확인하는 데 씁니다.
         Action = [
           "ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
           "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer",
+          "ecr:DescribeImages",
         ]
         Resource = values(local.repository_arns)
       },

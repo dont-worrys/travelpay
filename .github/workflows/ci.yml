@@ -1,18 +1,19 @@
-# PR과 dev·main 반영마다 빌드·테스트를 돌립니다. AWS 권한·비밀값은 쓰지 않습니다(배포는 별도 워크플로).
-# 액션은 공급망 변조를 막기 위해 검토한 커밋 SHA로 고정합니다(주석은 그 커밋의 릴리스 태그).
+# PR과 dev 반영마다 빌드·테스트를 돌립니다. main 반영 커밋은 CD(deploy.yml)가 배포 전에 이 워크플로를 불러 검사합니다.
+# AWS 권한·비밀값은 쓰지 않습니다. 액션은 공급망 변조를 막기 위해 검토한 커밋 SHA로 고정합니다(주석은 그 커밋의 릴리스 태그).
 name: CI
 
 on:
   pull_request:
     branches: [dev, main]
   push:
-    branches: [dev, main]
+    branches: [dev]
+  workflow_call:
 
 # 저장소를 읽기만 합니다. 외부 저장소에서 온 PR이 실행돼도 쓸 수 있는 권한이 없습니다.
 permissions:
   contents: read
 
-# 같은 PR에 새 커밋이 오면 이전 실행을 멈추고, dev·main 반영 실행은 끝까지 둡니다.
+# 같은 PR에 새 커밋이 오면 이전 실행을 멈추고, dev 반영과 CD가 부른 실행(호출한 쪽의 main push 정보를 씀)은 끝까지 둡니다.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
