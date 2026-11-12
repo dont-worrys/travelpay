@@ -643,7 +643,7 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 시험 실행 | 8개 서비스 모두 새 이미지로 시험 Task 실행, 종료 코드 0. uid 10001, 루트 읽기 전용, `/tmp` 쓰기, 비밀값 주입, Task IP 확인, 허용 대상(RDS·Redis·Kafka) 연결 |
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
 
-이번 이미지는 기능 브랜치 커밋으로 만든 검증용입니다. 운영에는 main에 머지된 커밋의 이미지만 배포합니다. PR4에서 첫 Service를 만들기 전에 main 커밋으로 다시 빌드해 Task 정의의 digest를 바꾸고, 이후 배포는 CD가 main 커밋으로만 합니다.
+이번 이미지는 기능 브랜치 커밋으로 만든 검증용입니다. 운영에는 main에 머지된 커밋의 이미지만 배포합니다. 그래서 첫 Service를 만들기 전에 main 커밋으로 다시 빌드해 Task 정의의 digest를 바꿨습니다(아래 `c22b304` 결과 표). 이후 배포는 CD가 main 커밋으로만 합니다.
 
 2026-11-12 PR2 때 평문으로 보낸 DB 앱 계정 암호를 교체하고 mock-bank 계정 이름을 맞췄습니다.
 
@@ -658,5 +658,15 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 적용 후 재검사 | 본 root plan `No changes` |
 
 처음 작업 창에서는 초기화가 실행되지 않은 채 창이 닫혀(SSM 세션·명령 기록 없음) 다시 열어 실행했습니다. 그 사이 앱 Task가 없어 영향은 없었습니다.
+
+2026-11-12 main 머지 커밋 `c22b304`(PR #290)으로 이미지를 다시 만들어 Task 정의를 바꿨습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 이미지 게시 | 8개를 태그 `c22b3046ee28`로 게시. `53e270f` 이후 실행 코드가 바뀌지 않은 Eureka·Exchange·Ledger·mock-bank·Wallet은 digest가 이전과 같고, Gateway·Payment·User만 새 digest. 새 이미지 jar에서 Gateway의 `Origin-Auth` 제거·연결 실패 503 처리·전달 연결 대기 2000, User의 커넥션 대기 2000·검증 1000, Payment의 송금 외부 호출 시간 제한(#284) 확인 |
+| 적용 | 저장한 plan 적용: 추가 3·삭제 3, Gateway·Payment·User Task 정의 새 리비전(3)이고 이미지 외 변경 없음. 삭제는 Terraform 상태에서만 빠진 것이고 이전 리비전(2)은 롤백용으로 ACTIVE 유지 |
+| Task 정의 | 8개 모두 이미지 목록 파일의 digest와 같음. Gateway·Payment·User·mock-bank는 리비전 3, 나머지는 2 |
+| 시험 실행 | Gateway·User·Payment·mock-bank 시험 Task 종료 코드 0. uid 10001, `/tmp` 쓰기, 비밀값 주입, Redis·RDS 연결 |
+| 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).
