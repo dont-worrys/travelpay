@@ -1,0 +1,51 @@
+# 실행 이미지와 운영 모니터링 구성을 실제 컨테이너로 검사합니다. 이미지 빌드·여러 이미지 다운로드로 오래 걸리므로
+# 검사 대상 파일이 바뀐 PR·반영에서만 돌립니다. 앱 코드 자체의 테스트는 CI(ci.yml)가 맡습니다.
+name: CI container checks
+
+on:
+  pull_request:
+    branches: [dev, main]
+    paths: &checked-paths
+      # 실행 이미지(Dockerfile·시작 스크립트)와 이미지 안에서 도는 Gradle 빌드 설정
+      - deploy/docker/**
+      - build.gradle
+      - settings.gradle
+      - gradle/**
+      - gradlew
+      # 운영 모니터링(Alloy·Loki) 설정과 그 준비 스크립트
+      - infra/aws/monitoring.tf
+      - infra/aws/templates/monitoring/**
+      - infra/aws/scripts/prepare-monitoring.py
+      - infra/aws/tests/test_container_image.py
+      - infra/aws/tests/test_monitoring_pipeline.py
+      - .github/workflows/ci-container.yml
+  push:
+    branches: [dev, main]
+    paths: *checked-paths
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-container-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  containers:
+    name: Image and monitoring
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 호스트 스크립트를 함께 읽으므로 Data·앱 호스트와 같은 Python으로 돌립니다.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.9"
+      - name: Container tests
+        working-directory: infra/aws
+        env:
+          TRAVELPAY_TEST_DOCKER_IMAGE: "1"
+          TRAVELPAY_TEST_DOCKER_MONITORING: "1"
+        run: python -m unittest -v tests.test_container_image tests.test_monitoring_pipeline
