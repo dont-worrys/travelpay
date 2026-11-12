@@ -4,7 +4,7 @@
 # (그동안 요청 스레드·커넥션 풀 지표를 1초마다 기록) → 주문 상태 집계 → 결과 정리.
 # 기존 환율·견적 측정(measure.sh)과 따로 두어 그 측정 조건을 바꾸지 않습니다.
 #
-# 사용법: [ORDER_RATE=40] [RATE_RATE=100] [TIMEOUT=10s] ./measure-ledger.sh <LABEL> <원장 지연 ms>
+# 사용법: [ORDER_RATE=60] [RATE_RATE=100] [TIMEOUT=10s] ./measure-ledger.sh <LABEL> <원장 지연 ms>
 #   예: APP_JAR=../../../travelpay-ledger-pre282/$J ./measure-ledger.sh ledger-pre-normal 0
 #       APP_JAR=../../../travelpay-ledger-pre282/$J ./measure-ledger.sh ledger-pre-timeout 6000
 #   결과: results/<LABEL>.json(k6: 신청·환율 조회 응답) + results/<LABEL>-server.json(서버 지표·주문 상태·측정 조건)
@@ -20,7 +20,7 @@ LABEL=${1:?LABEL을 주세요 (예: ledger-pre-normal)}
 LEDGER_DELAY_MS=${2:?원장 지연 ms를 주세요 (0 / 3000 / 6000)}
 WARMUP_SECONDS=${WARMUP_SECONDS:-30}
 MEASURE_SECONDS=${MEASURE_SECONDS:-120}
-ORDER_RATE=${ORDER_RATE:-40}
+ORDER_RATE=${ORDER_RATE:-60}
 RATE_RATE=${RATE_RATE:-100}
 TIMEOUT=${TIMEOUT:-10s}
 HOURS=${HOURS:-24}

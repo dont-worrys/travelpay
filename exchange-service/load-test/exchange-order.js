@@ -11,7 +11,8 @@
 // 요청마다 시작 시각으로 예열/측정을 표시하고(phase), 측정 구간에 시작한 요청만 집계합니다.
 //
 // 환경 변수
-//   ORDER_RATE  초당 환전 신청 수 (기본 40)
+//   ORDER_RATE  초당 환전 신청 수 (기본 60). 원장 응답 대기 5초면 요청 스레드 200개가 감당하는 신청은 초당 40건(200 ÷ 5)이라,
+//               그보다 많이 보내 원장 지연이 스레드를 바닥내는 상황을 재현한다(원장이 정상이면 여유 있게 처리하는 양)
 //   RATE_RATE   초당 환율 조회 수 (기본 100)
 //   WARMUP      예열 (기본 30s) / DURATION 측정 (기본 120s)
 //   TIMEOUT     요청 하나의 응답 시간 제한 (기본 10s)
@@ -22,7 +23,7 @@ import http from 'k6/http';
 import exec from 'k6/execution';
 import { Counter, Trend } from 'k6/metrics';
 
-const ORDER_RATE = Number(__ENV.ORDER_RATE || 40);
+const ORDER_RATE = Number(__ENV.ORDER_RATE || 60);
 const RATE_RATE = Number(__ENV.RATE_RATE || 100);
 const WARMUP = __ENV.WARMUP || '30s';
 const DURATION = __ENV.DURATION || '120s';
