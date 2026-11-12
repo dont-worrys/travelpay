@@ -133,6 +133,20 @@ public interface TransferRepository extends JpaRepository<Transfer, UUID>, JpaSp
 
     long countByStatus(TransferStatus status);
 
+    /**
+     * 자동 대사 대상: MANUAL_REVIEW로 바뀐 지 기준 시각이 지난 송금을 (수정 시각, ID) 순으로 커서 다음부터 조회합니다.
+     * 확정하지 못하고 남는 송금이 있어도 매번 같은 앞쪽 건만 보지 않도록 커서로 이어서 돌고, 끝까지 가면 처음부터 다시 봅니다.
+     */
+    @Query(nativeQuery = true, value = """
+            select * from transfer
+            where status = 'MANUAL_REVIEW'
+              and updated_at < cast(:before as timestamptz)
+              and (updated_at, id) > (cast(:afterUpdatedAt as timestamptz), cast(:afterId as uuid))
+            order by updated_at, id
+            limit :limit
+            """)
+    List<Transfer> findManualReviewAfter(Instant before, Instant afterUpdatedAt, UUID afterId, int limit);
+
     /** 생성 시각이 기준 시각 이전인데 아직 처리 중인 송금 수입니다. 오래 확정되지 않은 송금 알림에 씁니다. */
     @Query("""
             select count(t) from Transfer t

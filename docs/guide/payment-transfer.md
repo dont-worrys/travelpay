@@ -287,15 +287,18 @@ user-service I02는 요청자별 호출 한도(기본 60초 60회)가 있습니�
 | `GET /api/v1/admin/transfers/{transferId}` | 송금 상세(당사자 제한 없음) | 200 |
 | `GET /api/v1/admin/transfers/{transferId}/resolution` | `MANUAL_REVIEW` 송금 확정 미리보기(상태 변경 없음) | 200 |
 | `POST /api/v1/admin/transfers/{transferId}/resolve` | `MANUAL_REVIEW` 송금 확정 | 200 |
-| `GET /api/v1/admin/transfers/{transferId}/history` | 상태 변경 이력 | 200 |
+| `GET /api/v1/admin/transfers/{transferId}/history` | `MANUAL_REVIEW` 확정 이력(운영자 확정·자동 대사) | 200 |
 
 - 권한: `User-Role`이 `MASTER`가 아니면 `403 COMMON_FORBIDDEN`. 경로의 `admin`은 관리 기능 영역, `MASTER`는 허용 역할입니다.
 - 목록 조건(모두 선택): `from`(포함)·`to`(미포함, ISO-8601, `from`이 `to`보다 앞서야 함), `currency`(KRW·JPY·CNY, 그 밖은 `400 TRANSFER_UNSUPPORTED_CURRENCY`), `status`, `userId`(송금인 또는 수취인), `orderType`(`LATEST` 기본 = 생성 시각 내림차순, `OLDEST` = 오름차순, 같은 시각은 ID로 같은 방향), `page`(0부터)·`size`(기본 20, 최대 100). 잘못된 값은 `400 COMMON_INVALID_REQUEST`
 - 응답: `transferId`, `senderId`, `receiverId`, `sourceWalletId`, `targetWalletId`, `amount`, `currency`, `status`, `failureReason`(`FAILED`만), `reviewReason`(`MANUAL_REVIEW`만), `attemptCount`, `memo`, `createdAt`, `updatedAt`. `direction`·멱등성 키는 없음. 없는 송금은 `404 TRANSFER_NOT_FOUND`
+- 이력 응답 항목: `fromStatus`, `toStatus`, `reason`, `actorType`(`OPERATOR` 운영자 확정 / `SYSTEM` 자동 대사), `actorId`(운영자 회원 ID, `SYSTEM`이면 null), `ledgerTransactionId`(재처리로 돌린 경우 null), `createdAt`
 - 조회 기록: 관리자 ID와 조건(목록)·송금 ID(상세)를 INFO 로그로 남깁니다.
 - Swagger 그룹: `transfer-admin`(`/v3/api-docs/transfer-admin`)
 
 ### MANUAL_REVIEW 확정
+
+원장 결과가 확정적인 건(`POSTED` 항목 일치, `REJECTED`)은 복구 스케줄러가 `MANUAL_REVIEW`가 된 뒤 약 1~2분 안에 자동으로 확정합니다([MANUAL_REVIEW 자동 대사](#manual_review-자동-대사)). 운영자 확정은 그 밖의 건(원장 기록 없음, 항목 불일치, 원장 조회 실패가 이어지는 경우)에 씁니다.
 
 운영 순서: 미리보기(`GET …/resolution`)로 원장 결과와 확정할 상태를 확인한 뒤, 그 값을 넣어 확정(`POST …/resolve`)합니다. 원장 조회는 내부 API(`/internal/v1`)라 운영자가 직접 원장 거래 ID를 얻을 수 없으므로 미리보기가 그 값을 알려 줍니다.
 
@@ -478,12 +481,36 @@ flowchart TD
 - 한 건의 오류는 로그만 남기고 다음 건을 계속 처리합니다.
 - payment-service의 스케줄러 스레드는 2개입니다(`spring.task.scheduling.pool.size`). 결제 정산 복구와 서로의 원장 호출을 기다리지 않게 하기 위함입니다.
 
+#### MANUAL_REVIEW 자동 대사
+
+`MANUAL_REVIEW` 송금 중 원장 결과가 확정적인 건은 운영자를 기다리지 않고 자동으로 확정합니다(`TransferReviewReconciler`, 2026-11-12). 운영자가 건마다 미리보기·확정을 하는 양을 줄이고, 판단이 필요한 건만 운영자에게 남기기 위함입니다.
+
+| 항목 | 값 |
+|---|---|
+| 실행 | 복구 스케줄러가 6주기(약 1분)마다 복구 뒤 같은 스레드에서 실행. 스케줄러 스레드를 늘리지 않음 |
+| 대상 | `MANUAL_REVIEW`가 된 지 1분이 지난 송금을 (수정 시각, ID) 순으로 최대 10건. 커서로 이어서 돌고 끝까지 가면 처음부터 |
+| 판단 | 운영자 확정 미리보기와 같은 코드(`TransferResolution.decide`)로 원장 reference 조회 결과를 판정 |
+| 원장 조회 실패 | 그 건은 그대로 두고 다음 건으로. 연달아 3번이면 이번 주기를 멈추고 다음 주기에 같은 위치부터 |
+
+| 원장 결과 | 자동 대사 결과 |
+|---|---|
+| `POSTED` + 항목이 송금과 같음 | `COMPLETED` |
+| `REJECTED` | `FAILED`, 실패 사유는 운영자 확정과 같음(원장 미수락 건은 `NOT_PROCESSED`) |
+| 기록 없음 | 그대로 `MANUAL_REVIEW`(운영자가 재처리 여부를 판단) |
+| `POSTED`인데 항목이 다름 | 그대로 `MANUAL_REVIEW`, ERROR 로그 |
+
+- 상태 변경은 운영자 확정과 같은 조건부 UPDATE(`MANUAL_REVIEW`일 때만)이고, 같은 트랜잭션에서 이력을 `actorType=SYSTEM`(운영자 ID 없음, 근거 원장 거래 ID 있음, 사유 `원장 결과 자동 대사`)으로 남깁니다. 조회 뒤 운영자나 다른 인스턴스가 먼저 확정했으면 아무것도 하지 않습니다.
+- 자동 확정된 송금에 운영자가 확정을 요청하면, 마지막 운영자 확정 이력이 없으므로 `409 COMMON_CONFLICT`입니다(기존 재시도 규칙).
+- 기록 없음은 자동으로 `PROCESSING`으로 되돌리지 않습니다. 재시도를 이미 소진했거나 원장이 요청을 받지 않은 건이라, 다시 보낼지는 운영자가 판단합니다.
+- 원장이 결과를 모르는 상태(장애)가 길어도 확정하지 않으므로, 실제 자금 이동이 확인되지 않은 송금을 `COMPLETED`로 만들지 않는다는 원칙은 그대로입니다.
+
 | 지표 | 의미 |
 |---|---|
 | `transfer.processing.stuck` | 생성 후 30분이 지나도 `PROCESSING`인 송금 수. 재시도 5회가 약 7.5분 안에 끝나므로 0보다 크면 복구가 돌지 않는 것(스케줄러 정지, 결과 모름 기록 실패 등)이고, ERROR 로그(오래된 순 ID 10개)도 남김 |
 | `transfer.manual_review` | 운영자 확인을 기다리는 `MANUAL_REVIEW` 송금 수 |
+| `transfer.manual_review.auto_resolved{status}` | 자동 대사로 확정한 송금 수(카운터, `status`는 `COMPLETED`·`FAILED`). [자동 대사](#manual_review-자동-대사) 참고 |
 
-두 지표는 복구 스케줄러가 10초마다 DB를 세어 갱신합니다(Prometheus 이름 `transfer_processing_stuck`, `transfer_manual_review`). Grafana `TRAVELPAY | Local Performance`의 **서비스 처리 지연 현황** 표에 `송금 / 30분 초과`, `송금 / 관리자 확인 대기` 행으로 나옵니다(메트릭 환경 `local`, 서비스 `payment-service`).
+앞의 두 지표는 복구 스케줄러가 10초마다 DB를 세어 갱신합니다(Prometheus 이름 `transfer_processing_stuck`, `transfer_manual_review`). Grafana `TRAVELPAY | Local Performance`의 **서비스 처리 지연 현황** 표에 `송금 / 30분 초과`, `송금 / 관리자 확인 대기` 행으로 나옵니다(메트릭 환경 `local`, 서비스 `payment-service`).
 
 2026-11-10에 로컬에서 원장을 멈추고 확인했습니다(코드 변경 없음, DB 직접 수정 없음).
 
@@ -509,6 +536,7 @@ flowchart TD
 | 송금 30분 넘게 PROCESSING | `max by (environment, service) (transfer_processing_stuck) > 0` | critical | 복구 주기 ERROR 로그(payment DB 쓰기 오류 등)·원장 장애 확인, ERROR 로그의 송금 ID |
 
 - 30초마다 평가하고 `for`는 0초입니다. 두 게이지가 이미 "운영자 확인 필요"·"30분 경과"를 담고 있어 더 기다릴 이유가 없습니다.
+- 자동 대사(2026-11-12) 뒤에는 `MANUAL_REVIEW` 발생 알림이 자동 확정될 건(약 1~2분 뒤 해소)에도 바로 뜹니다. 대응 전에 1~2분 뒤 이력에 `SYSTEM` 확정이 있는지 먼저 봅니다. `for`를 늘릴지는 인프라 담당과 정합니다(규칙 파일은 바꾸지 않음).
 - 게이지가 DB 값이라 인스턴스마다 같으므로 `max`로 묶습니다. 지표가 없으면(서비스 다운) 이 규칙은 OK로 둡니다. 서비스 다운은 별도 규칙의 몫입니다.
 - 알림 채널(contact point)은 정하지 않았습니다. 로컬은 Grafana 기본 채널(SMTP 없음)이라 발송되지 않고, Alerting 화면·API에서 상태만 봅니다.
 - 한계: 두 게이지는 복구 스케줄러가 주기마다 갱신합니다(`TransferRecoveryScheduler`). 스케줄러가 멈추거나 건수 조회가 계속 실패하면 마지막 값이 그대로 남습니다. 그래서 stuck 알림은 스케줄러는 돌지만 송금을 확정하지 못하는 경우(복구 주기 실패 반복 등)를 잡고, 스케줄러 정지는 잡지 못합니다. 지표 수집이 끊겨도(NoData) OK로 두기 때문에 수집 장애도 이 규칙으로는 모릅니다.
@@ -586,8 +614,9 @@ flowchart TD
 | `V20261029_1__add_transfer_cancelled_status.sql` | `CANCELLED` 상태 |
 | `V20261030_2__add_transfer_ledger_status.sql` | `PROCESSING`·`COMPLETED`·`FAILED`, `failure_reason` |
 | `V20261102_1__add_transfer_manual_review.sql` | `MANUAL_REVIEW`, `attempt_count`, `review_reason`, 복구 대상 부분 인덱스 |
-| `V20261104_1__create_transfer_status_history.sql` | 운영자 확정 이력 테이블 `transfer_status_history` |
+| `V20261104_1__create_transfer_status_history.sql` | `MANUAL_REVIEW` 확정 이력 테이블 `transfer_status_history`(처음엔 운영자만) |
 | `V20261105_1__add_transfer_failure_reason_not_processed.sql` | 실패 사유 `NOT_PROCESSED` |
+| `V20261112_1__add_transfer_status_history_system_actor.sql` | 이력 작성자 `SYSTEM`(자동 대사), `actor_id` NULL 허용, 작성자·`actor_id` 짝 CHECK |
 
 | 제약·인덱스 | 내용 |
 |---|---|
@@ -600,7 +629,8 @@ flowchart TD
 | `ix_transfer_sender_id_created_at`, `ix_transfer_receiver_id_created_at` | 보낸·받은 내역 목록 |
 | `ix_transfer_processing_updated_at` | `PROCESSING` 송금 복구 대상 조회(부분 인덱스) |
 | `fk_transfer_status_history_transfer` | 이력은 존재하는 송금에만 |
-| `ck_transfer_status_history_actor_type`, `ck_transfer_status_history_reason` | 이력 작성자는 `OPERATOR`만, 사유는 공백일 수 없음 |
+| `ck_transfer_status_history_actor_type`, `ck_transfer_status_history_reason` | 이력 작성자는 `OPERATOR`(운영자 확정) 또는 `SYSTEM`(자동 대사), 사유는 공백일 수 없음 |
+| `ck_transfer_status_history_actor_id` | `OPERATOR`면 `actor_id`(운영자 회원 ID)가 있고, `SYSTEM`이면 없음 |
 | `ix_transfer_status_history_transfer_id` | 송금별 이력 조회(`transfer_id, created_at, id`) |
 
 - 회원·지갑은 다른 서비스 소유라 FK 없이 ID만 저장합니다. 송금인·수취인 ID와 두 지갑 ID를 모두 저장해 재전송 요청을 저장된 값만으로 만듭니다.
@@ -733,6 +763,8 @@ README의 기본 절차(서비스 기동 → `prepare.py` → `measure.py`)에 �
 
 그 밖의 옵션(`--gateway`, `--extra-service`, `--duration`)과 `same_key_check.py`, 응답 유실 재현 방법, 결과 JSON의 새 지표 항목은 [단계별 심화 측정](#단계별-심화-측정-2026-11-10)에 있습니다. 대사 방식은 `--recon`으로 고릅니다. `api`(기본)는 관리자 송금 목록·원장 기간 목록 API를 끝까지 읽어 수만 건까지 쓰고, `db`는 같은 구간·같은 불변식을 Postgres 컨테이너에서 읽기 전용 트랜잭션의 SELECT 한 번으로 확인해 수십만 건 규모([장시간 측정 30분](#장시간-측정-30분-2026-11-11))에 씁니다. `both`는 둘 다 하고 결과 JSON `reconciliationDb.compare`에 건수·상태·원장 건수·잔액 합계·위반 유무의 차이를 남깁니다. `db`는 API 대사에 없는 원장 쪽 점검(같은 키 중복, 차변≠대변, 지갑별 순변동, 사용자 계정 음수)도 함께 봅니다.
 
+- `--load spike`: 짧은 시간 급증을 잽니다. k6 `ramping-arrival-rate`로 `--base-rate`(초당 요청) → `--peak-rate`로 올렸다 내리고(`--spike-before`·`--spike-rise`·`--spike-hold`·`--spike-fall`·`--spike-after` 초), VUS는 미리 할당할 최대 동시 요청입니다. 결과 JSON `stages`에 구간(before·spike·after)별 성공 TPS·202 비율·오류율·지연, `droppedIterations`에 동시 요청이 모자라 보내지 못한 요청 수, `db.stages`에 구간별 원장 잠금 대기가 남습니다. `mixed`와 함께 쓰지 못합니다. 예: `python -X utf8 measure.py dspike 100 --mode hot --load spike --base-rate 20 --peak-rate 300 --spike-before 30 --spike-rise 5 --spike-hold 30 --spike-fall 5 --spike-after 60`
+- 원장만 Docker 안에서 띄우기(앱↔DB 포트 전달 제거): 원장 jar를 `eclipse-temurin:21-jre` 컨테이너에 읽기 전용으로 붙여 `travelpay-local_default` 네트워크에서 실행하고(DB URL은 `postgres:5432`), 8085를 공개하고 Eureka는 `host.docker.internal:8761`로 등록합니다. 다른 서비스는 PC 실행 그대로입니다. 설정 비교는 `SPRING_APPLICATION_JSON`으로 덮어씁니다(PowerShell 5.1에서 docker에 넘길 때 JSON 큰따옴표를 `\"`로 이스케이프해야 함). 측정 데이터는 송금마다 1원씩 줄어 오래 쓰면 송금인 잔액이 바닥나 422가 섞이므로, 비교할 측정은 `prepare.py`로 새로 준비한 같은 데이터로 잽니다
 - 결과 JSON의 서비스별 경로에는 `p50Ms`·`p95Ms`·`p99Ms`·`p999Ms`·`maxBucketMs`(측정 구간 bucket 상한, 2026-11-11 추가)가 있습니다.
 - `--lock-holders`: 원장 잠금을 쥔 세션의 상태를 0.05초(`--lock-holder-interval`)마다 모아 `db.lockHolders.breakdown`에 넣습니다. 표본 쿼리도 DB·CPU를 쓰므로 `--mode hot` 분석 때만 켭니다([원장 잠금 보유 시간 분해](#원장-잠금-보유-시간-분해)).
 
@@ -757,7 +789,7 @@ README의 기본 절차(서비스 기동 → `prepare.py` → `measure.py`)에 �
 | 부하 발생기 | 대상과 다른 머신, 필요하면 분산 | 같은 PC의 k6 컨테이너 |
 | 인스턴스 | 운영과 같은 개수, Gateway·LB 포함 | 서비스별 1개, Gateway 제외 |
 | 목표 | 먼저 정함(예: 100 TPS에서 P95 300ms 이하) | 없음 |
-| 시나리오 | 부하·한계·장시간·급증 | 동시 20명 고정 60초~30분. 분산·집중·양방향·혼합, 응답 유실 주입 |
+| 시나리오 | 부하·한계·장시간·급증 | 동시 20명 고정 60초~30분. 분산·집중·양방향·혼합, 응답 유실 주입. 급증(초당 20 → 300건)은 집중 1번([수취인 집중 개선](#수취인-집중-개선-2026-11-12)) |
 | 반복 | 여러 번, 릴리스마다 기준값과 비교 | 각 1번 |
 | 결과 검증 | 오류율 중심 | 부하 뒤 원장·송금 상태·잔액 전수 대사 |
 
@@ -1128,7 +1160,7 @@ python -X utf8 same_key_check.py --rounds 20 --threads 20 --pair 5      # 같은
 - **잠금 시간의 약 83%(8.8ms)는 DB 작업이 아니라 앱과 DB 사이 왕복입니다.** 원장은 잠근 뒤 거래 INSERT, 항목 INSERT 2번, 계정 UPDATE 2번, COMMIT을 따로 보냅니다(ID를 앱에서 만들고 JDBC batch 설정 없음, `LedgerTransactionRecorder.record`). 왕복 6번에 8.8ms이므로 한 번에 약 1.5ms입니다. 이 값에는 원장 앱의 처리 시간(잠금 결과 판단, 엔티티 생성, PC CPU 약 79% 경합)도 섞여 있어 네트워크만의 시간으로 나누지는 못했습니다.
 - DB가 실제로 일한 시간은 건당 약 1.8ms(문장 1.0 + COMMIT 0.8)입니다.
 - 이 장비는 서비스가 Windows에서, DB가 Docker에서 돌아 포트 전달을 거칩니다. 같은 네트워크 안의 운영 환경이면 왕복이 짧아져 보유 시간도 줄 것으로 보지만 송금으로는 재지 않았습니다. 충전 측정에서는 서비스를 PC에서 띄웠을 때보다 Docker 안에서 띄웠을 때 앱·DB 왕복이 약 1ms → 약 0.05ms, 충전 한 건이 48ms → 12.6ms로 줄었습니다(2026-11-12 지갑 담당). 송금의 왕복 1.5ms도 같은 영향일 가능성이 커서, 83%는 이 측정 환경에서의 비율로 봅니다.
-- 원장 담당 검토 후보(원장 코드, 송금은 바꾸지 않음): 잠금 뒤 왕복 수 줄이기. 예를 들어 Hibernate `jdbc.batch_size`·`order_inserts`·`order_updates`로 항목 INSERT 2번·계정 UPDATE 2번을 각각 한 번에 보내면 왕복이 6번에서 4번이 됩니다. 효과는 측정 전이라 수치로 말하지 않습니다. 원장 담당이 개선 후보로 받았고, 충전 작업 뒤 원장 테스트 보강과 함께 보기로 했습니다(2026-11-12).
+- 원장 담당 검토 후보(원장 코드, 송금은 바꾸지 않음): 잠금 뒤 왕복 수 줄이기. 예를 들어 Hibernate `jdbc.batch_size`·`order_inserts`·`order_updates`로 항목 INSERT 2번·계정 UPDATE 2번을 각각 한 번에 보내면 왕복이 6번에서 4번이 됩니다. 원장 담당이 개선 후보로 받았고, 2026-11-12 원장 담당 허락으로 적용했습니다(결과는 [수취인 집중 개선](#수취인-집중-개선-2026-11-12)).
 - 처음 표본 쿼리는 행 잠금 대기열에서 앞선 대기 세션도 "막는 세션"으로 세어 87%가 잠금 대기로 나왔습니다. 스스로 잠금을 기다리는 세션을 빼도록 고친 뒤 다시 잰 값이 위 표입니다.
 
 #### 호출별 서버 쪽 응답 시간
@@ -1185,6 +1217,60 @@ python -X utf8 same_key_check.py --rounds 20 --threads 20 --pair 5      # 같은
 
 - 요청 전체 기한(원장 호출 전 단계의 누적 시간이 넘으면 원장을 부르지 않고 실패)은 새 오류 코드·정책이 필요해 팀 결정 전에는 만들지 않습니다. 1단계만으로 원장 호출 전 이론상 최악이 15초에서 4.5초로 줄어 효과가 겹칩니다.
 
+### 수취인 집중 개선 (2026-11-12)
+
+튜터 피드백(원인 분석에서 그치지 말고 개선을 적용해 전후를 비교, 짧은 시간 급증을 보여 줄 것)에 따라 원장 잠금 뒤 왕복을 줄이는 설정을 적용하고 전후·급증을 쟀습니다. 인프라 담당 답(운영 ECS에서는 부하 측정을 하지 않음, 로컬 Docker 환경을 운영과 비슷하게 꾸며 측정)에 따라 원장을 Docker 안에서 띄워 쟀습니다.
+
+#### 적용한 변경
+
+- 원장 `application.yml`·`application-prod.yml`에 Hibernate `jdbc.batch_size: 50`·`order_inserts`·`order_updates` (원장 코드 변경 없음, 원장 담당 허락). 거래 한 건 항목은 최대 20건이라 20 이상이면 같습니다
+- 잠금 뒤 항목 INSERT 2건과 계정 UPDATE 2건이 커밋 때 batch로 나갑니다. 거래 INSERT는 `saveAndFlush`라 단독 1왕복으로 남습니다. 잠금 뒤 왕복 6 → 4(Hibernate 통계: 문장 9건·batch 0 → 문장 4건·batch 3)
+- 원장 테스트 111건 통과. 배치를 켠 상태에서도 reference UNIQUE 위반이 실제로 발생하고(SameReference 30회, Cancel 12회) 기존과 같이 응답합니다. `reWriteBatchedInserts`는 넣지 않았습니다(pgjdbc는 batch를 Sync 한 번으로 보내 rewrite 없이도 batch당 1왕복, 켠 상태로 테스트 통과만 확인하고 효과는 재지 않음)
+
+#### 전후 비교 (원장 Docker)
+
+조건: 원장만 Docker 컨테이너(같은 네트워크의 Postgres에 직접 연결, 포트 전달 없음), 다른 서비스는 PC `java -jar`, 모니터링 켬, payment 직접 호출, `--mode hot --lock-holders`, 동시 20, 60초, 회차마다 예열 30초(버림). before·after 모두 새로 준비한 같은 데이터. 설정만 바꿔 원장 컨테이너를 다시 띄워 전환했습니다.
+
+| 지표 | before (batch 끔) | after (batch 켬) | 변화 |
+|---|---|---|---|
+| 성공 TPS | 143.7 / 158.9 (평균 151.3) | 167.5 / 173.4 (평균 170.4) | +13% |
+| 건당 잠금 보유 | 7.02 / 6.35ms | 6.04 / 5.82ms | −11% |
+| 원장 POST 평균 | 85.6 / 76.7ms | 67.6 / 64.8ms | 약 −19% |
+| P95 / P99 | 223·188 / 295·239ms | 188·183 / 247·230ms | 악화 없음 |
+| 202·오류 | 0 | 0 | |
+| 대사 위반 | 0 | 0 | |
+
+- 효과는 있지만 작은 편입니다. before 두 회차 차이가 약 10%라 회차를 늘리면 더 분명해집니다.
+- 처음 after 측정은 11-06부터 쓰던 데이터의 송금인 잔액이 바닥나 잔액 부족(422)이 섞여(130·1,140건) 버리고, 데이터를 새로 준비해 before·after를 다시 쟀습니다. 같은 회차의 응답 없음 4건은 k6 컨테이너 → PC `dial: i/o timeout`(같은 시각, payment에 닿지 않음)입니다.
+
+#### PC 환경 측정과의 차이
+
+같은 날 원장도 PC에서 띄운 환경(원장 jar PC 실행 + DB 포트 전달, 11-11까지의 측정 환경)에서 먼저 쟀습니다.
+
+| 지표 | PC before | PC after | Docker before | Docker after |
+|---|---|---|---|---|
+| 성공 TPS | 96.9 / 98.1 | 123.3 / 120.9 / 126.8 | 151.3 (평균) | 170.4 (평균) |
+| 건당 잠금 보유 | 10.42 / 10.30ms | 8.14 / 8.38 / 7.97ms | 6.69ms (평균) | 5.93ms (평균) |
+| P99 | 437 / 483ms | 1.08 ~ 1.27초 | 239 ~ 295ms | 230 ~ 247ms |
+| 최대 | 0.66 ~ 0.95초 | 2.5 ~ 3.6초, 202 1건 | 0.49 ~ 0.69초 | 0.46 ~ 0.51초 |
+
+- PC 환경에서는 개선 폭이 더 컸지만(TPS +25%, 잠금 −21%) 꼬리 지연이 크게 나빠졌습니다(잠금 대기 세션 평균 나이 84 → 291~379ms). Docker 환경에서는 before부터 훨씬 빠르고 꼬리 지연 악화도 없었습니다.
+- 그래서 PC 환경의 큰 개선 폭과 꼬리 지연 악화는 모두 앱↔DB 포트 전달 왕복 비용 때문으로 봅니다(원장 담당 지적과 같음). 왕복이 비싸니 왕복을 줄인 효과도 커 보였고, 잠금 대기 경쟁도 심해졌다는 해석이며 원인을 따로 검증하지는 않았습니다. [원장 잠금 보유 시간 분해](#원장-잠금-보유-시간-분해)의 83%도 이 측정 환경에서의 비율입니다.
+
+#### 급증 (스파이크)
+
+조건: 원장 Docker·batch 켬, `--mode hot --load spike`, 초당 20건 → 300건(상승 5초, 유지 30초, 하강 5초), 전 30초·후 60초, 최대 동시 요청 100.
+
+| 구간 | 성공 TPS | P99 | 최대 | 202·오류 | 원장 잠금 대기 세션(평균) |
+|---|---|---|---|---|---|
+| 급증 전 (30초) | 20 | 54ms | 70ms | 0 | 0 |
+| 급증 중 (40초) | 158.1 | 1.08초 | 1.72초 | 0 | 7.6 (최대 대기 350ms) |
+| 급증 후 (60초) | 19.98 | 54ms | 68ms | 0 | 0 |
+
+- 급증 동안 처리 한계(이 노트북에서 약 160~170 TPS)까지 202·오류 없이 대기 지연으로 흡수하고, 급증이 끝나자 바로 급증 전 지연으로 돌아왔습니다. 대사 8,422건 모두 `COMPLETED`, 위반 0.
+- 동시 요청 100이 다 차서 4,277건은 k6가 보내지 못했습니다(`droppedIterations`). 그래서 처리 한계를 넘는 요청이 서버에 쌓일 때(원장 커넥션 대기 2초 초과 → 202 → 복구)는 보지 못했습니다. 보려면 동시 요청 상한을 더 키웁니다.
+- 원장도 PC에서 띄운 환경의 시험 측정(상한 50, 20 → 150/s)은 급증 구간 90.1 TPS, P99 865ms, 202·오류 0이었습니다.
+
 ### 조회
 
 송금 요청 측정 뒤 같은 데이터(송금 21,314건, 측정 송금인 한 명당 보낸 송금 약 1,400건)로 같은 조건에서 쟀습니다.
@@ -1202,11 +1288,11 @@ python -X utf8 same_key_check.py --rounds 20 --threads 20 --pair 5      # 같은
 
 ### 개선 후보
 
-측정에서 나온 후보입니다. 아직 구현한 것은 없습니다. 이 장비로 하지 않은 측정(처리량 상한, 원장 2개 혼합 부하, 몇 시간 단위 장시간 등)은 [이 장비에서 하지 않은 측정](#이-장비에서-하지-않은-측정)에 있습니다.
+측정에서 나온 후보입니다. 적용한 것은 타임아웃 1단계와 원장 JDBC batch(2026-11-12)입니다. 이 장비로 하지 않은 측정(처리량 상한, 원장 2개 혼합 부하, 몇 시간 단위 장시간 등)은 [이 장비에서 하지 않은 측정](#이-장비에서-하지-않은-측정)에 있습니다.
 
 | 후보 | 담당 | 상태 |
 |---|---|---|
-| 집중 계정 대응(잠금 범위 축소, 수취 계정 분할, 입금 지연 반영 등) | 원장 | 보류. 송금·결제·충전 공통 원장 구조 과제. 결제도 가맹점 집중 시 같은 현상과 다른 가맹점으로 번지는 지연을 확인했으나, 목표 처리량 수준에서 단일 계정에 그만큼 몰릴 일이 적다고 봄. 원장 인스턴스 증설은 효과가 없음을 확인(2026-11-10, 대기가 커넥션 풀에서 DB 행 잠금으로 옮겨 감, [5단계](#5단계-확장성-paymentledger-2개씩)). 잠금 보유 시간의 약 83%가 앱·DB 왕복(2026-11-11, [원장 잠금 보유 시간 분해](#원장-잠금-보유-시간-분해)) → 잠금 뒤 왕복 수 줄이기를 원장 담당에 공유, 원장 담당이 개선 후보로 받음(2026-11-12, 충전 작업 뒤 검토). 왕복 비율은 PC 측정 환경 영향이 큼 |
+| 집중 계정 대응(잠금 범위 축소, 수취 계정 분할, 입금 지연 반영 등) | 원장 | 보류. 송금·결제·충전 공통 원장 구조 과제. 결제도 가맹점 집중 시 같은 현상과 다른 가맹점으로 번지는 지연을 확인했으나, 목표 처리량 수준에서 단일 계정에 그만큼 몰릴 일이 적다고 봄. 원장 인스턴스 증설은 효과가 없음을 확인(2026-11-10, 대기가 커넥션 풀에서 DB 행 잠금으로 옮겨 감, [5단계](#5단계-확장성-paymentledger-2개씩)). 잠금 보유 시간의 약 83%가 앱·DB 왕복(2026-11-11, [원장 잠금 보유 시간 분해](#원장-잠금-보유-시간-분해)) → 잠금 뒤 왕복 6 → 4(원장 JDBC batch) 적용(2026-11-12, 원장 담당 허락). 같은 Docker 환경에서 TPS +13%, 잠금 보유 −11%, P99 악화 없음([수취인 집중 개선](#수취인-집중-개선-2026-11-12)). 잠금 자체의 직렬화(잠금 범위·계정 분할)는 그대로 보류 |
 | 외부 호출 타임아웃 축소 | 송금·결제 | 조정안 작성(2026-11-11, [타임아웃 조정안](#타임아웃-조정안)). 1단계(지갑·회원 읽기 1초) 지갑·결제·유저 담당 동의 후 적용(2026-11-12). 2단계(원장 읽기 3초)는 정상 거래가 미확정이 될 수 있어 보류. 수취인 집중 지연은 타임아웃과 무관(원장 잠금 과제) |
 | 잠금·커넥션 대기 한도 초과 시 원장 응답 확인 | 원장 | 커넥션·트랜잭션 시간 초과(2026-11-06)와 교착 503(2026-11-12, 원장 테스트) 확인 완료. 다음 SQL 전 기한 경과·커밋 중 실패의 응답은 미확인(500 가능). 롤백 후 5xx라 송금은 결과 모름으로 받고 재전송이 안전함([원장 거래 등록](#원장-거래-등록)) |
 | 지갑 조회 2번·I02 1번 병렬 호출 | 송금 | 보류. 최대 약 20ms 절감 추정이지만 오류 우선순위(송금인 지갑 → 수취인 회원 → 수취인 지갑)가 바뀌고 스레드 사용이 늘어남 |
@@ -1364,7 +1450,7 @@ flowchart LR
 | 항목 | 현재 동작 | 정할 것 |
 |---|---|---|
 | 완료된 송금 취소(자금 복구) | `REQUESTED`만 취소, 그 밖의 상태는 409(MVP 유지) | 원장에 송금 취소용 분개 유형이 없어 원장 유형 추가가 먼저입니다. 원장은 원거래 ID(`originalTransactionId`)를 받을 수 있고, 수취인 잔액이 부족하면 거절하므로 "취소 실패"로 끝내는 것이 원장 규칙과 맞습니다(2026-11-12 원장 답). 그 뒤 취소 가능 조건·기한, 상태와 `Idempotency-Key` 적용 여부 |
-| 상태 변경 이력 범위 | 운영자 확정만 `transfer_status_history`에 기록 | 자동 처리(원장 응답·스케줄러) 전이도 기록할지 |
+| 상태 변경 이력 범위 | `MANUAL_REVIEW` 확정만 기록(운영자 확정 `OPERATOR`, 자동 대사 `SYSTEM`, 2026-11-12). 요청 처리·복구 스케줄러의 자동 전이(`PROCESSING` → `COMPLETED` 등)는 기록하지 않음 | 자동 전이 전부를 기록할지(PR 리뷰에서 팀 의견 받음) |
 | 연동 전 `REQUESTED` 송금 | 그대로 남아 있고 취소만 가능 | 그대로 둘지, 일괄 취소할지, 재처리할지. 원장 기록이 없어 원장 쪽 제약은 없으며 송금 쪽에서 정합니다(2026-11-12 원장 답) |
 | 원장 연동 롤백 시 `PROCESSING` 송금 | 원장 구현이 없으면 복구가 돌지 않아 202만 반복되고 취소도 409 | 롤백할 때 남은 건의 처리 절차 |
 | 잔액 사전 조회 | 하지 않음. 잔액 부족은 원장 거절로만 판단 | 원장 잔액 조회로 빠르게 거절할지 |
