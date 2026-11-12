@@ -7,6 +7,7 @@
   python measure.py <LABEL> <VUS> --gateway                                        # Gateway(8080) 경유, 세션 로그인
   python measure.py <LABEL> <VUS> --extra-service payment2=http://localhost:8086   # 추가 인스턴스 지표도 수집
   python measure.py <LABEL> <VUS> --script transfer-query.js [--query mixed]       # 송금 조회
+  python measure.py <LABEL> <VUS> --mode hot --lock-holders                        # 원장 잠금 보유 시간 분해
 결과: results/<LABEL>-vus<VUS>.json(k6) + results/<LABEL>-vus<VUS>-metrics.json(서비스·DB 지표, 대사)
 
 측정 구간은 k6가 실제로 테스트를 시작한 시각(끝난 시각 - testRunDurationMs) + 예열부터 측정 시간만큼입니다.
@@ -128,10 +129,128 @@ class DbSampler(threading.Thread):
                 self.samples.append(tuple(values))
 
 
+# 원장 잠금을 쥐고 다른 원장 세션을 막고 있는 세션(holder)이 그 순간 무엇을 하는지.
+# 한 줄 = 표본 하나: 시각(ms), 잠금 대기 세션 수, holder 목록(상태#대기 이벤트#쿼리 앞부분을 |로 이음).
+# idle in transaction이면 DB는 할 일이 없고 앱이 다음 SQL을 보내길 기다리는 중(앱 처리 + 왕복 네트워크)
+LOCK_HOLDER_QUERY = (
+    "SELECT (extract(epoch FROM clock_timestamp()) * 1000)::bigint,"
+    " (SELECT count(*) FROM pg_stat_activity w WHERE w.usename = 'ledger_app' AND w.wait_event_type = 'Lock'),"
+    " coalesce((SELECT string_agg(h.state || '#' || coalesce(h.wait_event_type || ':' || h.wait_event, '') || '#'"
+    "   || left(regexp_replace(h.query, '[\\s|#]+', ' ', 'g'), 80), '|')"
+    "   FROM pg_stat_activity h WHERE h.pid IN (SELECT unnest(pg_blocking_pids(w.pid)) FROM pg_stat_activity w"
+    "   WHERE w.usename = 'ledger_app' AND w.wait_event_type = 'Lock')"
+    # 행 잠금 대기열에서는 앞선 대기 세션도 blocking pid로 나온다. 스스로 잠금을 기다리는 세션은 빼고 실제 보유자만 본다
+    "   AND h.wait_event_type IS DISTINCT FROM 'Lock'), '')"
+)
+
+
+class LockHolderSampler(threading.Thread):
+    """--lock-holders: 짧은 간격으로 원장 잠금 holder의 상태를 표본으로 모읍니다(잠금 보유 시간 분해용).
+    표본 쿼리도 DB·CPU를 쓰므로 기본 측정에서는 끕니다."""
+
+    def __init__(self, seconds, interval):
+        super().__init__(daemon=True)
+        self.seconds = seconds
+        self.interval = interval
+        self.samples = []
+        self.error = None
+
+    def run(self):
+        command = ["docker", "exec", "-i", PG_CONTAINER, "psql", "-U", PG_USER, "-d", PG_DB, "-qAt", "-F", "\t"]
+        script = f"{LOCK_HOLDER_QUERY}\n\\watch i={self.interval} c={int(self.seconds / self.interval)}\n"
+        try:
+            done = subprocess.run(command, input=script, capture_output=True, text=True, encoding="utf-8",
+                                  timeout=self.seconds + 60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            self.error = str(error)
+            return
+        if done.returncode != 0:
+            self.error = done.stderr.strip()[:300]
+        for line in done.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3 and parts[0].isdigit():
+                holders = [holder.split("#", 2) for holder in parts[2].split("|") if holder]
+                self.samples.append((int(parts[0]) / 1000, int(parts[1]), holders))
+
+
+def holder_activity(holder):
+    """holder 한 개를 '무엇을 하는 중인지' 한 단어로 묶습니다."""
+    state, wait, query = (holder + ["", ""])[:3]
+    text = query.strip().lower()
+    if text.startswith("commit"):
+        statement = "COMMIT"
+    elif text.startswith("select") and ("for update" in text or "for no key update" in text):
+        statement = "SELECT FOR UPDATE"
+    else:
+        words = text.split()
+        if len(words) >= 3 and words[0] in ("insert", "delete") and words[1] in ("into", "from"):
+            statement = f"{words[0].upper()} {words[2]}"
+        elif len(words) >= 2 and words[0] == "update":
+            statement = f"UPDATE {words[1]}"
+        else:
+            statement = words[0].upper() if words else "?"
+    if state == "idle in transaction":
+        return f"앱·네트워크 대기 (직전 {statement})"
+    if state == "active":
+        return f"DB 실행 {statement}" + (f" [{wait}]" if wait else "")
+    return f"{state or '?'} {statement}"
+
+
+def lock_holder_metrics(sampler, start, end, per_tx_hold_ms):
+    if sampler is None:
+        return None
+    if sampler.error and not sampler.samples:
+        return {"error": sampler.error}
+    window = [sample for sample in sampler.samples if start <= sample[0] <= end]
+    contended = [sample for sample in window if sample[1] > 0]
+    counts = {}
+    for _, _, holders in contended:
+        for holder in holders:
+            activity = holder_activity(holder)
+            counts[activity] = counts.get(activity, 0) + 1
+    total = sum(counts.values())
+    breakdown = []
+    for activity, count in sorted(counts.items(), key=lambda item: -item[1]):
+        share = count / total
+        row = {"activity": activity, "samples": count, "sharePercent": round(share * 100, 1)}
+        if per_tx_hold_ms is not None:
+            # 집중 계정은 잠금이 쉬지 않고 넘어가므로 건당 보유 시간 ≈ 측정 시간 / 거래 수. 그 시간을 표본 비율로 나눈다
+            row["perTxMsEstimate"] = round(share * per_tx_hold_ms, 2)
+        breakdown.append(row)
+    return {
+        "intervalSeconds": sampler.interval,
+        "samples": len(window),
+        "samplesWithWaiters": len(contended),
+        "perTxHoldMsEstimate": per_tx_hold_ms,
+        "breakdown": breakdown,
+    }
+
+
 # ---- 지표 계산 ----
 
 def nearest(samples, moment):
     return min(samples, key=lambda sample: abs(sample[0] - moment))
+
+
+PERCENTILES = (("p50Ms", 0.50), ("p95Ms", 0.95), ("p99Ms", 0.99), ("p999Ms", 0.999), ("maxBucketMs", 1.0))
+
+
+def bucket_percentiles(before, after):
+    """측정 구간 양끝의 누적 bucket 차이로 백분위를 냅니다. 값은 그 백분위가 들어간 bucket의 상한(ms)이라
+    실제 값 이상으로 잡힙니다(보수적). bucket이 없으면 빈 dict."""
+    bounds = sorted(after)
+    if not bounds:
+        return {}
+    counts = [after[le] - before.get(le, 0.0) for le in bounds]
+    total = counts[-1]
+    if total <= 0:
+        return {}
+    result = {}
+    for label, quantile in PERCENTILES:
+        target = total * quantile
+        upper = next(le for le, count in zip(bounds, counts) if count >= target)
+        result[label] = None if upper == float("inf") else round(upper * 1000, 1)
+    return result
 
 
 def service_metrics(samples, start, end):
@@ -151,7 +270,10 @@ def service_metrics(samples, start, end):
                 a = after["http"].get(path, {"count": 0, "sum": 0})
                 calls = a["count"] - b["count"]
                 if calls > 0:
-                    service[path] = {"calls": int(calls), "avgMs": round((a["sum"] - b["sum"]) / calls * 1000, 2)}
+                    # _max 게이지는 최근 약 2분의 최대라 앞 측정 값이 섞이므로 쓰지 않고, 구간 bucket으로 최대를 낸다.
+                    # 서버 쪽 처리 시간이다. 호출하는 쪽이 본 시간은 여기에 네트워크·HTTP 클라이언트 시간이 더해진다
+                    service[path] = {"calls": int(calls), "avgMs": round((a["sum"] - b["sum"]) / calls * 1000, 2),
+                                     **bucket_percentiles(b.get("buckets", {}), a.get("buckets", {}))}
         gauges = [snapshot[1][name] for snapshot in window if snapshot[1].get(name)]
         for gauge, label in (("hikaricp_connections_pending", "hikariPending"),
                              ("hikaricp_connections_active", "hikariActive"),
@@ -362,6 +484,9 @@ def main():
                         help="지표를 함께 읽을 추가 인스턴스 (예: payment2=http://localhost:8086)")
     parser.add_argument("--recovery-timeout", type=int, default=600,
                         help="측정 후 PROCESSING 복구를 기다릴 최대 초 (결과 모름 5회 백오프 합계 약 7분 30초)")
+    parser.add_argument("--lock-holders", action="store_true",
+                        help="원장 잠금 holder 상태를 짧은 간격으로 표본 수집 (잠금 보유 시간 분해, --mode hot과 함께)")
+    parser.add_argument("--lock-holder-interval", type=float, default=0.05, help="holder 표본 간격(초)")
     args = parser.parse_args()
     is_request = args.script == "transfer-request.js"
 
@@ -388,8 +513,12 @@ def main():
     print(f"[2/4] k6 실행 ({args.script}, VUS={args.vus}), 서비스·DB 지표 1초 간격 기록")
     service_sampler = ServiceSampler(services)
     db_sampler = DbSampler(args.warmup + args.duration + 60)
+    holder_sampler = (LockHolderSampler(args.warmup + args.duration + 60, args.lock_holder_interval)
+                      if args.lock_holders else None)
     service_sampler.start()
     db_sampler.start()
+    if holder_sampler:
+        holder_sampler.start()
     run_started = datetime.now(timezone.utc)
     env = {"VUS": str(args.vus), "LABEL": args.label, "WARMUP": f"{args.warmup}s", "DURATION": f"{args.duration}s",
            "MODE": args.mode, "AMOUNT": str(args.amount), "QUERY": args.query,
@@ -429,6 +558,10 @@ def main():
     if ledger_calls and lock_waits is not None:
         # 리틀 법칙 L = λW → 거래 한 건이 잠금을 기다린 평균 시간 W = 평균 대기 세션 수 / 초당 거래 수
         metrics["db"]["ledgerLockWaitPerTxMsEstimate"] = round(lock_waits / (ledger_calls / args.duration) * 1000, 1)
+    if holder_sampler:
+        holder_sampler.join(timeout=args.warmup + args.duration + 120)
+        per_tx_hold_ms = round(args.duration * 1000 / ledger_calls, 2) if ledger_calls else None
+        metrics["db"]["lockHolders"] = lock_holder_metrics(holder_sampler, measure_from, measure_to, per_tx_hold_ms)
 
     if is_request:
         print("[4/4] 대사: PROCESSING 복구 대기 → 송금·원장·잔액 대조")

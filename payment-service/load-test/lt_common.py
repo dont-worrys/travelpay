@@ -117,6 +117,12 @@ def summarize_scrape(samples):
             key = f"{labels.get('method')} {labels.get('uri')}"
             entry = http.setdefault(key, {"count": 0.0, "sum": 0.0})
             entry["count" if name.endswith("_count") else "sum"] += value
+        elif name == "http_server_requests_seconds_bucket":
+            # 누적 bucket(le 이하 건수). 상태·결과 라벨을 합쳐 경로별로 모은다
+            key = f"{labels.get('method')} {labels.get('uri')}"
+            buckets = http.setdefault(key, {"count": 0.0, "sum": 0.0}).setdefault("buckets", {})
+            le = float("inf") if labels.get("le") == "+Inf" else float(labels.get("le"))
+            buckets[le] = buckets.get(le, 0.0) + value
         elif name in ("hikaricp_connections_pending", "hikaricp_connections_active", "hikaricp_connections_max",
                       "system_cpu_usage", "process_cpu_usage", "tomcat_threads_busy_threads",
                       "tomcat_threads_config_max_threads",
