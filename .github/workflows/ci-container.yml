@@ -1,5 +1,6 @@
 # 실행 이미지와 운영 모니터링 구성을 실제 컨테이너로 검사합니다. 이미지 빌드·여러 이미지 다운로드로 오래 걸리므로
-# 검사 대상 파일이 바뀐 PR·반영에서만 돌립니다. 앱 코드 자체의 테스트는 CI(ci.yml)가 맡습니다.
+# 검사 대상 파일이 바뀐 PR·dev 반영에서만 돌립니다. 앱 코드 자체의 테스트는 CI(ci.yml)가 맡습니다.
+# main 반영 커밋은 dev에서 검사한 내용과 같고, CD가 실제 이미지를 만들어 ECS 헬스 체크로 확인합니다.
 name: CI container checks
 
 on:
@@ -8,6 +9,7 @@ on:
     paths: &checked-paths
       # 실행 이미지(Dockerfile·시작 스크립트)와 이미지 안에서 도는 Gradle 빌드 설정
       - deploy/docker/**
+      - .dockerignore
       - build.gradle
       - settings.gradle
       - gradle/**
@@ -20,7 +22,7 @@ on:
       - infra/aws/tests/test_monitoring_pipeline.py
       - .github/workflows/ci-container.yml
   push:
-    branches: [dev, main]
+    branches: [dev]
     paths: *checked-paths
 
 permissions:
