@@ -95,6 +95,21 @@ class LedgerRequestHasherTest {
     }
 
     @Test
+    void 취소_해시는_같은_reference의_등록_해시와_다르고_reference가_같으면_같다() {
+        String cancel = LedgerRequestHasher.hashCancel(ReferenceType.CHARGE, REFERENCE_ID);
+
+        // 등록 해시와 다르므로 취소 뒤 같은 reference의 등록은 409가 된다
+        assertNotEquals(LedgerRequestHasher.hash(BASE), cancel);
+        assertNotEquals(LedgerRequestHasher.hash(new RegisterTransactionCommand(ReferenceType.CHARGE,
+                REFERENCE_ID, null, null, null, List.of(SOURCE, WALLET))), cancel, "원거래 없는 등록");
+        assertEquals(64, cancel.length());
+        assertEquals(cancel, LedgerRequestHasher.hashCancel(ReferenceType.CHARGE, REFERENCE_ID), "같은 입력");
+        assertNotEquals(cancel, LedgerRequestHasher.hashCancel(ReferenceType.PAYMENT, REFERENCE_ID), "referenceType");
+        assertNotEquals(cancel, LedgerRequestHasher.hashCancel(ReferenceType.CHARGE, UUID.randomUUID()),
+                "referenceId");
+    }
+
+    @Test
     void 값의_경계가_달라지면_이어_붙인_문자열이_같아도_해시가_다르다() {
         // 그냥 이어 붙이면 둘 다 "...1000CHARGE_IN"이 된다 (amount 100 + "0CHARGE_IN" / amount 1000 + "CHARGE_IN").
         // "길이:값"으로 적으므로 "3:100" "10:0CHARGE_IN"과 "4:1000" "9:CHARGE_IN"으로 갈린다

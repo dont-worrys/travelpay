@@ -50,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -148,20 +149,72 @@ class PaymentReviewServiceTest {
         assertNull(resolution.getMemo());
     }
 
+    // 원장에 없으면 늦은 커밋을 막으려고 취소 기록을 먼저 남기고, 취소가 기록되면 시간 초과 취소
     @Test
-    void p3_declinesPaymentMissingFromLedgerAsTimedOut() {
+    void p3_cancelsInLedgerThenDeclinesPaymentMissingFromLedgerAsTimedOut() {
         Payment payment = givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
         when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+        when(ledgerClient.cancelPaymentTransaction(PAYMENT_ID, MASTER_ID)).thenReturn(PaymentLedgerLookup.notFound());
 
         ManualReviewResolveResult result = service.resolvePayment(MASTER_ID, PAYMENT_ID, MEMO);
 
+        verify(ledgerClient).cancelPaymentTransaction(PAYMENT_ID, MASTER_ID);
         assertEquals(PaymentStatus.DECLINED, payment.getStatus());
         assertEquals("결제 처리 시간이 초과되어 취소되었습니다.", payment.getDeclineReason());
         assertEquals(ReviewLedgerStatus.NOT_FOUND, result.ledgerStatus());
         assertNull(result.ledgerTransactionId());
         PaymentReviewResolution resolution = savedResolution();
         assertNull(resolution.getLedgerTransactionId());
-        assertEquals("재시도 한도 초과, 원장 기록 없음 → 결제 시간 초과 취소", resolution.getDescription());
+        assertEquals("재시도 한도 초과, 원장 기록 없음 → 결제 시간 초과 취소(원장 취소 기록)",
+                resolution.getDescription());
+    }
+
+    // 조회와 취소 사이에 마지막 요청이 늦게 커밋되면 취소 응답으로 그 거래를 받아 승인
+    @Test
+    void p3_approvesPaymentWhenLateCommitWinsOverCancel() {
+        Payment payment = givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+        when(ledgerClient.cancelPaymentTransaction(PAYMENT_ID, MASTER_ID)).thenReturn(paymentPosted());
+
+        ManualReviewResolveResult result = service.resolvePayment(MASTER_ID, PAYMENT_ID, null);
+
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        assertEquals(PAYMENT_TRANSACTION_ID, payment.getLedgerId());
+        assertEquals(ReviewLedgerStatus.POSTED, result.ledgerStatus());
+        PaymentReviewResolution resolution = savedResolution();
+        assertEquals(ReviewLedgerStatus.POSTED, resolution.getLedgerStatus());
+        assertEquals(PAYMENT_TRANSACTION_ID, resolution.getLedgerTransactionId());
+        assertEquals("재시도 한도 초과, 원장 반영 확인 → 결제 승인", resolution.getDescription());
+    }
+
+    // 취소됐는지 모르면 확정하지 않음. 다시 처리하면 같은 취소를 다시 보냄(안전)
+    @Test
+    void p3_keepsPaymentWhenLedgerCancelFails() {
+        Payment payment = givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+        when(ledgerClient.cancelPaymentTransaction(PAYMENT_ID, MASTER_ID))
+                .thenThrow(new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.resolvePayment(MASTER_ID, PAYMENT_ID, null));
+
+        assertEquals(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE, exception.getErrorCode());
+        assertEquals(PaymentStatus.MANUAL_REVIEW, payment.getStatus());
+        assertEquals(SettlementReviewReason.RETRY_EXHAUSTED, payment.getReviewReason());
+        verify(paymentRepository, never()).save(any());
+        verifyNoInteractions(paymentHistoryRepository, resolutionRepository);
+    }
+
+    // 원장에 기록이 있으면(POSTED·REJECTED) 원장이 이미 결정한 것이라 취소하지 않음
+    @ParameterizedTest
+    @EnumSource(value = ReviewLedgerStatus.class, names = {"POSTED", "REJECTED"})
+    void doesNotCancelWhenLedgerAlreadyDecided(ReviewLedgerStatus ledgerStatus) {
+        givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(paymentLookup(ledgerStatus));
+
+        service.resolvePayment(MASTER_ID, PAYMENT_ID, null);
+
+        verify(ledgerClient, never()).cancelPaymentTransaction(any(), any());
     }
 
     @ParameterizedTest
@@ -177,6 +230,8 @@ class PaymentReviewServiceTest {
         PaymentReviewResolution resolution = savedResolution();
         assertEquals(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, resolution.getReviewReason());
         assertEquals("원장 요청 거부, " + ledgerText(ledgerStatus) + " → 결제 취소", resolution.getDescription());
+        // 원장이 이미 4xx로 답한 요청이라 늦은 커밋이 없어 취소하지 않음
+        verify(ledgerClient, never()).cancelPaymentTransaction(any(), any());
     }
 
     // 원장이 요청을 받지 않았어도 원장 거래가 결제와 같으면 돈은 의도대로 움직인 것 → 승인
@@ -502,6 +557,9 @@ class PaymentReviewServiceTest {
     void paymentPreviewMatchesActualResolution(SettlementReviewReason reviewReason, ReviewLedgerStatus ledgerStatus) {
         givenManualReviewPayment(reviewReason);
         when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(paymentLookup(ledgerStatus));
+        // P3은 처리할 때 원장 취소를 먼저 보냄(취소가 기록되면 조회 때와 같이 기록 없음). 단건 조회는 취소하지 않음
+        lenient().when(ledgerClient.cancelPaymentTransaction(PAYMENT_ID, MASTER_ID))
+                .thenReturn(PaymentLedgerLookup.notFound());
 
         PaymentReviewDetailResult detail = service.getPaymentReview(MASTER_ID, PAYMENT_ID);
         ManualReviewResolveResult result = service.resolvePayment(MASTER_ID, PAYMENT_ID, null);

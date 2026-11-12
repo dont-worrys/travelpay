@@ -378,6 +378,15 @@ class PaymentLedgerFeignClientTest {
                 ledgerClient.findPaymentTransaction(PAYMENT_ID));
     }
 
+    // 취소 뒤 우리 DB 반영이 실패해 다시 처리할 때, 조회가 취소 기록을 일반 거절로 보지 않고 기록 없음으로 봐야 같은 결과가 나옴
+    @Test
+    void lookupTreatsCancelRecordAsNotFound() {
+        when(feignApi.getTransaction("PAYMENT", PAYMENT_ID))
+                .thenReturn(result(TRANSACTION_ID, "REJECTED", "CANCELLED_BY_REQUESTER"));
+
+        assertEquals(PaymentLedgerLookup.notFound(), ledgerClient.findPaymentTransaction(PAYMENT_ID));
+    }
+
     @Test
     void lookupReturnsNotFoundOnlyWhenLedgerSaysTransactionNotFound() {
         when(feignApi.getTransaction("PAYMENT", PAYMENT_ID))
@@ -444,6 +453,89 @@ class PaymentLedgerFeignClientTest {
         for (int i = 0; i < 3; i++) {
             assertLookupUnavailable(() -> ledgerClient.findPaymentTransaction(PAYMENT_ID));
         }
+    }
+
+    // ── 원장 거래 취소 (MANUAL_REVIEW 처리) ──
+
+    private static final UUID ACTOR_ID = UUID.fromString("99999999-9999-9999-9999-999999999999");
+
+    @Test
+    void cancelReturnsNotFoundWhenLedgerRecordsCancel() {
+        when(feignApi.cancel(any())).thenReturn(result(TRANSACTION_ID, "REJECTED", "CANCELLED_BY_REQUESTER"));
+
+        assertEquals(PaymentLedgerLookup.notFound(), ledgerClient.cancelPaymentTransaction(PAYMENT_ID, ACTOR_ID));
+
+        ArgumentCaptor<LedgerFeignApi.CancelRequest> captor = ArgumentCaptor.forClass(LedgerFeignApi.CancelRequest.class);
+        verify(feignApi).cancel(captor.capture());
+        assertEquals(new LedgerFeignApi.CancelRequest("PAYMENT", PAYMENT_ID, ACTOR_ID, "결제 시간 초과 취소"),
+                captor.getValue());
+    }
+
+    // 조회와 취소 사이에 늦게 커밋된 결제는 그 거래를 그대로 돌려받아 원장 결과대로 처리
+    @Test
+    void cancelReturnsPostedWhenTransactionAlreadyExists() {
+        when(feignApi.cancel(any())).thenReturn(result(TRANSACTION_ID, "POSTED", null));
+
+        assertEquals(PaymentLedgerLookup.posted(TRANSACTION_ID, LOOKUP_ENTRIES),
+                ledgerClient.cancelPaymentTransaction(PAYMENT_ID, ACTOR_ID));
+    }
+
+    @Test
+    void cancelReturnsRejectedWithPaymentReasonWhenLedgerRejectedEarlier() {
+        when(feignApi.cancel(any())).thenReturn(result(TRANSACTION_ID, "REJECTED", "INSUFFICIENT_BALANCE"));
+
+        assertEquals(PaymentLedgerLookup.rejected(TRANSACTION_ID, "잔액이 부족합니다."),
+                ledgerClient.cancelPaymentTransaction(PAYMENT_ID, ACTOR_ID));
+    }
+
+    @Test
+    void cancelUsesSettlementReferenceTypeForSettlements() {
+        when(feignApi.cancel(any())).thenReturn(result(TRANSACTION_ID, "REJECTED", "CANCELLED_BY_REQUESTER"));
+
+        assertEquals(PaymentLedgerLookup.notFound(),
+                ledgerClient.cancelSettlementTransaction(SETTLEMENT_ID, ACTOR_ID));
+
+        ArgumentCaptor<LedgerFeignApi.CancelRequest> captor = ArgumentCaptor.forClass(LedgerFeignApi.CancelRequest.class);
+        verify(feignApi).cancel(captor.capture());
+        assertEquals(new LedgerFeignApi.CancelRequest("SETTLEMENT", SETTLEMENT_ID, ACTOR_ID, "정산 시간 초과 취소"),
+                captor.getValue());
+    }
+
+    // 취소 여부를 모르면 결론을 내지 않음(상태 유지, 같은 취소는 다시 보내도 안전)
+    @ParameterizedTest
+    @ValueSource(ints = {400, 404, 409, 500, 503})
+    void cancelTreatsErrorsAsUnavailable(int status) {
+        when(feignApi.cancel(any())).thenThrow(feignError(status, ""));
+
+        assertLookupUnavailable(() -> ledgerClient.cancelPaymentTransaction(PAYMENT_ID, ACTOR_ID));
+    }
+
+    @Test
+    void cancelTreatsNoResponseOrUnexpectedBodyAsUnavailable() {
+        when(feignApi.cancel(any()))
+                .thenThrow(FeignFailures.connectionRefused())
+                .thenThrow(FeignFailures.readTimeout())
+                .thenReturn(result(null, "REJECTED", "CANCELLED_BY_REQUESTER"))
+                .thenReturn(result(TRANSACTION_ID, "PENDING", null))
+                .thenReturn(result(TRANSACTION_ID, "POSTED", null, List.of()))
+                .thenReturn(null);
+
+        for (int i = 0; i < 6; i++) {
+            assertLookupUnavailable(() -> ledgerClient.cancelPaymentTransaction(PAYMENT_ID, ACTOR_ID));
+        }
+    }
+
+    @Test
+    void cancelDoesNotUseCircuit() {
+        // 거래 등록으로 서킷이 열려도 운영자 처리용 취소는 원장에 보냄
+        when(feignApi.register(any())).thenThrow(FeignFailures.readTimeout());
+        for (int i = 0; i < 20; i++) {
+            ledgerClient.createTransaction(PAYMENT);
+        }
+        when(feignApi.cancel(any())).thenReturn(result(TRANSACTION_ID, "REJECTED", "CANCELLED_BY_REQUESTER"));
+
+        assertEquals(PaymentLedgerResult.notSent(), ledgerClient.createTransaction(PAYMENT));
+        assertEquals(PaymentLedgerLookup.notFound(), ledgerClient.cancelPaymentTransaction(PAYMENT_ID, ACTOR_ID));
     }
 
     private static void assertLookupUnavailable(Executable lookup) {

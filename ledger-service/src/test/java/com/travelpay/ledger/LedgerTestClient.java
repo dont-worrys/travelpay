@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 final class LedgerTestClient {
 
     static final String TRANSACTIONS = "/internal/v1/ledger/transactions";
+    static final String CANCEL = TRANSACTIONS + "/cancel";
 
     private final int port;
     private final JsonMapper jsonMapper;
@@ -87,6 +88,14 @@ final class LedgerTestClient {
         return body;
     }
 
+    /** 취소 본문: reference만 */
+    static Map<String, Object> cancelBody(String referenceType, UUID referenceId) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("referenceType", referenceType);
+        body.put("referenceId", referenceId.toString());
+        return body;
+    }
+
     /** 본문을 복사해 필드 하나를 바꾼다 */
     static Map<String, Object> with(Map<String, Object> body, String field, Object value) {
         Map<String, Object> copy = new LinkedHashMap<>(body);
@@ -115,6 +124,10 @@ final class LedgerTestClient {
         return post(TRANSACTIONS, jsonMapper.writeValueAsString(body));
     }
 
+    HttpResponse<String> cancel(Map<String, Object> body) throws Exception {
+        return post(CANCEL, jsonMapper.writeValueAsString(body));
+    }
+
     JsonNode data(HttpResponse<String> response) {
         return jsonMapper.readTree(response.body()).get("data");
     }
@@ -141,6 +154,11 @@ final class LedgerTestClient {
      * 본문들을 시작 신호에 맞춰 동시에 보낸다. 응답은 {@link Pending#await}로 받는다 (그 사이 잠금 해제 등을 할 수 있게).
      */
     Pending sendConcurrently(List<Map<String, Object>> bodies) throws Exception {
+        return sendConcurrently(TRANSACTIONS, bodies);
+    }
+
+    /** 같은 경로로 본문들을 동시에 보낸다(취소 동시 요청용) */
+    Pending sendConcurrently(String path, List<Map<String, Object>> bodies) throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(bodies.size());
         CountDownLatch start = new CountDownLatch(1);
         List<Future<Call>> futures = new ArrayList<>();
@@ -151,7 +169,7 @@ final class LedgerTestClient {
                 start.await();
                 Instant sentAt = Instant.now();
                 try {
-                    HttpResponse<String> response = post(TRANSACTIONS, json);
+                    HttpResponse<String> response = post(path, json);
                     return new Call(index, sentAt, Instant.now(), response.statusCode(), response.body(), null);
                 } catch (Exception e) {
                     return new Call(index, sentAt, Instant.now(), -1, null, e.getClass().getName());
