@@ -1,12 +1,14 @@
 package com.travelpay.ledger.application.transaction;
 
 import com.travelpay.ledger.application.transaction.dto.RegisterTransactionCommand;
+import com.travelpay.ledger.domain.transaction.ReferenceType;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * 같은 reference의 재요청이 같은 내용인지 판별하는 요청 해시(SHA-256 hex, 64자).
@@ -18,8 +20,17 @@ import java.util.Objects;
 final class LedgerRequestHasher {
 
     private static final String VERSION = "v1";
+    private static final String CANCEL_VERSION = "cancel-v1";
 
     private LedgerRequestHasher() {
+    }
+
+    /**
+     * 취소 기록의 요청 해시. 등록 해시와 접두어가 달라 겹치지 않으므로,
+     * 취소 뒤 같은 reference로 온 등록은 다른 내용의 요청(409)으로 판단된다.
+     */
+    static String hashCancel(ReferenceType referenceType, UUID referenceId) {
+        return sha256(CANCEL_VERSION + token(referenceType) + token(referenceId));
     }
 
     static String hash(RegisterTransactionCommand command) {
