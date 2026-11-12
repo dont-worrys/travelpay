@@ -1,0 +1,13 @@
+# TRAVELPAY 운영 Grafana 대시보드 Provisioning입니다. 운영 대시보드는 로컬 대시보드 파일에서 만듭니다(monitoring.tf).
+apiVersion: 1
+
+providers:
+  - name: TRAVELPAY Production
+    orgId: 1
+    folder: TRAVELPAY
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

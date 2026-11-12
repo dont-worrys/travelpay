@@ -98,6 +98,9 @@ override_resource {
 variables {
   enable_app_foundation            = false
   enable_data_foundation           = false
+  alert_email                      = null
+  enable_app_runtime               = false
+  application_images               = null
   app_host_count                   = 0
   enable_database_bootstrap_access = false
   enable_github_deployment         = false

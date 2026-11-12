@@ -1,0 +1,24 @@
+# TRAVELPAY 운영 Grafana 데이터소스 설정입니다. 로컬 설정과 이름·형식이 같고 uid·대시보드 주소만 운영용입니다.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        - name: Trace ID
+          matcherRegex: '"traceId"\s*:\s*"([a-f0-9]{32})"'
+          url: '/d/travelpay-production?var-service=$$__all&var-api=$$__all&var-status=$$__all&var-traceId=$${__value.raw}&from=$${__from}&to=$${__to}'
+          urlDisplayLabel: 같은 요청 로그 보기

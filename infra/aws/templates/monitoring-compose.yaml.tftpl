@@ -1,0 +1,152 @@
+# TRAVELPAY Data 호스트의 모니터링 Compose 정의입니다. Redis·Kafka(compose.yaml)와 프로젝트·systemd 유닛을 나눠
+# 모니터링 준비나 상태 확인이 실패해도 Redis·Kafka의 시작·반영에는 영향을 주지 않게 합니다(travelpay-monitoring.service).
+name: travelpay-production-monitoring
+
+# 모니터링 컨테이너는 root가 아닌 이미지 사용자로 실행하고 권한 상승·추가 권한을 막습니다(Alloy만 Docker 소켓 때문에 root).
+# Compose는 bind한 설정 파일의 내용 변화를 감지하지 않으므로 설정 해시를 환경 값으로 넘겨 바뀐 컨테이너만 다시 만듭니다.
+services:
+  prometheus:
+    image: ${prometheus_image}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --storage.tsdb.retention.size=8GB
+    environment:
+      TRAVELPAY_CONFIG_SHA256: ${prometheus_config_sha256}
+    mem_limit: 1024m
+    ports: ["127.0.0.1:9090:9090"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes:
+      - type: bind
+        source: /opt/travelpay/monitoring/prometheus/prometheus.yml
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/travelpay/monitoring/prometheus
+        target: /prometheus
+        bind: {create_host_path: false}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://localhost:9090/-/ready]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: &bounded-logs
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+
+  # 앱 호스트의 Alloy가 보내는 사설 주소입니다. SG는 로그 수집기(log_collector) 역할에서 온 3100만 허용합니다.
+  # 이미지에 HTTP 도구가 없어 컨테이너 상태 확인 대신 적용 스크립트가 /ready 응답을 확인합니다.
+  loki:
+    image: ${loki_image}
+    restart: unless-stopped
+    command: [-config.file=/etc/loki/loki.yml]
+    environment:
+      TRAVELPAY_CONFIG_SHA256: ${loki_config_sha256}
+    mem_limit: 768m
+    ports: ["$${DATA_PRIVATE_IP:?}:3100:3100"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes:
+      - type: bind
+        source: /opt/travelpay/monitoring/loki/loki.yml
+        target: /etc/loki/loki.yml
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/travelpay/monitoring/loki
+        target: /loki
+        bind: {create_host_path: false}
+    logging: *bounded-logs
+
+  # 외부에 공개하지 않고 SSM 포트 포워딩으로만 접속합니다. 관리자 암호는 Parameter Store 값을 파일로 받습니다.
+  grafana:
+    image: ${grafana_image}
+    restart: unless-stopped
+    environment:
+      TRAVELPAY_CONFIG_SHA256: ${grafana_config_sha256}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana-admin-password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+    mem_limit: 768m
+    ports: ["127.0.0.1:3000:3000"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes:
+      - type: bind
+        source: /opt/travelpay/monitoring/grafana/provisioning/datasources
+        target: /etc/grafana/provisioning/datasources
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /opt/travelpay/monitoring/grafana/provisioning/dashboards
+        target: /etc/grafana/provisioning/dashboards
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /opt/travelpay/monitoring/grafana/provisioning/alerting
+        target: /etc/grafana/provisioning/alerting
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /opt/travelpay/monitoring/grafana/dashboards
+        target: /var/lib/grafana/dashboards
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/travelpay/monitoring/grafana
+        target: /var/lib/grafana
+        bind: {create_host_path: false}
+      - type: bind
+        source: /run/travelpay/grafana/admin-password
+        target: /run/secrets/grafana-admin-password
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://localhost:3000/api/health]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on: [prometheus, loki]
+    logging: *bounded-logs
+
+  alloy:
+    image: ${alloy_image}
+    restart: unless-stopped
+    # 이미지의 /var/lib/alloy는 alloy 사용자(473) 전용이라 권한을 모두 뺀 root는 들어갈 수 없습니다. root 소유 경로에 저장합니다.
+    command: [run, --server.http.listen-addr=0.0.0.0:12345, --storage.path=/alloy-data, --disable-reporting, /etc/alloy/config.alloy]
+    # 로그의 host 레이블(constants.hostname)입니다. 지정하지 않으면 컨테이너 ID가 되어 다시 만들 때마다 바뀝니다.
+    hostname: travelpay-data
+    environment:
+      TRAVELPAY_CONFIG_SHA256: ${alloy_config_sha256}
+    mem_limit: 256m
+    ports: ["127.0.0.1:12345:12345"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes:
+      - type: bind
+        source: /opt/travelpay/monitoring/alloy/config.alloy
+        target: /etc/alloy/config.alloy
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/travelpay/monitoring/alloy
+        target: /alloy-data
+        bind: {create_host_path: false}
+    depends_on: [loki]
+    logging: *bounded-logs
