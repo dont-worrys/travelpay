@@ -74,7 +74,7 @@ travelpay:
       publisher:
         enabled: true
         fixed-delay: 1s
-        batch-size: 50
+        batch-size: 200
     charge:
       saga:
         consumer:
