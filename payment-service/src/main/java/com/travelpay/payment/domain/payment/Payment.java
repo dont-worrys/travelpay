@@ -131,19 +131,20 @@ public class Payment {
     }
 
     // MANUAL_REVIEW 처리: 원장에 거래가 반영되어 있어 승인으로 확정합니다
-    public PaymentHistory resolveApprovedHistory(UUID ledgerId) {
+    // actor: 운영자 처리는 MASTER, 스케줄러 자동 처리는 SYSTEM
+    public PaymentHistory resolveApprovedHistory(UUID ledgerId, PaymentActor actor) {
         PaymentStatus previous = changeStatus(PaymentStatus.MANUAL_REVIEW, PaymentStatus.APPROVED);
         this.ledgerId = Objects.requireNonNull(ledgerId);
         this.reviewReason = null;
-        return PaymentHistory.of(this.id, previous, this.status, "원장에 거래가 반영되어 있음", PaymentActor.MASTER);
+        return PaymentHistory.of(this.id, previous, this.status, "원장에 거래가 반영되어 있음", actor);
     }
 
     // MANUAL_REVIEW 처리: 원장에서 돈이 움직이지 않아 거절로 끝냅니다
-    public PaymentHistory resolveDeclinedHistory(String reason) {
+    public PaymentHistory resolveDeclinedHistory(String reason, PaymentActor actor) {
         PaymentStatus previous = changeStatus(PaymentStatus.MANUAL_REVIEW, PaymentStatus.DECLINED);
         this.declineReason = reason;
         this.reviewReason = null;
-        return PaymentHistory.of(this.id, previous, this.status, reason, PaymentActor.MASTER);
+        return PaymentHistory.of(this.id, previous, this.status, reason, actor);
     }
 
     // 남은 금액이 없으면 REFUNDED, 남아 있으면 부분 환불로 APPROVED로 되돌립니다.

@@ -31,6 +31,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -437,6 +438,53 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
                 UUID.randomUUID(), settlement.getId(), UUID.randomUUID()));
     }
 
+    // 자동 처리 기록은 처리한 회원 없이 SYSTEM으로 남음
+    @Test
+    void systemResolutionIsStoredWithoutActor() {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+        SettlementReviewResolution resolution = SettlementReviewResolution.ofSystem(
+                settlement.getId(), SettlementReviewReason.RETRY_EXHAUSTED, ReviewLedgerStatus.POSTED,
+                UUID.randomUUID(), SettlementStatus.PAID, "자동 처리: 재시도 한도 초과, 원장 반영 확인 → 정산 지급");
+        resolutionRepository.save(resolution);
+        entityManager.flush();
+
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+                "select actor_type, actor_id, memo from settlement_review_resolutions where id = ?", resolution.getId());
+        assertEquals("SYSTEM", row.get("actor_type"));
+        assertNull(row.get("actor_id"));
+        assertNull(row.get("memo"));
+    }
+
+    @Test
+    void operatorResolutionRequiresActor() {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "insert into settlement_review_resolutions (id, settlement_id, review_reason, ledger_status, "
+                        + "ledger_transaction_id, to_status, actor_type, actor_id, description, created_at) "
+                        + "values (?, ?, 'RETRY_EXHAUSTED', 'NOT_FOUND', null, 'FAILED', 'OPERATOR', null, '설명', now())",
+                UUID.randomUUID(), settlement.getId()));
+    }
+
+    // 자동 처리 대상: MANUAL_REVIEW로 바뀐 지 기준 시각이 지난 정산만, (생성 시각, ID) 커서로 이어서
+    @Test
+    void manualReviewsAfterCursorSkipsRecentAndContinuesFromCursor() {
+        Instant now = Instant.now();
+        Settlement first = manualReviewSettlementAt("2001-01-01T00:00:01Z", "2001-01-01T00:00:01Z");
+        Settlement recent = manualReviewSettlementAt("2001-01-01T00:00:01.5Z", now.toString());
+        Settlement second = manualReviewSettlementAt("2001-01-01T00:00:02Z", "2001-01-01T00:00:02Z");
+        Instant updatedBefore = now.minusSeconds(60);
+
+        List<Settlement> page1 = settlementRepository.findManualReviewsAfter(updatedBefore, Instant.EPOCH,
+                new UUID(0L, 0L), 1);
+        assertEquals(List.of(first.getId()), page1.stream().map(Settlement::getId).toList());
+
+        List<Settlement> page2 = settlementRepository.findManualReviewsAfter(updatedBefore,
+                page1.get(0).getCreatedAt(), page1.get(0).getId(), 1);
+        assertEquals(List.of(second.getId()), page2.stream().map(Settlement::getId).toList());
+        assertFalse(page2.stream().map(Settlement::getId).toList().contains(recent.getId()));
+    }
+
     @Test
     void requestedSettlementsCreatedBeforeAreCounted() {
         Settlement old = saveSettlement("key-" + UUID.randomUUID());
@@ -495,6 +543,15 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
                 idempotencyKey, UUID.randomUUID(), UUID.randomUUID(), CurrencyCode.KRW, 10_000L, CUTOFF));
         entityManager.flush();
         return settlement;
+    }
+
+    private Settlement manualReviewSettlementAt(String createdAt, String updatedAt) {
+        Settlement settlement = saveSettlement("key-" + UUID.randomUUID());
+        jdbcTemplate.update("update settlements set status = 'MANUAL_REVIEW', review_reason = 'RETRY_EXHAUSTED', "
+                        + "created_at = cast(? as timestamptz), updated_at = cast(? as timestamptz) where id = ?",
+                createdAt, updatedAt, settlement.getId());
+        entityManager.clear();
+        return settlementRepository.findById(settlement.getId()).orElseThrow();
     }
 
     private void setTimestamps(UUID settlementId, String at, int attemptCount) {

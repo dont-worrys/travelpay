@@ -344,7 +344,7 @@ public class SettlementService {
                     exhausted ? SettlementStatus.MANUAL_REVIEW : SettlementStatus.REQUESTED,
                     exhausted ? SettlementReviewReason.RETRY_EXHAUSTED : null, Instant.now());
             if (updated == 1 && exhausted) {
-                log.error("원장 결과를 {}번 확인하지 못해 정산 자동 처리를 멈춤 settlementId={}",
+                log.error("원장 결과를 {}번 확인하지 못해 정산 자동 재시도를 멈춤 settlementId={}",
                         MAX_UNKNOWN_ATTEMPTS, settlement.getId());
             }
             return settlementRepository.findById(settlement.getId()).orElse(settlement);
@@ -359,7 +359,7 @@ public class SettlementService {
         try {
             if (settlementRepository.markManualReview(settlement.getId(),
                     SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, Instant.now()) == 1) {
-                log.error("원장이 정산 요청을 받아들이지 않아 자동 처리를 멈춤 settlementId={}", settlement.getId());
+                log.error("원장이 정산 요청을 받아들이지 않아 자동 재시도를 멈춤 settlementId={}", settlement.getId());
             }
             return settlementRepository.findById(settlement.getId()).orElse(settlement);
         } catch (RuntimeException e) {

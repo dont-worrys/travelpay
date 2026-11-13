@@ -47,6 +47,12 @@ public class SettlementRepositoryImpl implements SettlementRepository {
     }
 
     @Override
+    public List<Settlement> findManualReviewsAfter(Instant updatedBefore, Instant afterCreatedAt, UUID afterId,
+                                                   int limit) {
+        return settlementJpaRepository.findManualReviewsAfter(updatedBefore, afterCreatedAt, afterId, limit);
+    }
+
+    @Override
     public int claimForRecovery(UUID settlementId, Instant seenUpdatedAt, Instant now) {
         return settlementJpaRepository.claimForRecovery(settlementId, seenUpdatedAt, now);
     }

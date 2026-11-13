@@ -1,6 +1,6 @@
 # 결제·환불·가맹점·정산 실행·사용 가이드
 
-payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액으로 결제하고 환불을 신청하면, 가맹점 주인이 신청을 거절하거나 환불을 실행하며, 환불 기간이 지난 결제는 가맹점 주인이 정산을 요청해 자기 회원 지갑으로 받습니다. 관리자(`MASTER`)는 가맹점을 만들고 자동 처리가 멈춘 결제·환불(`MANUAL_REVIEW`)을 정리합니다. 잔액은 결제가 직접 바꾸지 않고 원장(ledger-service)이 차감·입금을 한 거래로 처리합니다. 같은 서비스 안의 송금은 [송금 가이드](payment-transfer.md)를 봅니다. 브라우저는 Gateway를 통해 호출합니다([Gateway 가이드](gateway.md)).
+payment-service의 결제 기능입니다. 회원이 가맹점에 지갑 잔액으로 결제하고 환불을 신청하면, 가맹점 주인이 신청을 거절하거나 환불을 실행하며, 환불 기간이 지난 결제는 가맹점 주인이 정산을 요청해 자기 회원 지갑으로 받습니다. 관리자(`MASTER`)는 가맹점을 만들고 자동 재시도가 멈춘 결제·환불(`MANUAL_REVIEW`)을 정리합니다. 잔액은 결제가 직접 바꾸지 않고 원장(ledger-service)이 차감·입금을 한 거래로 처리합니다. 같은 서비스 안의 송금은 [송금 가이드](payment-transfer.md)를 봅니다. 브라우저는 Gateway를 통해 호출합니다([Gateway 가이드](gateway.md)).
 
 ## 로컬 실행
 
@@ -71,12 +71,12 @@ Swagger UI(`http://localhost:8083/swagger-ui.html`, prod에서는 꺼짐)에서 
 | `GET /api/v1/admin/payments/refunds/manual-reviews` | `MANUAL_REVIEW` 환불 목록 | `MASTER` | 불필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/refunds/{refundId}` | `MANUAL_REVIEW` 환불 단건(원장 조회·예상 결과) | `MASTER` | 불필요 | 없음 | 200 |
 | `POST /api/v1/admin/payments/refunds/{refundId}/resolve` | `MANUAL_REVIEW` 환불 처리 | `MASTER` | 필요 | 없음 | 200 |
-| `GET /api/v1/admin/payments/resolutions` | 운영자 처리 기록 목록 | `MASTER` | 불필요 | 없음 | 200 |
+| `GET /api/v1/admin/payments/resolutions` | 처리 기록 목록(운영자·자동 처리) | `MASTER` | 불필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/refund-requests/overdue` | 3일 넘게 처리되지 않은 환불 신청 | `MASTER` | 불필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/settlements/manual-reviews` | `MANUAL_REVIEW` 정산 목록 | `MASTER` | 불필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/settlements/{settlementId}` | `MANUAL_REVIEW` 정산 단건(원장 조회·예상 결과) | `MASTER` | 불필요 | 없음 | 200 |
 | `POST /api/v1/admin/payments/settlements/{settlementId}/resolve` | `MANUAL_REVIEW` 정산 처리 | `MASTER` | 필요 | 없음 | 200 |
-| `GET /api/v1/admin/payments/settlements/resolutions` | 정산 운영자 처리 기록 목록 | `MASTER` | 불필요 | 없음 | 200 |
+| `GET /api/v1/admin/payments/settlements/resolutions` | 정산 처리 기록 목록(운영자·자동 처리) | `MASTER` | 불필요 | 없음 | 200 |
 
 모든 API는 로그인이 필요합니다. 응답 본문은 `success`·`data`·`error` 공통 형식입니다. ID는 모두 UUID이고, 금액은 통화별 최소 단위 정수(KRW 원, JPY 엔, CNY 펀)이며, 시각은 UTC ISO-8601입니다.
 
@@ -127,7 +127,7 @@ Swagger UI(`http://localhost:8083/swagger-ui.html`, prod에서는 꺼짐)에서 
 12. POST /api/v1/payments/merchants/{merchantId}/settlements         → Csrf-Token·Idempotency-Key 헤더 포함
     - 201 PAID: 주인 지갑으로 입금 완료
     - 201 REQUESTED: 결과 확인 중. 서버가 자동으로 다시 처리하므로 13·14번으로 확인
-    - 201 MANUAL_REVIEW: 원장이 요청을 받아들이지 않아 자동 처리를 멈춤. 관리자가 처리(20~22번)
+    - 201 MANUAL_REVIEW: 원장이 요청을 받아들이지 않아 자동 재시도를 멈춤. 관리자가 처리(20~22번)
     - 422 PAYMENT_NO_SETTLEMENT_TARGET: 정산할 결제 없음
 13. GET  /api/v1/payments/merchants/{merchantId}/settlements         → 정산 목록
 14. GET  /api/v1/payments/merchants/{merchantId}/settlements/{settlementId} → 정산 상세(포함된 결제)
@@ -307,7 +307,7 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 |---|---|---|
 | `APPROVED` | 201 | 원장 반영 완료, 결제자 차감·가맹점 입금 끝 |
 | `PENDING` | 201 | 원장 결과를 확인하지 못함. 서버가 자동으로 다시 처리 |
-| `MANUAL_REVIEW` | 201 | 자동 처리를 멈춤. 운영자 확인 필요 |
+| `MANUAL_REVIEW` | 201 | 자동 재시도를 멈춤. 운영자 확인 필요 |
 | `DECLINED` | 422 | 원장이 거절. 오류 응답으로 반환되며 결제는 기록에 남음 |
 
 ```json
@@ -617,7 +617,7 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 | `REQUESTED` | 원장 결과 미확정. 복구 스케줄러가 다시 요청 |
 | `PAID` | 주인 지갑으로 입금 완료. 포함된 결제는 더 이상 환불할 수 없음 |
 | `FAILED` | 원장 거절. 항목이 지워져 포함됐던 결제는 다시 정산 대상 |
-| `MANUAL_REVIEW` | 자동 처리 중단(결과 모름 5회·원장이 받아들이지 않음). 항목 유지. 사유(`review_reason`)를 저장하고 [운영자 처리](#정산-운영자-처리)로 해소 |
+| `MANUAL_REVIEW` | 자동 재시도 중단(결과 모름 5회·원장이 받아들이지 않음). 항목 유지. 사유(`review_reason`)를 저장하고 [운영자 처리](#정산-운영자-처리)로 해소. 원장에 결과가 확정돼 있으면 [자동 처리](#manual_review-자동-처리) |
 
 ### 정산 멱등성
 
@@ -667,7 +667,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `REFUND_REQUESTED` | 고객이 환불을 신청해 가맹점 처리를 기다림. 원장 호출 없음, 정산 대상 아님 |
 | `REFUND_PENDING` | 환불 한 건이 처리 중 |
 | `REFUNDED` | 전액 환불 완료 |
-| `MANUAL_REVIEW` | 자동 처리 중단. 사유(`LEDGER_REQUEST_NOT_ACCEPTED`·`RETRY_EXHAUSTED`)를 저장. [운영자 처리](#manual_review-운영자-처리)로 해소 |
+| `MANUAL_REVIEW` | 자동 재시도 중단. 사유(`LEDGER_REQUEST_NOT_ACCEPTED`·`RETRY_EXHAUSTED`)를 저장. [운영자 처리](#manual_review-운영자-처리)로 해소. 원장에 결과가 확정돼 있으면 [자동 처리](#manual_review-자동-처리) |
 
 ### 환불 상태
 
@@ -676,13 +676,13 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `REQUESTED` | 원장 처리 결과 미확정. 복구 스케줄러가 다시 요청 |
 | `COMPLETED` | 환불 완료. 원장 거래 ID 저장 |
 | `DECLINED` | 원장 거절. 거절 사유 저장 |
-| `MANUAL_REVIEW` | 자동 처리 중단. 결제는 `REFUND_PENDING`에 머무름. 운영자 처리로 `COMPLETED`·`DECLINED`·`REQUESTED`(재시도)가 됨 |
+| `MANUAL_REVIEW` | 자동 재시도 중단. 결제는 `REFUND_PENDING`에 머무름. 운영자 처리로 `COMPLETED`·`DECLINED`·`REQUESTED`(재시도)가 됨. 원장에 결과가 확정돼 있으면 자동 처리로 `COMPLETED`·`DECLINED` |
 
 ### 상태 이력
 
 결제의 상태가 바뀔 때마다 `payment_histories`에 이전·현재 상태, 사유, 처리 주체(`USER`·`MERCHANT`·`SYSTEM`·`MASTER`)를 남깁니다. 결제 생성과 고객 환불 신청·취소는 `USER`, 원장 결과 반영은 `SYSTEM`, 신청 거절과 환불 실행은 가맹점 주인이면 `MERCHANT`·`MASTER`면 `MASTER`, 운영자 처리는 `MASTER`입니다. 신청 사유와 거절 사유도 이 이력의 사유에 남습니다. 부분 환불 완료는 사유에 `부분 환불 완료: {금액}`을, 운영자 처리 승인은 `원장에 거래가 반영되어 있음`을 남깁니다. 결제 승인 시각(환불 기간 기준)과 상세 응답의 `refundRequest`도 이 이력에서 읽습니다. 이력 전체를 조회하는 API는 없습니다.
 
-환불 자체의 상태 변화(`REQUESTED → MANUAL_REVIEW` 등)는 결제 상태가 바뀌지 않으면 `payment_histories`에 남지 않습니다. 운영자가 처리한 내용은 처리 기록(`payment_review_resolutions`)에 남습니다.
+환불 자체의 상태 변화(`REQUESTED → MANUAL_REVIEW` 등)는 결제 상태가 바뀌지 않으면 `payment_histories`에 남지 않습니다. 운영자 처리와 자동 처리 내용은 처리 기록(`payment_review_resolutions`)에 남습니다.
 
 ## 원장 연동과 복구
 
@@ -734,7 +734,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 
 - 보내지 않은 결제·환불·정산은 원장에 기록이 없으므로, 결과 모름과 달리 재시도 횟수를 늘리지 않습니다. 원장 장애가 길어도 보내지 않은 호출 때문에 `MANUAL_REVIEW`로 넘어가지 않습니다.
 - 복구 스케줄러에서는 결과 모름과 같이 원장 장애 신호로 세어, 연달아 3번이면 그 종류를 다음 주기로 미룹니다.
-- 원장 거래 조회(운영자 처리)와 송금(`TransferLedgerClientAdapter`)은 이 서킷을 거치지 않습니다.
+- 원장 거래 조회·취소(운영자 처리, [자동 처리](#manual_review-자동-처리))와 송금(`TransferLedgerClientAdapter`)은 이 서킷을 거치지 않습니다.
 - 상태가 바뀌면 WARN 로그(`원장 서킷 상태 변경`)를 남기고, `/actuator/prometheus`의 `resilience4j_circuitbreaker_state{name="paymentLedger"}`로 상태를 볼 수 있습니다.
 
 ### 복구 스케줄러
@@ -754,18 +754,20 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 - 정산 요청 응답 처리와 복구가 같은 정산의 결과를 동시에 반영하면 늦은 쪽은 먼저 반영된 정산을 다시 읽어 응답합니다.
 - 한 건의 오류는 로그만 남기고 다음 건을 계속 처리합니다. 결제 복구가 실패해도 환불·정산 복구는 돕니다.
 - payment-service의 스케줄러 스레드는 2개입니다(`spring.task.scheduling.pool.size`). 송금 복구와 서로의 원장 호출을 기다리지 않게 하기 위함입니다.
+- 6주기(약 1분)마다 복구를 마친 뒤, 지표를 갱신하기 전에 [MANUAL_REVIEW 자동 처리](#manual_review-자동-처리)를 같은 스레드에서 실행합니다. 스케줄 작업을 새로 만들지 않아 송금 복구와 나눠 쓰는 스레드 수는 그대로입니다.
 
 | 지표 | 태그 | 의미 |
 |---|---|---|
 | `payment.settlement.stuck` | `type=payment`·`refund`·`settlement` | 생성 후 30분이 지나도 `PENDING` 결제·`REQUESTED` 환불·`REQUESTED` 정산 수. 0보다 크면 ERROR 로그(오래된 순 ID 10개)도 남김 |
 | `payment.settlement.manual_review` | `type=payment`·`refund`·`settlement` | 운영자 확인을 기다리는 `MANUAL_REVIEW` 건수 |
+| `payment.manual_review.auto_resolved` | `type=payment`·`refund`·`settlement` | 자동 처리로 확정한 `MANUAL_REVIEW` 누적 건수 |
 | `payment.refund_request.overdue` | 없음 | 고객이 신청한 뒤 3일 넘게 가맹점이 처리하지 않은 환불 신청 수 |
 
-지표는 `/actuator/prometheus`로 볼 수 있습니다. `MANUAL_REVIEW` 건은 아래 [운영자 처리](#manual_review-운영자-처리)로 해소합니다.
+지표는 `/actuator/prometheus`로 볼 수 있습니다. `MANUAL_REVIEW` 건은 원장에 결과가 확정돼 있으면 [자동 처리](#manual_review-자동-처리)되고, 나머지는 아래 [운영자 처리](#manual_review-운영자-처리)로 해소합니다.
 
 ## MANUAL_REVIEW 운영자 처리
 
-자동 처리를 멈춘 결제·환불·정산을 `MASTER`가 정리하는 API입니다. **처리 결과는 운영자가 고르지 않고, 서버가 원장 조회 결과로 정합니다.** 운영자는 단건 조회로 예상 결과를 확인한 뒤 처리를 실행하고, 누가 언제 처리했는지가 처리 기록에 남습니다.
+자동 재시도를 멈춘 결제·환불·정산을 `MASTER`가 정리하는 API입니다. **처리 결과는 운영자가 고르지 않고, 서버가 원장 조회 결과로 정합니다.** 운영자는 단건 조회로 예상 결과를 확인한 뒤 처리를 실행하고, 누가 언제 처리했는지가 처리 기록에 남습니다. 원장에 결과가 확정된 건은 운영자가 처리하기 전에 [스케줄러가 같은 규칙으로 자동 처리](#manual_review-자동-처리)할 수 있습니다.
 
 ```txt
 목록 조회 → 단건 조회(원장 조회 + 예상 결과) → 처리(memo 선택)
@@ -820,9 +822,9 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 
 - 본문은 선택이며 `{"memo": "..."}`(255자 이하, 운영자 메모)만 받습니다. 고객에게 보이는 거절 사유에는 들어가지 않습니다.
 - 응답: `status`(처리 대상의 바뀐 상태), `paymentStatus`(처리 후 결제 상태), `ledgerStatus`, `ledgerTransactionId`
-- 상태가 바뀐 처리만 `payment_review_resolutions`에 남깁니다: `payment_id`·`refund_id`(환불일 때)·`review_reason`(멈췄던 사유)·`ledger_status`·`ledger_transaction_id`·`to_status`·`actor_id`(처리한 `MASTER`)·`description`(시스템이 남기는 처리 설명)·`memo`·`created_at`. 409·503으로 끝난 시도는 남기지 않습니다.
-- 결제 상태가 바뀌면 `payment_histories`에도 `MASTER`로 남습니다. 처리 후 `review_reason`은 지워지므로(`MANUAL_REVIEW`일 때만 있음) 멈췄던 사유는 처리 기록에서 봅니다.
-- 처리 기록은 `GET /api/v1/admin/payments/resolutions`로 최신순으로 봅니다. 조건은 모두 선택입니다: `type`(`PAYMENT`·`REFUND`), `actorId`(처리한 `MASTER`), `paymentId`(그 결제와 환불의 기록), `page`·`size`(최대 100). 처리 기록 한 줄에 모든 정보가 있어 단건 조회는 따로 없습니다.
+- 상태가 바뀐 처리만 `payment_review_resolutions`에 남깁니다: `payment_id`·`refund_id`(환불일 때)·`review_reason`(멈췄던 사유)·`ledger_status`·`ledger_transaction_id`·`to_status`·`actor_type`(`OPERATOR` 운영자·`SYSTEM` 자동 처리)·`actor_id`(처리한 `MASTER`, 자동 처리면 없음)·`description`(시스템이 남기는 처리 설명)·`memo`·`created_at`. 409·503으로 끝난 시도는 남기지 않습니다.
+- 결제 상태가 바뀌면 `payment_histories`에도 `MASTER`(자동 처리면 `SYSTEM`)로 남습니다. 처리 후 `review_reason`은 지워지므로(`MANUAL_REVIEW`일 때만 있음) 멈췄던 사유는 처리 기록에서 봅니다.
+- 처리 기록은 `GET /api/v1/admin/payments/resolutions`로 최신순으로 봅니다. 조건은 모두 선택입니다: `type`(`PAYMENT`·`REFUND`), `actorId`(처리한 `MASTER`), `paymentId`(그 결제와 환불의 기록), `page`·`size`(최대 100). 자동 처리 기록도 함께 나오며 `actorType`이 `SYSTEM`, `actorId`·`memo`가 `null`입니다(`actorId`로 거르면 나오지 않음). 처리 기록 한 줄에 모든 정보가 있어 단건 조회는 따로 없습니다.
 - 원장 취소로 막은 처리는 `ledger_status`가 `NOT_FOUND`(원장에 반영된 거래 없음)이고 `description`에 "(원장 취소 기록)"이 붙습니다(예: "재시도 한도 초과, 원장 기록 없음 → 결제 시간 초과 취소(원장 취소 기록)"). 취소 기록의 원장 거래 ID는 남기지 않으며(`NOT_FOUND`면 거래 ID가 비어 있어야 하는 제약), 원장 조회로 볼 수 있습니다.
 - 원장 조회·취소는 트랜잭션 밖에서 하고, 상태 변경·이력·처리 기록은 한 트랜잭션으로 저장합니다. 동시에 처리하면 결제는 `@Version`, 환불은 `status = MANUAL_REVIEW` 조건부 UPDATE로 하나만 반영되고 나머지는 409 `PAYMENT_NOT_MANUAL_REVIEW`입니다.
 
@@ -846,8 +848,36 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 - **정산은 기록이 없으면 재시도하지 않고 `FAILED`입니다.** 환불과 달리 가맹점 주인이 언제든 다시 정산을 요청할 수 있고, 새 요청은 주인 지갑을 다시 조회하므로 그 사이 바뀐 지갑에도 안전합니다.
 - **재시도를 다 쓴 정산은 `FAILED` 전에 원장 취소를 먼저 보냅니다.** 다시 요청한 정산은 새 정산 ID(새 reference)라, 마지막 원장 요청이 늦게 커밋되면 이중 지급이 됩니다. 응답별 처리는 결제와 같습니다(취소 기록이면 `FAILED`, 거래가 먼저 반영돼 있으면 그 거래로 `PAID`·`FAILED`, 응답을 받지 못하면 503·상태 유지). 처리 기록 설명에 "(원장 취소 기록)"이 붙습니다.
 - `FAILED`면 항목을 지워 포함됐던 결제가 다음 정산 요청에서 다시 대상이 되고 환불도 가능해집니다. `PAID`면 항목을 그대로 둡니다.
-- 상태가 바뀐 처리만 `settlement_review_resolutions`에 남깁니다(`settlement_id`·`review_reason`·`ledger_status`·`ledger_transaction_id`·`to_status`·`actor_id`·`description`·`memo`·`created_at`). 처리 기록은 `GET /api/v1/admin/payments/settlements/resolutions`(조건 선택: `actorId`·`settlementId`, 최신순)로 봅니다.
+- 상태가 바뀐 처리만 `settlement_review_resolutions`에 남깁니다(`settlement_id`·`review_reason`·`ledger_status`·`ledger_transaction_id`·`to_status`·`actor_type`·`actor_id`·`description`·`memo`·`created_at`). 처리 기록은 `GET /api/v1/admin/payments/settlements/resolutions`(조건 선택: `actorId`·`settlementId`, 최신순)로 봅니다. 자동 처리 기록은 결제와 같이 `actorType`이 `SYSTEM`입니다.
 - 동시에 처리하면 정산 `@Version`으로 하나만 반영되고 나머지는 409 `PAYMENT_NOT_MANUAL_REVIEW`입니다.
+
+### MANUAL_REVIEW 자동 처리
+
+운영자 처리와 **같은 규칙**(`ManualReviewRules`·`SettlementReviewRules`)으로, 원장에 결과가 확정된 건만 스케줄러가 처리합니다(`ManualReviewReconciler`). 원장은 조회만 하고 쓰지 않습니다(취소 없음). 운영자 처리 API는 그대로 두고 함께 씁니다.
+
+| 원장 조회 결과 | 자동 처리 |
+|---|---|
+| `POSTED`, 항목이 우리 기록과 같음 (멈춘 사유 무관) | 결제 `APPROVED` / 환불 `COMPLETED` / 정산 `PAID` |
+| `REJECTED` | 결제·환불 `DECLINED` / 정산 `FAILED` (사유는 운영자 처리 표와 같음) |
+| 기록 없음 | 건너뜀 → 운영자 처리 |
+| `POSTED`, 항목이 다름 | 건너뜀(WARN 로그 "원장 보정 필요(자동 처리 건너뜀)", 운영자가 처리할 때까지 매 차례 남음) → 운영자 확인(처리에서 막히면 ERROR) |
+| 조회 실패 | 건너뜀, 다음 차례에 다시 조회 |
+
+- **기록 없음은 자동으로 처리하지 않습니다.** 재시도를 다 쓴 결제·정산은 원장 취소(원장에 쓰기)가 필요하고, 환불을 재시도로 되돌리면 재시도 한도와 `MANUAL_REVIEW`가 끝없이 반복되기 때문입니다. `POSTED`·`REJECTED`는 원장에서 결과가 확정돼 늦은 커밋으로 바뀌지 않습니다.
+- 요청 거부(`LEDGER_REQUEST_NOT_ACCEPTED`)로 멈췄는데 원장에 같은 내용의 거래가 있으면(같은 reference에 다른 요청이 먼저 들어감) 처리하면서 WARN 로그를 남겨 원인을 추적할 수 있게 합니다. reference당 원장 거래는 하나라 중복으로 돈이 움직이지 않습니다.
+
+| 항목 | 값 |
+|---|---|
+| 실행 | [복구 스케줄러](#복구-스케줄러) 6주기(약 1분)마다, 복구 뒤·지표 갱신 앞 |
+| 대상 | `MANUAL_REVIEW`로 바뀐 지(`updated_at`) **1분** 지난 건만(마지막 원장 요청이 원장에서 끝날 시간) |
+| 처리량 | 결제·환불·정산 종류마다 생성 순으로 **10건** |
+| 시간 한도 | 한 번에 **5초**. 넘으면 남은 건은 다음 차례로(원장 조회는 서킷 밖이라 느리면 건마다 최대 응답 시간까지 기다림) |
+| 원장 장애 판단 | 원장 조회가 종류와 상관없이 연달아 **3번** 실패하면 멈추고 다음 차례에 같은 위치부터 다시 조회 |
+
+- 종류마다 `(created_at, id)` 커서로 이어서 봅니다. 건너뛴 건이 앞쪽에 쌓여도 뒤의 건을 처리하고, 끝까지 보면 처음부터 다시 봅니다. 커서는 메모리에만 있어 재기동하면 처음부터 봅니다. 원장이 느릴 때 뒤 종류가 계속 밀리지 않도록 시작하는 종류를 매번 바꿉니다.
+- 처리 기록은 `actor_type = SYSTEM`, `actor_id`·`memo` 없이 남고 `description` 앞에 "자동 처리: "가 붙습니다(예: "자동 처리: 재시도 한도 초과, 원장 반영 확인 → 결제 승인"). 결제 이력은 `SYSTEM`으로 남습니다.
+- 운영자 처리와 겹치면 결제·정산 `@Version`, 환불 조건부 UPDATE로 먼저 반영한 쪽만 성공합니다. 자동 처리가 지면 기록 없이 넘어가고, 운영자가 지면 409 `PAYMENT_NOT_MANUAL_REVIEW`입니다.
+- 끄려면 복구 스케줄러를 끕니다(`payment.settlement-recovery.enabled=false`).
 
 ### 원장 조회
 
@@ -948,6 +978,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `V20261106_1__add_refund_requested_status_and_status_indexes.sql` | 결제 `REFUND_REQUESTED` 상태, 이력 처리자 `MERCHANT`, 상태별 부분 인덱스 |
 | `V20261107_1__create_settlements.sql` | 정산·정산 항목 테이블 |
 | `V20261109_1__add_settlement_manual_review.sql` | 정산 `MANUAL_REVIEW` 상태·`review_reason`, 정산 운영자 처리 기록 테이블 |
+| `V20261113_1__add_review_resolution_actor_type.sql` | 결제·환불·정산 처리 기록에 `actor_type`(`OPERATOR`·`SYSTEM`) 추가, 자동 처리는 `actor_id` 없음(기존 기록은 `OPERATOR`) |
 
 | 제약·인덱스 | 내용 |
 |---|---|
@@ -979,6 +1010,8 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `ck_settlements_manual_review_has_reason` | `MANUAL_REVIEW`일 때만 `review_reason`이 있음 |
 | `ix_settlements_manual_review_created_at_id` | `MANUAL_REVIEW` 정산 목록·건수(부분 인덱스) |
 | `fk_settlement_review_resolutions_settlement_id`, `ck_settlement_review_resolutions_*` | 정산 처리 기록 → 정산 FK, 사유·원장 결과·처리 결과 값 목록, 원장 기록 없음일 때만 거래 ID가 비어 있음 |
+| `ck_payment_review_resolutions_actor_type`, `ck_settlement_review_resolutions_actor_type` | 처리 주체 `OPERATOR`·`SYSTEM`만 |
+| `ck_payment_review_resolutions_actor_id`, `ck_settlement_review_resolutions_actor_id` | `OPERATOR`면 `actor_id`가 있고, `SYSTEM`이면 없음 |
 
 - 회원·지갑·원장은 다른 서비스 소유라 FK 없이 ID만 저장합니다. 결제자 지갑 ID를 결제에, 주인 지갑 ID를 정산에 저장해 재전송 요청을 저장된 값만으로 만듭니다.
 - 정산 항목은 수백 건이 한 번에 저장될 수 있어 JDBC 배치 INSERT를 켭니다(`hibernate.jdbc.batch_size: 100`, `order_inserts`·`order_updates`, Hikari `reWriteBatchedInserts=true`).
@@ -1009,18 +1042,19 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `RefundRequestSummaryTest` | 결제 이력으로 고객 환불 신청 요약(`REQUESTED`·`CANCELLED`·`REJECTED`·`ACCEPTED`) 판정 |
 | `PaymentHistoryRepositoryImplTest` | 결제별 가장 최근 환불 신청 사유 조회 |
 | `ManualReviewRulesTest` | 운영자 처리 규칙(멈춘 사유 × 원장 결과), 원장 항목 비교 |
-| `PaymentReviewServiceTest` | 운영자 처리·단건 조회·목록·처리 기록 목록, 예상 결과와 실제 처리 일치, 항목 불일치·동시 처리·원장 조회 실패, 재시도 소진 결제의 원장 취소(취소 기록·늦은 커밋·취소 실패·요청 거부는 취소 안 함) |
-| `PaymentReviewRepositoryIntegrationTest` | 실제 PostgreSQL에서 목록 쿼리, 환불 조건부 UPDATE, 처리 기록 제약·조건별 조회, 승인 시각 조회, 목록 인덱스 |
+| `PaymentReviewServiceTest` | 운영자 처리·단건 조회·목록·처리 기록 목록, 예상 결과와 실제 처리 일치, 항목 불일치·동시 처리·원장 조회 실패, 재시도 소진 결제의 원장 취소(취소 기록·늦은 커밋·취소 실패·요청 거부는 취소 안 함), 자동 처리(확정·기록 없음과 불일치는 건너뜀·취소 안 함·운영자와 겹침) |
+| `PaymentReviewRepositoryIntegrationTest` | 실제 PostgreSQL에서 목록 쿼리, 환불 조건부 UPDATE, 처리 기록 제약·조건별 조회(처리 주체 제약 포함), 자동 처리 대상 커서 조회, 승인 시각 조회, 목록 인덱스 |
+| `ManualReviewReconcilerTest` | 자동 처리 실행: 1분 기준, 커서 이어 보기·처음부터, 연속 3번 원장 조회 실패면 멈춤, 시간 한도, 시작 종류 순환, 처리 건수 지표 |
 | `PaymentTest` | 결제 상태 전이(환불 신청·취소·거절 포함)와 역할별 환불 가능 여부 |
 | `MerchantServiceTest` | 가맹점 생성(주인 확인, 원장 실패 시 `PENDING`), 재시도, 잔액 권한 |
 | `PaymentLedgerFeignClientTest` | 원장 응답별 반영·거절·받아들이지 않음·결과 모름 분류, 거래 조회 결과 변환(코드 없는 404는 결론 내지 않음), 원장 취소 응답 변환(취소 기록은 기록 없음, 실패는 503, 서킷 안 거침) |
 | `MerchantLedgerFeignClientTest`, `PaymentWalletFeignClientTest`, `MerchantUserFeignClientTest` | 다른 서비스 응답·실패 변환 |
 | `PaymentExceptionHandlerTest` | 거절 사유를 `details`에 담는지 |
-| `PendingSettlementSchedulerTest` | 스케줄러 주기 처리와 지표 |
+| `PendingSettlementSchedulerTest` | 스케줄러 주기 처리와 지표, 자동 처리 실행 주기·순서 |
 | `SettlementServiceTest` | 정산 요청(대상 기간·완료 환불 차감·주인 지갑), 멱등성·동시 요청, 거절 시 항목 삭제, 결과 모름·5회째 `MANUAL_REVIEW`·받아들이지 않음(`MANUAL_REVIEW`, 항목 유지), 복구, 목록·상세, 미리보기 |
 | `SettlementTest` | 정산 생성·상태 전이(결과는 한 번만 반영), 금액 검증, 같은 요청 판정 |
-| `SettlementRepositoryIntegrationTest` | 실제 PostgreSQL에서 정산 대상·미리보기 조회 조건(승인 시각 기준, 정산된·신청 중 결제 제외), 항목 유일성, 복구 조건부 UPDATE, `MANUAL_REVIEW` 전환·목록·제약, 처리 기록 조회 |
-| `SettlementReviewServiceTest` | 정산 운영자 처리 규칙(멈춘 사유 × 원장 결과), 예상 결과와 실제 처리 일치, 항목 삭제·유지, 원장 보정 필요·조회 실패·동시 처리, 재시도 소진 정산의 원장 취소 |
+| `SettlementRepositoryIntegrationTest` | 실제 PostgreSQL에서 정산 대상·미리보기 조회 조건(승인 시각 기준, 정산된·신청 중 결제 제외), 항목 유일성, 복구 조건부 UPDATE, `MANUAL_REVIEW` 전환·목록·제약, 처리 기록 조회·처리 주체 제약, 자동 처리 대상 커서 조회 |
+| `SettlementReviewServiceTest` | 정산 운영자 처리 규칙(멈춘 사유 × 원장 결과), 예상 결과와 실제 처리 일치, 항목 삭제·유지, 원장 보정 필요·조회 실패·동시 처리, 재시도 소진 정산의 원장 취소, 자동 처리 |
 | `SettlementRefundLockIntegrationTest` | 정산과 `MASTER` 직접 환불을 커밋하는 두 트랜잭션으로 동시에 실행해 이중 지급이 없는지 |
 
 `PaymentReviewRepositoryIntegrationTest`·`Settlement*IntegrationTest`는 송금 통합 테스트처럼 Testcontainers로 PostgreSQL을 띄우고 Flyway를 처음부터 적용합니다. Docker가 없으면 건너뜁니다. 나머지는 DB 없이 실행되는 단위 테스트입니다.

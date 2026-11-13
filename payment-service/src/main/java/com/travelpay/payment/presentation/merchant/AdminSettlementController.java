@@ -62,7 +62,8 @@ public class AdminSettlementController {
     @Operation(summary = "정산 운영자 처리 기록 목록")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
-                    description = "최신순 페이지. `actorId`·`settlementId`로 거름")
+                    description = "최신순 페이지. `actorId`·`settlementId`로 거름. 스케줄러 자동 처리 기록도 함께 나오며 "
+                            + "`actorType`이 `SYSTEM`이고 `actorId`가 없음")
     })
     @GetMapping("/resolutions")
     public ResponseEntity<ApiResponse<PageResponse<SettlementResolutionResponse>>> getResolutions(

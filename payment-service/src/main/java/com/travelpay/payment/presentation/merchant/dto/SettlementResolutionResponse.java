@@ -5,7 +5,10 @@ import com.travelpay.payment.application.merchant.dto.SettlementResolutionResult
 import java.time.Instant;
 import java.util.UUID;
 
-/** 정산 운영자 처리 기록. actorId는 처리한 MASTER, description은 시스템 처리 설명 */
+/**
+ * 정산 처리 기록. actorType은 OPERATOR(운영자)·SYSTEM(자동 처리), actorId는 처리한 MASTER(자동 처리면 없음),
+ * description은 시스템 처리 설명
+ */
 public record SettlementResolutionResponse(
         UUID resolutionId,
         UUID settlementId,
@@ -13,6 +16,7 @@ public record SettlementResolutionResponse(
         String ledgerStatus,
         UUID ledgerTransactionId,
         String toStatus,
+        String actorType,
         UUID actorId,
         String description,
         String memo,
@@ -22,6 +26,6 @@ public record SettlementResolutionResponse(
         return new SettlementResolutionResponse(
                 result.resolutionId(), result.settlementId(), result.reviewReason().name(),
                 result.ledgerStatus().name(), result.ledgerTransactionId(), result.toStatus().name(),
-                result.actorId(), result.description(), result.memo(), result.createdAt());
+                result.actorType().name(), result.actorId(), result.description(), result.memo(), result.createdAt());
     }
 }

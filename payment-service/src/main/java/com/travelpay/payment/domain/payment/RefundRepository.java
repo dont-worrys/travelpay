@@ -21,6 +21,8 @@ public interface RefundRepository {
                              SettlementReviewReason reviewReason, Instant now);
     int markManualReview(UUID refundId, SettlementReviewReason reviewReason, Instant now);
     Page<RefundManualReview> findManualReviews(SettlementReviewReason reviewReason, Pageable pageable);
+    // 자동 처리 대상: MANUAL_REVIEW로 바뀐 지(updated_at) 기준 시각이 지난 환불을 (생성 시각, ID) 커서 다음부터 최대 limit건
+    List<Refund> findManualReviewsAfter(Instant updatedBefore, Instant afterCreatedAt, UUID afterId, int limit);
     int resolveCompleted(UUID refundId, UUID ledgerId, Instant now);
     int resolveDeclined(UUID refundId, String declineReason, Instant now);
     int resolveRetry(UUID refundId, Instant now);

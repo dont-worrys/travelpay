@@ -438,7 +438,7 @@ public class PaymentService {
                         exhausted ? SettlementReviewReason.RETRY_EXHAUSTED : null, Instant.now());
                 if (updated == 1 && exhausted) {
                     paymentHistoryRepository.save(manualReviewHistory(payment, SettlementReviewReason.RETRY_EXHAUSTED));
-                    log.error("원장 결과를 {}번 확인하지 못해 자동 처리를 멈춤 paymentId={}",
+                    log.error("원장 결과를 {}번 확인하지 못해 자동 재시도를 멈춤 paymentId={}",
                             MAX_UNKNOWN_ATTEMPTS, payment.getId());
                 }
             });
@@ -457,7 +457,7 @@ public class PaymentService {
                         SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, Instant.now()) == 1) {
                     paymentHistoryRepository.save(
                             manualReviewHistory(payment, SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED));
-                    log.error("원장이 결제 요청을 받아들이지 않아 자동 처리를 멈춤 paymentId={}", payment.getId());
+                    log.error("원장이 결제 요청을 받아들이지 않아 자동 재시도를 멈춤 paymentId={}", payment.getId());
                 }
             });
             return paymentRepository.findById(payment.getId()).orElse(payment);
@@ -522,7 +522,7 @@ public class PaymentService {
                     exhausted ? RefundStatus.MANUAL_REVIEW : RefundStatus.REQUESTED,
                     exhausted ? SettlementReviewReason.RETRY_EXHAUSTED : null, Instant.now());
             if (updated == 1 && exhausted) {
-                log.error("원장 결과를 {}번 확인하지 못해 환불 자동 처리를 멈춤 refundId={}",
+                log.error("원장 결과를 {}번 확인하지 못해 환불 자동 재시도를 멈춤 refundId={}",
                         MAX_UNKNOWN_ATTEMPTS, refund.getId());
             }
             return reloadRefund(refund);
@@ -537,7 +537,7 @@ public class PaymentService {
         try {
             if (refundRepository.markManualReview(refund.getId(),
                     SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED, Instant.now()) == 1) {
-                log.error("원장이 환불 요청을 받아들이지 않아 자동 처리를 멈춤 refundId={}", refund.getId());
+                log.error("원장이 환불 요청을 받아들이지 않아 자동 재시도를 멈춤 refundId={}", refund.getId());
             }
             return reloadRefund(refund);
         } catch (RuntimeException e) {

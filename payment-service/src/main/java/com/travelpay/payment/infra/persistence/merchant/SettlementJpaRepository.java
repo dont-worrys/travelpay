@@ -32,6 +32,20 @@ public interface SettlementJpaRepository extends JpaRepository<Settlement, UUID>
             """)
     List<Settlement> findRecoveryTargets(@Param("now") Instant now, @Param("limit") int limit);
 
+    // 자동 처리 대상. 생성 시각은 바뀌지 않아 커서가 흔들리지 않음(ix_settlements_manual_review_created_at_id)
+    @Query(nativeQuery = true, value = """
+            select * from settlements
+            where status = 'MANUAL_REVIEW'
+              and updated_at < cast(:updatedBefore as timestamptz)
+              and (created_at, id) > (cast(:afterCreatedAt as timestamptz), cast(:afterId as uuid))
+            order by created_at, id
+            limit :limit
+            """)
+    List<Settlement> findManualReviewsAfter(@Param("updatedBefore") Instant updatedBefore,
+                                            @Param("afterCreatedAt") Instant afterCreatedAt,
+                                            @Param("afterId") UUID afterId,
+                                            @Param("limit") int limit);
+
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
@@ -61,7 +75,7 @@ public interface SettlementJpaRepository extends JpaRepository<Settlement, UUID>
                              @Param("reviewReason") SettlementReviewReason reviewReason,
                              @Param("now") Instant now);
 
-    // 자동 처리 중단. 그 사이 결과가 반영된 정산은 바꾸지 않음
+    // 자동 재시도 중단. 그 사이 결과가 반영된 정산은 바꾸지 않음
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""
