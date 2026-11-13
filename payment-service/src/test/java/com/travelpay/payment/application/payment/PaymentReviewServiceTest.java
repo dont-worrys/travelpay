@@ -27,6 +27,7 @@ import com.travelpay.payment.domain.payment.PaymentStatus;
 import com.travelpay.payment.domain.payment.Refund;
 import com.travelpay.payment.domain.payment.RefundRepository;
 import com.travelpay.payment.domain.payment.RefundStatus;
+import com.travelpay.payment.domain.payment.ReviewActorType;
 import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 import com.travelpay.payment.domain.payment.ReviewTarget;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
@@ -125,6 +126,7 @@ class PaymentReviewServiceTest {
         assertEquals(ReviewLedgerStatus.POSTED, resolution.getLedgerStatus());
         assertEquals(PAYMENT_TRANSACTION_ID, resolution.getLedgerTransactionId());
         assertEquals("APPROVED", resolution.getToStatus());
+        assertEquals(ReviewActorType.OPERATOR, resolution.getActorType());
         assertEquals(MASTER_ID, resolution.getActorId());
         assertEquals("재시도 한도 초과, 원장 반영 확인 → 결제 승인", resolution.getDescription());
         assertEquals(MEMO, resolution.getMemo());
@@ -539,6 +541,165 @@ class PaymentReviewServiceTest {
         assertEquals(PaymentErrorCode.NOT_MANUAL_REVIEW, exception.getErrorCode());
         assertEquals(PaymentStatus.REFUND_PENDING, payment.getStatus());
         verify(paymentRepository, never()).save(any());
+        verifyNoInteractions(paymentHistoryRepository, resolutionRepository);
+    }
+
+    // ── 자동 처리(스케줄러) ──
+
+    @Test
+    void autoResolvesPostedPaymentAsApprovedBySystem() {
+        Payment payment = givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(paymentPosted());
+
+        AutoResolveOutcome outcome = service.autoResolvePayment(payment);
+
+        assertEquals(AutoResolveOutcome.RESOLVED, outcome);
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        assertEquals(PAYMENT_TRANSACTION_ID, payment.getLedgerId());
+        assertEquals(PaymentActor.SYSTEM, savedHistory().getCreatedBy());
+
+        PaymentReviewResolution resolution = savedResolution();
+        assertEquals(ReviewActorType.SYSTEM, resolution.getActorType());
+        assertNull(resolution.getActorId());
+        assertNull(resolution.getMemo());
+        assertEquals("APPROVED", resolution.getToStatus());
+        assertEquals("자동 처리: 재시도 한도 초과, 원장 반영 확인 → 결제 승인", resolution.getDescription());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "RETRY_EXHAUSTED, 원장 거절 문구",                          // P2
+            "LEDGER_REQUEST_NOT_ACCEPTED, 결제 처리 중 오류로 취소되었습니다." // P4
+    })
+    void autoDeclinesRejectedPaymentLikeOperator(SettlementReviewReason reviewReason, String declineReason) {
+        Payment payment = givenManualReviewPayment(reviewReason);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(paymentLookup(ReviewLedgerStatus.REJECTED));
+
+        assertEquals(AutoResolveOutcome.RESOLVED, service.autoResolvePayment(payment));
+
+        assertEquals(PaymentStatus.DECLINED, payment.getStatus());
+        assertEquals(declineReason, payment.getDeclineReason());
+        assertEquals(ReviewActorType.SYSTEM, savedResolution().getActorType());
+    }
+
+    @Test
+    void autoApprovesNotAcceptedPaymentWhenLedgerMatches() {
+        Payment payment = givenManualReviewPayment(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(paymentPosted());
+
+        assertEquals(AutoResolveOutcome.RESOLVED, service.autoResolvePayment(payment));
+
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        assertEquals("자동 처리: 원장 요청 거부, 원장 반영 확인 → 결제 승인", savedResolution().getDescription());
+    }
+
+    // 원장 기록이 없으면 취소(원장에 쓰기)가 필요하거나 재시도 판단이 필요해 운영자에게 남김
+    @ParameterizedTest
+    @EnumSource(SettlementReviewReason.class)
+    void autoSkipsPaymentMissingFromLedgerWithoutCancelling(SettlementReviewReason reviewReason) {
+        Payment payment = givenManualReviewPayment(reviewReason);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+
+        assertEquals(AutoResolveOutcome.SKIPPED, service.autoResolvePayment(payment));
+
+        assertEquals(PaymentStatus.MANUAL_REVIEW, payment.getStatus());
+        verify(ledgerClient, never()).cancelPaymentTransaction(any(), any());
+        verify(paymentRepository, never()).save(any());
+        verifyNoInteractions(paymentHistoryRepository, resolutionRepository);
+    }
+
+    @Test
+    void autoSkipsPaymentWhenLedgerAmountDiffers() {
+        Payment payment = givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(paymentPosted(1_000L));
+
+        assertEquals(AutoResolveOutcome.SKIPPED, service.autoResolvePayment(payment));
+
+        assertEquals(PaymentStatus.MANUAL_REVIEW, payment.getStatus());
+        verifyNoInteractions(paymentHistoryRepository, resolutionRepository);
+    }
+
+    @Test
+    void autoReportsAlreadyResolvedWhenOperatorWonTheRace() {
+        Payment payment = givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID)).thenReturn(paymentPosted());
+        when(paymentRepository.save(any(Payment.class)))
+                .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
+
+        assertEquals(AutoResolveOutcome.ALREADY_RESOLVED, service.autoResolvePayment(payment));
+
+        verifyNoInteractions(resolutionRepository);
+    }
+
+    @Test
+    void autoPassesLedgerLookupFailureToCaller() {
+        Payment payment = givenManualReviewPayment(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findPaymentTransaction(PAYMENT_ID))
+                .thenThrow(new BusinessException(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE));
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.autoResolvePayment(payment));
+
+        assertEquals(PaymentErrorCode.LEDGER_LOOKUP_UNAVAILABLE, exception.getErrorCode());
+        assertEquals(PaymentStatus.MANUAL_REVIEW, payment.getStatus());
+    }
+
+    @Test
+    void autoCompletesPostedRefundBySystem() {
+        Payment payment = givenRefundPendingPayment();
+        Refund refund = givenManualReviewRefund(SettlementReviewReason.RETRY_EXHAUSTED, PAYMENT_AMOUNT);
+        when(ledgerClient.findRefundTransaction(REFUND_ID)).thenReturn(refundPosted(PAYMENT_AMOUNT));
+        givenResolveCompletedAppliesTo(refund);
+
+        assertEquals(AutoResolveOutcome.RESOLVED, service.autoResolveRefund(refund));
+
+        assertEquals(PaymentStatus.REFUNDED, payment.getStatus());
+        assertEquals(PaymentActor.SYSTEM, savedHistory().getCreatedBy());
+        PaymentReviewResolution resolution = savedResolution();
+        assertEquals(ReviewActorType.SYSTEM, resolution.getActorType());
+        assertNull(resolution.getActorId());
+        assertEquals(REFUND_ID, resolution.getRefundId());
+        assertEquals("자동 처리: 재시도 한도 초과, 원장 반영 확인 → 환불 완료", resolution.getDescription());
+    }
+
+    @Test
+    void autoDeclinesRejectedRefundAndReturnsPaymentToApproved() {
+        Payment payment = givenRefundPendingPayment();
+        Refund refund = givenManualReviewRefund(SettlementReviewReason.RETRY_EXHAUSTED, PAYMENT_AMOUNT);
+        when(ledgerClient.findRefundTransaction(REFUND_ID)).thenReturn(refundLookup(ReviewLedgerStatus.REJECTED));
+        when(refundRepository.resolveDeclined(eq(REFUND_ID), eq("원장 거절 문구"), any())).thenReturn(1);
+
+        assertEquals(AutoResolveOutcome.RESOLVED, service.autoResolveRefund(refund));
+
+        assertEquals(PaymentStatus.APPROVED, payment.getStatus());
+        assertEquals("DECLINED", savedResolution().getToStatus());
+    }
+
+    // R3(재시도로 되돌림)를 자동으로 하면 재시도 한도와 MANUAL_REVIEW가 끝없이 반복되므로 운영자에게 남김
+    @ParameterizedTest
+    @EnumSource(SettlementReviewReason.class)
+    void autoSkipsRefundMissingFromLedger(SettlementReviewReason reviewReason) {
+        givenRefundPendingPayment();
+        Refund refund = givenManualReviewRefund(reviewReason, PAYMENT_AMOUNT);
+        when(ledgerClient.findRefundTransaction(REFUND_ID)).thenReturn(PaymentLedgerLookup.notFound());
+
+        assertEquals(AutoResolveOutcome.SKIPPED, service.autoResolveRefund(refund));
+
+        verify(refundRepository, never()).resolveRetry(any(), any());
+        verify(refundRepository, never()).resolveDeclined(any(), any(), any());
+        verifyNoInteractions(paymentHistoryRepository, resolutionRepository);
+    }
+
+    @Test
+    void autoReportsAlreadyResolvedWhenRefundWasResolvedConcurrently() {
+        Payment payment = givenRefundPendingPayment();
+        Refund refund = givenManualReviewRefund(SettlementReviewReason.RETRY_EXHAUSTED, PAYMENT_AMOUNT);
+        when(ledgerClient.findRefundTransaction(REFUND_ID)).thenReturn(refundPosted(PAYMENT_AMOUNT));
+        when(refundRepository.resolveCompleted(eq(REFUND_ID), eq(REFUND_TRANSACTION_ID), any())).thenReturn(0);
+
+        assertEquals(AutoResolveOutcome.ALREADY_RESOLVED, service.autoResolveRefund(refund));
+
+        assertEquals(PaymentStatus.REFUND_PENDING, payment.getStatus());
         verifyNoInteractions(paymentHistoryRepository, resolutionRepository);
     }
 

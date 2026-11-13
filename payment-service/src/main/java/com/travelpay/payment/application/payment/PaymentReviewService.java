@@ -34,12 +34,15 @@ import java.util.function.Supplier;
 /**
  * MANUAL_REVIEW 결제·환불을 MASTER가 처리합니다. 결과는 사람이 고르지 않고 원장 조회 결과로 정합니다.
  * 원장 조회는 트랜잭션 밖에서 하고, 상태 변경·결제 이력·처리 기록은 한 트랜잭션으로 저장합니다.
+ * 원장에 결과가 확정된 건(POSTED 항목 일치, REJECTED)은 스케줄러도 같은 규칙으로 자동 처리합니다(autoResolve…).
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class PaymentReviewService {
 
+    // 자동 처리 기록의 설명 앞에 붙임
+    static final String AUTO_DESCRIPTION_PREFIX = "자동 처리: ";
     private static final int MAX_PAGE_SIZE = 100;
     private static final Sort OLDEST_FIRST = Sort.by(Sort.Order.asc("createdAt"), Sort.Order.asc("id"));
     private static final Sort NEWEST_FIRST = Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"));
@@ -119,18 +122,7 @@ public class PaymentReviewService {
 
         ManualReviewResolveResult result;
         try {
-            result = Objects.requireNonNull(transactionOperations.execute(status -> {
-                PaymentHistory history = decision.toStatus() == PaymentStatus.APPROVED
-                        ? payment.resolveApprovedHistory(ledger.transactionId())
-                        : payment.resolveDeclinedHistory(decision.declineReason());
-                Payment saved = paymentRepository.save(payment);
-                paymentHistoryRepository.save(history);
-                resolutionRepository.save(PaymentReviewResolution.ofPayment(paymentId, reviewReason,
-                        ledger.status(), ledger.transactionId(), saved.getStatus(), actorId,
-                        decision.description(), memo));
-                return new ManualReviewResolveResult(paymentId, null, saved.getStatus().name(), saved.getStatus(),
-                        ledger.status(), ledger.transactionId());
-            }));
+            result = applyPayment(payment, reviewReason, ledger, decision, Resolver.operator(actorId, memo));
         } catch (OptimisticLockingFailureException e) {
             // 원장을 조회하는 사이 다른 처리가 먼저 끝남
             throw new BusinessException(PaymentErrorCode.NOT_MANUAL_REVIEW);
@@ -139,6 +131,59 @@ public class PaymentReviewService {
         log.info("결제 MANUAL_REVIEW 처리 paymentId={} reviewReason={} ledger={} → {} actorId={}",
                 paymentId, reviewReason, ledger.status(), result.toStatus(), actorId);
         return result;
+    }
+
+    /**
+     * 스케줄러 자동 처리(결제). 운영자 처리와 같은 규칙이지만 원장에 결과가 확정된 경우(POSTED 항목 일치, REJECTED)만
+     * 처리하고, 원장에는 쓰지 않습니다(취소 없음). 원장 기록 없음·항목 불일치는 MANUAL_REVIEW 그대로 운영자에게 남깁니다.
+     * 원장 조회 실패는 LEDGER_LOOKUP_UNAVAILABLE 예외를 그대로 던집니다.
+     */
+    public AutoResolveOutcome autoResolvePayment(Payment payment) {
+        UUID paymentId = payment.getId();
+        SettlementReviewReason reviewReason = payment.getReviewReason();
+        PaymentLedgerLookup ledger = ledgerClient.findPaymentTransaction(paymentId);
+        if (ledger.status() == ReviewLedgerStatus.NOT_FOUND) {
+            return AutoResolveOutcome.SKIPPED;
+        }
+        PaymentDecision decision = ManualReviewRules.decidePayment(reviewReason, ledger,
+                expectedPaymentEntries(payment));
+        if (!decision.resolvable()) {
+            warnCorrectionRequiredSkipped("paymentId=" + paymentId, reviewReason, ledger);
+            return AutoResolveOutcome.SKIPPED;
+        }
+        warnIfRequestNotAccepted(reviewReason, ledger, "paymentId=" + paymentId);
+
+        ManualReviewResolveResult result;
+        try {
+            result = applyPayment(payment, reviewReason, ledger, decision, Resolver.SYSTEM);
+        } catch (OptimisticLockingFailureException e) {
+            return AutoResolveOutcome.ALREADY_RESOLVED;
+        }
+        log.info("결제 MANUAL_REVIEW 자동 처리 paymentId={} reviewReason={} ledger={} → {}",
+                paymentId, reviewReason, ledger.status(), result.toStatus());
+        return AutoResolveOutcome.RESOLVED;
+    }
+
+    // 결제 상태 변경·이력·처리 기록을 한 트랜잭션으로. 그 사이 다른 처리가 먼저 끝나면 OptimisticLockingFailureException
+    private ManualReviewResolveResult applyPayment(Payment payment, SettlementReviewReason reviewReason,
+                                                   PaymentLedgerLookup ledger, PaymentDecision decision,
+                                                   Resolver resolver) {
+        UUID paymentId = payment.getId();
+        return Objects.requireNonNull(transactionOperations.execute(status -> {
+            PaymentHistory history = decision.toStatus() == PaymentStatus.APPROVED
+                    ? payment.resolveApprovedHistory(ledger.transactionId(), resolver.historyActor())
+                    : payment.resolveDeclinedHistory(decision.declineReason(), resolver.historyActor());
+            Payment saved = paymentRepository.save(payment);
+            paymentHistoryRepository.save(history);
+            resolutionRepository.save(resolver.isSystem()
+                    ? PaymentReviewResolution.ofSystemPayment(paymentId, reviewReason, ledger.status(),
+                            ledger.transactionId(), saved.getStatus(), AUTO_DESCRIPTION_PREFIX + decision.description())
+                    : PaymentReviewResolution.ofPayment(paymentId, reviewReason, ledger.status(),
+                            ledger.transactionId(), saved.getStatus(), resolver.actorId(), decision.description(),
+                            resolver.memo()));
+            return new ManualReviewResolveResult(paymentId, null, saved.getStatus().name(), saved.getStatus(),
+                    ledger.status(), ledger.transactionId());
+        }));
     }
 
     // 원장 조회. 재시도를 다 쓴 결제가 원장에 없으면, 늦게 커밋될 수 있는 마지막 요청을 막으려고 취소 기록을 먼저 남기고
@@ -164,50 +209,130 @@ public class PaymentReviewService {
                 expectedRefundEntries(refund, refundedPayment));
         requireResolvable(decision.resolvable(), reviewReason, ledger, "refundId=" + refundId);
 
-        RefundStatus toStatus = decision.toStatus();
         ManualReviewResolveResult result;
         try {
-            result = Objects.requireNonNull(transactionOperations.execute(status -> {
-                Instant now = Instant.now();
-                int updated = switch (toStatus) {
-                    case COMPLETED -> refundRepository.resolveCompleted(refundId, ledger.transactionId(), now);
-                    case DECLINED -> refundRepository.resolveDeclined(refundId, decision.declineReason(), now);
-                    case REQUESTED -> refundRepository.resolveRetry(refundId, now);
-                    default -> throw new IllegalStateException("환불 처리 결과가 아닙니다. toStatus=" + toStatus);
-                };
-                if (updated == 0) {
-                    // 원장을 조회하는 사이 다른 처리가 먼저 끝남. 예외로 트랜잭션을 되돌림
-                    throw new BusinessException(PaymentErrorCode.NOT_MANUAL_REVIEW);
-                }
-
-                // 위 업데이트가 영속성 컨텍스트를 비우므로 결제는 업데이트 뒤에 다시 읽음
-                Payment payment = paymentRepository.findById(refund.getPaymentId())
-                        .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
-                if (toStatus == RefundStatus.COMPLETED) {
-                    // 이 환불은 이미 COMPLETED로 반영되어 합계에 포함됨
-                    long completed = completedRefundAmount(payment.getId());
-                    paymentHistoryRepository.save(payment.refundCompletedHistory(
-                            refund.getAmount(), payment.getAmount() - completed, PaymentActor.MASTER));
-                    payment = paymentRepository.save(payment);
-                } else if (toStatus == RefundStatus.DECLINED) {
-                    paymentHistoryRepository.save(
-                            payment.refundDeclinedHistory(decision.declineReason(), PaymentActor.MASTER));
-                    payment = paymentRepository.save(payment);
-                }
-                // REQUESTED(R3)는 결제를 REFUND_PENDING 그대로 둠
-
-                resolutionRepository.save(PaymentReviewResolution.ofRefund(payment.getId(), refundId, reviewReason,
-                        ledger.status(), ledger.transactionId(), toStatus, actorId, decision.description(), memo));
-                return new ManualReviewResolveResult(payment.getId(), refundId, toStatus.name(), payment.getStatus(),
-                        ledger.status(), ledger.transactionId());
-            }));
+            result = applyRefund(refund, reviewReason, ledger, decision, Resolver.operator(actorId, memo));
         } catch (OptimisticLockingFailureException e) {
             throw new BusinessException(PaymentErrorCode.NOT_MANUAL_REVIEW);
         }
         // 커밋이 끝난 뒤에 남김(커밋 중 충돌로 롤백되면 남지 않음)
         log.info("환불 MANUAL_REVIEW 처리 refundId={} reviewReason={} ledger={} → {} payment={} actorId={}",
-                refundId, reviewReason, ledger.status(), toStatus, result.paymentStatus(), actorId);
+                refundId, reviewReason, ledger.status(), result.toStatus(), result.paymentStatus(), actorId);
         return result;
+    }
+
+    /**
+     * 스케줄러 자동 처리(환불). 원장에 결과가 확정된 경우(POSTED 항목 일치, REJECTED)만 처리합니다.
+     * 원장 기록 없음(재시도로 되돌리는 R3·요청 거부 R4)과 항목 불일치는 MANUAL_REVIEW 그대로 운영자에게 남깁니다.
+     * 원장 조회 실패는 LEDGER_LOOKUP_UNAVAILABLE 예외를 그대로 던집니다.
+     */
+    public AutoResolveOutcome autoResolveRefund(Refund refund) {
+        UUID refundId = refund.getId();
+        SettlementReviewReason reviewReason = refund.getReviewReason();
+        PaymentLedgerLookup ledger = ledgerClient.findRefundTransaction(refundId);
+        if (ledger.status() == ReviewLedgerStatus.NOT_FOUND) {
+            return AutoResolveOutcome.SKIPPED;
+        }
+        Payment refundedPayment = paymentRepository.findById(refund.getPaymentId())
+                .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+        RefundDecision decision = ManualReviewRules.decideRefund(reviewReason, ledger,
+                expectedRefundEntries(refund, refundedPayment));
+        if (!decision.resolvable()) {
+            warnCorrectionRequiredSkipped("refundId=" + refundId, reviewReason, ledger);
+            return AutoResolveOutcome.SKIPPED;
+        }
+        warnIfRequestNotAccepted(reviewReason, ledger, "refundId=" + refundId);
+
+        ManualReviewResolveResult result;
+        try {
+            result = applyRefund(refund, reviewReason, ledger, decision, Resolver.SYSTEM);
+        } catch (OptimisticLockingFailureException e) {
+            return AutoResolveOutcome.ALREADY_RESOLVED;
+        } catch (BusinessException e) {
+            if (e.getErrorCode() == PaymentErrorCode.NOT_MANUAL_REVIEW) {
+                return AutoResolveOutcome.ALREADY_RESOLVED;
+            }
+            throw e;
+        }
+        log.info("환불 MANUAL_REVIEW 자동 처리 refundId={} reviewReason={} ledger={} → {} payment={}",
+                refundId, reviewReason, ledger.status(), result.toStatus(), result.paymentStatus());
+        return AutoResolveOutcome.RESOLVED;
+    }
+
+    // 환불 상태(조건부 UPDATE)·결제 상태와 이력·처리 기록을 한 트랜잭션으로.
+    // 그 사이 다른 처리가 먼저 끝나면 BusinessException(NOT_MANUAL_REVIEW) 또는 OptimisticLockingFailureException
+    private ManualReviewResolveResult applyRefund(Refund refund, SettlementReviewReason reviewReason,
+                                                  PaymentLedgerLookup ledger, RefundDecision decision,
+                                                  Resolver resolver) {
+        UUID refundId = refund.getId();
+        RefundStatus toStatus = decision.toStatus();
+        return Objects.requireNonNull(transactionOperations.execute(status -> {
+            Instant now = Instant.now();
+            int updated = switch (toStatus) {
+                case COMPLETED -> refundRepository.resolveCompleted(refundId, ledger.transactionId(), now);
+                case DECLINED -> refundRepository.resolveDeclined(refundId, decision.declineReason(), now);
+                case REQUESTED -> refundRepository.resolveRetry(refundId, now);
+                default -> throw new IllegalStateException("환불 처리 결과가 아닙니다. toStatus=" + toStatus);
+            };
+            if (updated == 0) {
+                // 원장을 조회하는 사이 다른 처리가 먼저 끝남. 예외로 트랜잭션을 되돌림
+                throw new BusinessException(PaymentErrorCode.NOT_MANUAL_REVIEW);
+            }
+
+            // 위 업데이트가 영속성 컨텍스트를 비우므로 결제는 업데이트 뒤에 다시 읽음
+            Payment payment = paymentRepository.findById(refund.getPaymentId())
+                    .orElseThrow(() -> new BusinessException(PaymentErrorCode.PAYMENT_NOT_FOUND));
+            if (toStatus == RefundStatus.COMPLETED) {
+                // 이 환불은 이미 COMPLETED로 반영되어 합계에 포함됨
+                long completed = completedRefundAmount(payment.getId());
+                paymentHistoryRepository.save(payment.refundCompletedHistory(
+                        refund.getAmount(), payment.getAmount() - completed, resolver.historyActor()));
+                payment = paymentRepository.save(payment);
+            } else if (toStatus == RefundStatus.DECLINED) {
+                paymentHistoryRepository.save(
+                        payment.refundDeclinedHistory(decision.declineReason(), resolver.historyActor()));
+                payment = paymentRepository.save(payment);
+            }
+            // REQUESTED(R3)는 결제를 REFUND_PENDING 그대로 둠
+
+            resolutionRepository.save(resolver.isSystem()
+                    ? PaymentReviewResolution.ofSystemRefund(payment.getId(), refundId, reviewReason,
+                            ledger.status(), ledger.transactionId(), toStatus,
+                            AUTO_DESCRIPTION_PREFIX + decision.description())
+                    : PaymentReviewResolution.ofRefund(payment.getId(), refundId, reviewReason,
+                            ledger.status(), ledger.transactionId(), toStatus, resolver.actorId(),
+                            decision.description(), resolver.memo()));
+            return new ManualReviewResolveResult(payment.getId(), refundId, toStatus.name(), payment.getStatus(),
+                    ledger.status(), ledger.transactionId());
+        }));
+    }
+
+    /** 처리 주체. 운영자는 회원 ID와 메모(선택)가 있고, 스케줄러 자동 처리는 둘 다 없음 */
+    private record Resolver(UUID actorId, String memo) {
+        static final Resolver SYSTEM = new Resolver(null, null);
+
+        static Resolver operator(UUID actorId, String memo) {
+            return new Resolver(Objects.requireNonNull(actorId), memo);
+        }
+
+        boolean isSystem() {
+            return actorId == null;
+        }
+
+        PaymentActor historyActor() {
+            return isSystem() ? PaymentActor.SYSTEM : PaymentActor.MASTER;
+        }
+    }
+
+    // 요청 거부로 멈췄는데 원장에 같은 내용의 거래가 있음: 돈은 의도대로 움직였지만 같은 reference로 다른 요청이
+    // 먼저 들어간 원인은 사람이 봐야 하므로 로그를 남김
+    private static void warnIfRequestNotAccepted(SettlementReviewReason reviewReason, PaymentLedgerLookup ledger,
+                                                 String target) {
+        if (reviewReason == SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED
+                && ledger.status() == ReviewLedgerStatus.POSTED) {
+            log.warn("원장 요청 거부로 멈췄지만 원장에 같은 내용의 거래가 있어 자동 처리 {} ledgerTransactionId={}",
+                    target, ledger.transactionId());
+        }
     }
 
     private Payment findManualReviewPayment(UUID paymentId) {
@@ -281,9 +406,22 @@ public class PaymentReviewService {
         if (resolvable) {
             return;
         }
+        logCorrectionRequired(target, reviewReason, ledger);
+        throw new BusinessException(PaymentErrorCode.LEDGER_CORRECTION_REQUIRED);
+    }
+
+    private static void logCorrectionRequired(String target, SettlementReviewReason reviewReason,
+                                              PaymentLedgerLookup ledger) {
         log.error("원장 보정 필요: 원장 거래 내용이 우리 기록과 다름 {} reviewReason={} ledgerTransactionId={} ledgerEntries={}",
                 target, reviewReason, ledger.transactionId(), ledger.entries());
-        throw new BusinessException(PaymentErrorCode.LEDGER_CORRECTION_REQUIRED);
+    }
+
+    // 자동 처리는 운영자가 처리할 때까지 1분마다 같은 건을 다시 보므로 WARN으로 남김(운영자 처리에서 막히면 ERROR)
+    private static void warnCorrectionRequiredSkipped(String target, SettlementReviewReason reviewReason,
+                                                      PaymentLedgerLookup ledger) {
+        log.warn("원장 보정 필요(자동 처리 건너뜀): 원장 거래 내용이 우리 기록과 다름 {} reviewReason={} "
+                        + "ledgerTransactionId={} ledgerEntries={}",
+                target, reviewReason, ledger.transactionId(), ledger.entries());
     }
 
     private static Pageable pageRequest(int page, int size, Sort sort) {

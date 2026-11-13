@@ -46,6 +46,20 @@ public interface PaymentJpaRepository extends JpaRepository<Payment, UUID> {
             """)
     List<Payment> findRecoveryTargets(@Param("now") Instant now, @Param("limit") int limit);
 
+    // 자동 처리 대상. 생성 시각은 바뀌지 않아 커서가 흔들리지 않음(ix_payments_manual_review_created_at_id)
+    @Query(nativeQuery = true, value = """
+            select * from payments
+            where status = 'MANUAL_REVIEW'
+              and updated_at < cast(:updatedBefore as timestamptz)
+              and (created_at, id) > (cast(:afterCreatedAt as timestamptz), cast(:afterId as uuid))
+            order by created_at, id
+            limit :limit
+            """)
+    List<Payment> findManualReviewsAfter(@Param("updatedBefore") Instant updatedBefore,
+                                         @Param("afterCreatedAt") Instant afterCreatedAt,
+                                         @Param("afterId") UUID afterId,
+                                         @Param("limit") int limit);
+
     // 정산 대상. 승인 시각은 환불 기간 계산(findApprovedAt)과 같은 기준: PENDING·MANUAL_REVIEW → APPROVED 이력.
     // 부분 환불·환불 거절·신청 취소·거절 뒤의 → APPROVED는 승인 시각이 아닙니다.
     // 대상 결제 행을 잠가 정산 트랜잭션 동안 환불이 시작되지 않게 합니다. 환불이 먼저 잠갔다면 커밋을 기다린 뒤
@@ -112,7 +126,7 @@ public interface PaymentJpaRepository extends JpaRepository<Payment, UUID> {
                              @Param("reviewReason") SettlementReviewReason reviewReason,
                              @Param("now") Instant now);
 
-    // 자동 처리 중단. 그 사이 결과가 반영된 결제는 바꾸지 않음
+    // 자동 재시도 중단. 그 사이 결과가 반영된 결제는 바꾸지 않음
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""

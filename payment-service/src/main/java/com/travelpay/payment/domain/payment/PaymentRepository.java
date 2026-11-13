@@ -17,6 +17,8 @@ public interface PaymentRepository {
     Page<Payment> findPageByUserId(UUID userId, PaymentStatus status, Pageable pageable);
     Page<Payment> findPageByMerchantId(UUID merchantId, PaymentStatus status, Pageable pageable);
     Page<Payment> findManualReviews(SettlementReviewReason reviewReason, Pageable pageable);
+    // 자동 처리 대상: MANUAL_REVIEW로 바뀐 지(updated_at) 기준 시각이 지난 결제를 (생성 시각, ID) 커서 다음부터 최대 limit건
+    List<Payment> findManualReviewsAfter(Instant updatedBefore, Instant afterCreatedAt, UUID afterId, int limit);
     // 기준 시각 전에 신청되어 아직 처리되지 않은 환불 신청
     Page<Payment> findRefundRequestsUpdatedBefore(Instant before, Pageable pageable);
     long countRefundRequestsUpdatedBefore(Instant before);
