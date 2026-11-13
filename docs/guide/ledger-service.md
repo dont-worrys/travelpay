@@ -1,6 +1,6 @@
 # 원장 서비스 실행·사용 가이드
 
-ledger-service는 모든 도메인(충전·송금·결제·환불·환전)의 자금 이동을 복식부기로 기록합니다. 계정별 잔액을 가지고 있고, 거래 하나의 항목을 한 DB 트랜잭션으로 함께 반영하거나 함께 거절합니다. 다른 서비스가 내부 API로만 호출하며 Gateway로 열지 않습니다.
+ledger-service는 모든 도메인(충전·송금·결제·환불·환전·정산)의 자금 이동을 복식부기로 기록합니다. 계정별 잔액을 가지고 있고, 거래 하나의 항목을 한 DB 트랜잭션으로 함께 반영하거나 함께 거절합니다. 다른 서비스가 내부 API로만 호출하며 Gateway로 열지 않습니다.
 
 ## 로컬 실행
 
@@ -76,7 +76,7 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 
 | 항목 | 규칙 |
 |---|---|
-| `referenceType` | 필수. `CHARGE`·`PAYMENT`·`PAYMENT_REFUND`·`TRANSFER`·`EXCHANGE` |
+| `referenceType` | 필수. `CHARGE`·`PAYMENT`·`PAYMENT_REFUND`·`TRANSFER`·`EXCHANGE`·`SETTLEMENT` |
 | `referenceId` | 필수, UUID. 도메인의 원 거래 ID(충전 ID, 송금 ID 등) |
 | `userId` | 선택. 기록용이며 계정 조회에 쓰지 않음 |
 | `description` | 선택, 255자 이하 |
@@ -87,7 +87,7 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 | `entries[].currency` | `KRW`·`JPY`·`CNY` |
 | `entries[].direction` | `DEBIT`(차변, 잔액 감소) 또는 `CREDIT`(대변, 잔액 증가) |
 | `entries[].amount` | 0보다 큰 정수 |
-| `entries[].entryType` | [entry_type 허용 값](#entry_type-허용-값) 11개 중 하나 |
+| `entries[].entryType` | [entry_type 허용 값](#entry_type-허용-값) 13개 중 하나 |
 
 ### 계정 지정
 
@@ -103,7 +103,7 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 - 항목 2건 이상 20건 이하
 - 통화별로 `DEBIT` 합 = `CREDIT` 합
 - 금액은 0보다 큼. 금액 0 항목은 보내지 않습니다(예: 환전 수수료 0이면 수수료 쌍을 뺌)
-- `entryType`은 허용 값 11개 중 하나
+- `entryType`은 허용 값 13개 중 하나
 - 요청 enum(`referenceType`·`ownerType`·`accountType`·`currency`·`direction`·`entryType`)은 **정확한 이름 문자열만** 받습니다. 숫자(`0`), 숫자 문자열(`"0"`), 소문자(`"charge_in"`)는 400 `COMMON_INVALID_REQUEST`입니다.
 
 ### 반영과 거절 판단
@@ -114,6 +114,9 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 4. 하나라도 `ACTIVE`가 아니면 `WALLET_SUSPENDED`로 거절합니다.
 5. 계정별 순변동(대변 합 − 차변 합)을 더해 `USER` 계정 잔액이 음수가 되면 `INSUFFICIENT_BALANCE`로 거절합니다. `SYSTEM` 계정은 음수를 허용합니다. 항목 순서와 관계없이 순변동으로 판단합니다.
 6. 거래·항목·잔액을 한 트랜잭션으로 저장합니다(제한 시간 3초).
+
+- 항목 INSERT와 계정 UPDATE는 JDBC batch(`spring.jpa.properties.hibernate.jdbc.batch_size: 50`, `order_inserts`·`order_updates: true`, `application.yml`·`application-prod.yml`)로 커밋 때 묶어 보냅니다. 계정을 잠근 뒤 DB 왕복을 줄여 잠금 보유 시간을 줄이기 위해서입니다(#294). 송금 수취인 집중 측정에서 잠금 뒤 왕복이 6회 → 4회, 건당 잠금 보유 시간이 6.69ms → 5.93ms였습니다.
+- 거래 INSERT는 `saveAndFlush`로 따로 보내, 같은 reference 충돌(UNIQUE 위반)이 나는 시점은 batch를 켜기 전과 같습니다.
 
 ### 계정 잠금 순서
 
@@ -141,12 +144,12 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 | 환전(보내는 금액) | `EXCHANGE` | `USER` 지갑(보내는 통화), `EXCHANGE_OUT` | `SYSTEM FX_POSITION`(보내는 통화), `EXCHANGE_OUT` |
 | 환전(수수료) | `EXCHANGE` | `USER` 지갑(보내는 통화), `EXCHANGE_FEE` | `SYSTEM FEE_REVENUE`(보내는 통화), `EXCHANGE_FEE` |
 | 환전(받는 금액) | `EXCHANGE` | `SYSTEM FX_POSITION`(받는 통화), `EXCHANGE_IN` | `USER` 지갑(받는 통화), `EXCHANGE_IN` |
-| 정산 | `SETTLEMENT` | (결제 담당 확인 중), `SETTLEMENT_OUT` | (결제 담당 확인 중), `SETTLEMENT_IN` |
+| 정산 | `SETTLEMENT` | `USER` 가맹점 지갑, `SETTLEMENT_OUT` | `USER` 가맹점 주인 개인 지갑, `SETTLEMENT_IN` |
 
 - 환전은 한 거래에 6항목(수수료 0이면 4항목)입니다. 통화별로 차변·대변이 맞습니다.
 - 환불은 `originalTransactionId`에 결제의 원장 거래 ID를 넣습니다.
 - 충전은 원화만 있습니다(`CHARGE_SOURCE` 계정이 KRW뿐).
-- - 정산은 V7에서 참조 유형과 항목 유형만 추가했습니다. 차변·대변 계정은 결제 담당 확인 후 채웁니다.
+- 정산은 가맹점 지갑의 정산금을 가맹점 주인의 개인 지갑으로 옮깁니다(결제 서비스 `PaymentLedgerFeignClient` 기준). 두 항목 모두 `USER` 계정입니다.
 
 ### 응답
 
@@ -453,7 +456,7 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 ```
 
 - `LedgerRequestHasherTest`는 DB 없이 실행됩니다.
-- DB 통합 테스트(`LedgerEntryTypeIntegrationTest`, `LedgerTransactionQueryIntegrationTest`, `LedgerTransactionPeriodIntegrationTest`, `LedgerSameReferenceIntegrationTest`, `LedgerOppositeTransferIntegrationTest`, `LedgerDatabaseFailureIntegrationTest`)는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `.env`나 로컬 compose DB는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
+- DB 통합 테스트(`LedgerEntryTypeIntegrationTest`, `LedgerTransactionQueryIntegrationTest`, `LedgerTransactionPeriodIntegrationTest`, `LedgerSameReferenceIntegrationTest`, `LedgerOppositeTransferIntegrationTest`, `LedgerDatabaseFailureIntegrationTest`, `LedgerCancelIntegrationTest`, `ConnectionIsolationIntegrationTest`)는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `.env`나 로컬 compose DB는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
 
 ### 성능 측정
 
@@ -475,7 +478,7 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 | 취소·되돌림 분개 | `originalTransactionId`와 원거래 존재 검사만 있음. 되돌림용 entry_type 없음 | 완료된 송금 등의 취소 분개(referenceType·entryType, 원거래 연결) |
 | referenceType별 추가 검증 | 없음(코드 TODO) | 환불의 원거래 상태·중복·금액 등 유형별 정책. 해당 도메인 담당이 추가 |
 | `MERCHANT` 계정 지정 | 요청에 쓰면 400. 가맹점은 `USER` + 가맹점 ID 지갑 계정 사용 | 가맹점 계정 지정 방식 |
-| `CHARGE_SOURCE` 잠금 | 모든 충전이 같은 계정을 잠금(핫 계정) | 성능 측정 후 개선 |
+| `CHARGE_SOURCE` 잠금 | 모든 충전이 같은 계정을 잠금(핫 계정). 충전 동시성 3(초당 약 200건)에서 원장 잠금 대기 평균 0.03으로 측정 범위에서는 병목이 아니었음(지갑 부하 측정 README 2026-11-10) | 목표 처리량이 정해지면 배포 구성에서 다시 측정 |
 | DB 장애 503 처리 위치 | `LedgerDatabaseExceptionHandler`(원장 전용) | common 처리기로 이전 |
 | 계정 상태 변경 | `SUSPENDED`·`CLOSED` 값은 있으나 바꾸는 API 없음 | 정지·해지 절차 |
 | 같은 reference 충돌 로그 | 동시 요청의 정상 UNIQUE 충돌 처리 중 Hibernate `SqlExceptionHelper`(로거 `org.hibernate.orm.jdbc.error`)가 충돌 1건당 WARN 두 줄(`SQLState: 23505`, `duplicate key value violates unique constraint "uk_ledger_transactions_reference"`)을 남김. 동시성 테스트 3개 시나리오에서 관측. 정상 처리 과정의 로그라 버그로 단정하지 않음 | 로그 노이즈를 줄일지(운영 개선 후보) |
