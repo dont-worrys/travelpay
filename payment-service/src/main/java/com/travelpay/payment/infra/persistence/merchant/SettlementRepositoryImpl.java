@@ -37,8 +37,19 @@ public class SettlementRepositoryImpl implements SettlementRepository {
     }
 
     @Override
-    public Page<Settlement> findPageByMerchantId(UUID merchantId, Pageable pageable) {
-        return settlementJpaRepository.findByMerchantId(merchantId, pageable);
+    public Page<Settlement> findPageByMerchantId(UUID merchantId, SettlementStatus status, Pageable pageable) {
+        if (status == null) {
+            return settlementJpaRepository.findByMerchantId(merchantId, pageable);
+        }
+        return settlementJpaRepository.findByMerchantIdAndStatus(merchantId, status, pageable);
+    }
+
+    @Override
+    public Page<Settlement> findPageByOwnerUserId(UUID ownerUserId, SettlementStatus status, Pageable pageable) {
+        if (status == null) {
+            return settlementJpaRepository.findByOwnerUserId(ownerUserId, pageable);
+        }
+        return settlementJpaRepository.findByOwnerUserIdAndStatus(ownerUserId, status, pageable);
     }
 
     @Override

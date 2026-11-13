@@ -50,6 +50,9 @@ public class Settlement {
 
     private UUID ledgerTransactionId;
 
+    // PAID를 확정한 시각. PAID일 때만 있음
+    private Instant paidAt;
+
     private String failureReason;
 
     private int attemptCount;
@@ -93,6 +96,7 @@ public class Settlement {
         Objects.requireNonNull(ledgerTransactionId);
         changeStatus(SettlementStatus.REQUESTED, SettlementStatus.PAID);
         this.ledgerTransactionId = ledgerTransactionId;
+        this.paidAt = Instant.now();
     }
 
     // 원장 거절. 거절 사유를 남깁니다.
@@ -107,6 +111,7 @@ public class Settlement {
         Objects.requireNonNull(ledgerTransactionId);
         changeStatus(SettlementStatus.MANUAL_REVIEW, SettlementStatus.PAID);
         this.ledgerTransactionId = ledgerTransactionId;
+        this.paidAt = Instant.now();
         this.reviewReason = null;
     }
 

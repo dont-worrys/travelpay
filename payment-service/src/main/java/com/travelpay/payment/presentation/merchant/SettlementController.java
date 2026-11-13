@@ -5,6 +5,7 @@ import com.travelpay.common.auth.web.CurrentUser;
 import com.travelpay.common.response.ApiResponse;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.application.merchant.SettlementService;
+import com.travelpay.payment.domain.merchant.SettlementStatus;
 import com.travelpay.payment.presentation.merchant.dto.SettlementDetailResponse;
 import com.travelpay.payment.presentation.merchant.dto.SettlementPreviewResponse;
 import com.travelpay.payment.presentation.merchant.dto.SettlementResponse;
@@ -30,9 +31,11 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 // 가맹점 정산 API (가맹점 주인·MASTER). 정산금은 가맹점 원장 지갑에서 주인 회원 지갑으로 갑니다.
 @Tag(name = "정산", description = "가맹점 주인·MASTER의 정산 미리보기·요청·조회. 정산금은 가맹점 원장 지갑에서 주인 회원 지갑으로 감")
 @RestController
-@RequestMapping("/api/v1/payments/merchants/{merchantId}/settlements")
+@RequestMapping("/api/v1/payments")
 @RequiredArgsConstructor
 public class SettlementController {
+
+    private static final String MERCHANT_SETTLEMENTS = "/merchants/{merchantId}/settlements";
 
     private final SettlementService settlementService;
 
@@ -42,7 +45,7 @@ public class SettlementController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "201",
                     description = "`PAID` 주인 지갑 입금 완료, `REQUESTED` 결과 확인 중(서버가 자동으로 다시 처리), `MANUAL_REVIEW` 운영자 확인 필요")
     })
-    @PostMapping
+    @PostMapping(MERCHANT_SETTLEMENTS)
     public ResponseEntity<ApiResponse<SettlementResponse>> requestSettlement(
             @CurrentUser AuthenticatedUser user,
             @PathVariable UUID merchantId,
@@ -58,7 +61,7 @@ public class SettlementController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
                     description = "`available` 지금 정산 가능한 전체, `nextSettlement` 다음 요청 한 번에 들어갈 몫(최대 1,000건), `waiting` 환불 기간을 기다리는 금액, `nextAvailableAt` 가장 빠른 정산 가능 시각")
     })
-    @GetMapping("/preview")
+    @GetMapping(MERCHANT_SETTLEMENTS + "/preview")
     public ResponseEntity<ApiResponse<SettlementPreviewResponse>> previewSettlement(
             @CurrentUser AuthenticatedUser user,
             @PathVariable UUID merchantId) {
@@ -70,16 +73,34 @@ public class SettlementController {
     @Operation(summary = "정산 목록")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
-                    description = "최신순 페이지. 항목마다 포함된 결제 수(`paymentCount`)")
+                    description = "최신순 페이지. 항목마다 포함된 결제 수(`paymentCount`). 입금된 정산만 보려면 `status=PAID`로 거름")
     })
-    @GetMapping
+    @GetMapping(MERCHANT_SETTLEMENTS)
     public ResponseEntity<ApiResponse<PageResponse<SettlementResponse>>> getSettlements(
             @CurrentUser AuthenticatedUser user,
             @PathVariable UUID merchantId,
+            @RequestParam(required = false) SettlementStatus status,
             @RequestParam(defaultValue = "0") @Min(0) int page,
             @RequestParam(defaultValue = "20") @Min(1) int size) {
         PageResponse<SettlementResponse> response = PageResponse.from(
-                settlementService.getSettlements(user, merchantId, page, size), SettlementResponse::from);
+                settlementService.getSettlements(user, merchantId, status, page, size), SettlementResponse::from);
+        return ResponseEntity.ok(ApiResponse.success(response));
+    }
+
+    // 내 정산 목록: 가맹점 구분 없이 내가 정산금을 받은 정산 전체
+    @Operation(summary = "내 정산 목록")
+    @ApiResponses({
+            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
+                    description = "내가 주인인 모든 가맹점의 정산을 최신순으로 합친 페이지. 가맹점은 항목의 `merchantId`로 구분. `status`로 거름")
+    })
+    @GetMapping("/settlements/me")
+    public ResponseEntity<ApiResponse<PageResponse<SettlementResponse>>> getMySettlements(
+            @CurrentUser AuthenticatedUser user,
+            @RequestParam(required = false) SettlementStatus status,
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "20") @Min(1) int size) {
+        PageResponse<SettlementResponse> response = PageResponse.from(
+                settlementService.getMySettlements(user, status, page, size), SettlementResponse::from);
         return ResponseEntity.ok(ApiResponse.success(response));
     }
 
@@ -88,7 +109,7 @@ public class SettlementController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
                     description = "정산과 포함된 결제(`items`). `FAILED` 정산은 `items`가 비어 있음")
     })
-    @GetMapping("/{settlementId}")
+    @GetMapping(MERCHANT_SETTLEMENTS + "/{settlementId}")
     public ResponseEntity<ApiResponse<SettlementDetailResponse>> getSettlement(
             @CurrentUser AuthenticatedUser user,
             @PathVariable UUID merchantId,

@@ -21,6 +21,12 @@ public interface SettlementJpaRepository extends JpaRepository<Settlement, UUID>
 
     Page<Settlement> findByMerchantId(UUID merchantId, Pageable pageable);
 
+    Page<Settlement> findByMerchantIdAndStatus(UUID merchantId, SettlementStatus status, Pageable pageable);
+
+    Page<Settlement> findByOwnerUserId(UUID ownerUserId, Pageable pageable);
+
+    Page<Settlement> findByOwnerUserIdAndStatus(UUID ownerUserId, SettlementStatus status, Pageable pageable);
+
     @Query(nativeQuery = true, value = """
             select * from settlements
             where status = 'REQUESTED'
