@@ -27,19 +27,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Docker 부재로 통합 테스트가 생략되지 않도록 캐시 복원 전에 확인합니다.
+      - name: Check Docker
+        timeout-minutes: 1
+        run: docker info > /dev/null
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21"
-      # Gradle wrapper 검증과 의존성 캐시를 맡습니다. 캐시는 기본 브랜치(dev)에서만 쓰고 PR에서는 읽기만 합니다.
+      # Gradle wrapper 검증과 의존성·빌드 캐시를 맡습니다. 캐시는 기본 브랜치(dev)에서만 저장하고 PR·main에서는 읽기만 합니다.
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-        # 측정 중(chore/245-ci-speed): 빌드 캐시를 재려고 이 PR에서도 캐시를 저장하게 잠시 허용합니다.
-        # PR이 저장한 캐시는 그 PR 실행에서만 복원됩니다(GitHub 캐시 범위). 측정 뒤 이 두 줄을 지웁니다.
-        with:
-          cache-read-only: false
-      # 서비스 통합 테스트가 Testcontainers로 Docker를 씁니다. GitHub 실행기에는 Docker가 있습니다.
-      # 서로 다른 모듈의 작업을 동시에 돌립니다(3회 측정: Gradle 작업 중간값 575초 → 409초).
-      # 측정 중(chore/245-ci-speed): 빌드 캐시로 입력이 같은 작업의 결과를 다시 씁니다.
+      # 서로 다른 모듈의 작업을 동시에 돌리고(--parallel), 입력이 같은 작업은 dev가 저장한 빌드 캐시의 결과를 씁니다(--build-cache).
+      # 측정 결과와 주의 사항은 docs/guide/ci-cd.md의 "실행 시간"에 있습니다.
       - run: ./gradlew build --parallel --build-cache
       - name: Upload test reports
         if: failure()
