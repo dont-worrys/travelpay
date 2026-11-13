@@ -27,19 +27,19 @@ class ChargeSagaConcurrencyConfigTest {
             .withPropertyValues("travelpay.wallet.charge.saga.consumer.enabled=false");
 
     @Test
-    void 동시성_미설정이면_1() {
+    void 동시성_미설정이면_3() {
         runner.run(context -> {
             assertThat(context).hasNotFailed();
-            assertThat(concurrencyOf(context.getBean(KafkaListenerEndpointRegistry.class))).isEqualTo(1);
+            assertThat(concurrencyOf(context.getBean(KafkaListenerEndpointRegistry.class))).isEqualTo(3);
         });
     }
 
     @Test
     void 설정한_동시성이_리스너_컨테이너에_반영된다() {
-        runner.withPropertyValues("travelpay.wallet.charge.saga.consumer.concurrency=3")
+        runner.withPropertyValues("travelpay.wallet.charge.saga.consumer.concurrency=2")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
-                    assertThat(concurrencyOf(context.getBean(KafkaListenerEndpointRegistry.class))).isEqualTo(3);
+                    assertThat(concurrencyOf(context.getBean(KafkaListenerEndpointRegistry.class))).isEqualTo(2);
                 });
     }
 
