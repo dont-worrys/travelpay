@@ -38,7 +38,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Transactional
 class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
 
-    private static final String REQUEST_HASH = "0".repeat(64);
 
     // PostgreSQL의 uuid 비교(바이트 순서)와 같도록 소문자 문자열로 비교합니다. UUID.compareTo는 부호 있는 비교라 다릅니다.
     private static final Comparator<Transfer> NEWEST_FIRST = Comparator
@@ -69,7 +68,6 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
         assertEquals(saved.getId(), found.getId());
         assertEquals("KRW", found.getCurrency());
         assertEquals(TransferStatus.REQUESTED, found.getStatus());
-        assertEquals(REQUEST_HASH, found.getRequestHash());
         // 접수 응답의 생성 시각이 이후 조회한 DB 저장 값(마이크로초)과 정확히 같아야 합니다.
         assertEquals(saved.getCreatedAt(), found.getCreatedAt());
     }
@@ -429,7 +427,7 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
 
     private static Transfer processing(UUID senderId, String idempotencyKey) {
         return Transfer.process(senderId, UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
-                1_000L, "KRW", null, idempotencyKey, REQUEST_HASH);
+                1_000L, "KRW", null, idempotencyKey);
     }
 
     private static Transfer transfer(UUID senderId, UUID receiverId, String idempotencyKey, long amount) {
@@ -441,8 +439,7 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
                 amount,
                 "KRW",
                 null,
-                idempotencyKey,
-                REQUEST_HASH
+                idempotencyKey
         );
     }
 }

@@ -29,7 +29,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class TransferListApiIntegrationTest extends TransferApiIntegrationSupport {
 
-    private static final String REQUEST_HASH = "0".repeat(64);
 
     @Autowired
     private TransferRepository transferRepository;
@@ -161,7 +160,7 @@ class TransferListApiIntegrationTest extends TransferApiIntegrationSupport {
 
     private UUID save(UUID sender, UUID receiver, String key, Instant createdAt) {
         Transfer saved = transferRepository.saveAndFlush(Transfer.request(sender, receiver, UUID.randomUUID(),
-                UUID.randomUUID(), 1_000L, "KRW", null, key, REQUEST_HASH));
+                UUID.randomUUID(), 1_000L, "KRW", null, key));
         jdbcTemplate.update("update transfer set created_at = ? where id = ?",
                 createdAt.atOffset(ZoneOffset.UTC), saved.getId());
         return saved.getId();

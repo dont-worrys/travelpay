@@ -752,8 +752,7 @@ class TransferLedgerFlowTest {
 
     private Transfer savedProcessingTransfer(String idempotencyKey) {
         Transfer transfer = Transfer.process(SENDER_ID, RECEIVER_ID, SOURCE_WALLET_ID, TARGET_WALLET_ID,
-                REQUEST.amount(), REQUEST.currency(), REQUEST.memo(), idempotencyKey,
-                TransferRequestHasher.hash(RECEIVER_ID, REQUEST.amount(), REQUEST.currency(), REQUEST.memo()));
+                REQUEST.amount(), REQUEST.currency(), REQUEST.memo(), idempotencyKey);
         ReflectionTestUtils.setField(transfer, "id", UUID.randomUUID());
         ReflectionTestUtils.invokeMethod(transfer, "onCreate");
         store.put(transfer.getId(), transfer);

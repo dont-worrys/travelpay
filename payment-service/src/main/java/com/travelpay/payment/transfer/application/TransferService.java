@@ -2,6 +2,7 @@ package com.travelpay.payment.transfer.application;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -96,12 +97,10 @@ public class TransferService {
             throw new BusinessException(TransferErrorCode.INVALID_IDEMPOTENCY_KEY);
         }
         String memo = normalizeMemo(request.memo());
-        String requestHash = TransferRequestHasher.hash(
-                request.receiverId(), request.amount(), request.currency(), memo);
 
         var existing = transferRepository.findBySenderIdAndIdempotencyKey(senderId, idempotencyKey);
         if (existing.isPresent()) {
-            return replay(existing.get(), requestHash, senderId);
+            return replay(existing.get(), request, memo, senderId);
         }
 
         if (senderId.equals(request.receiverId())) {
@@ -123,9 +122,9 @@ public class TransferService {
         // 원장을 호출하기 전에 PROCESSING으로 커밋해, 결과를 모르는 송금도 기록에 남깁니다.
         Transfer transfer = ledgerClient.isPresent()
                 ? Transfer.process(senderId, request.receiverId(), sourceWalletId, targetWalletId,
-                        request.amount(), request.currency(), memo, idempotencyKey, requestHash)
+                        request.amount(), request.currency(), memo, idempotencyKey)
                 : Transfer.request(senderId, request.receiverId(), sourceWalletId, targetWalletId,
-                        request.amount(), request.currency(), memo, idempotencyKey, requestHash);
+                        request.amount(), request.currency(), memo, idempotencyKey);
         Transfer saved;
         try {
             saved = transferRepository.saveAndFlush(transfer);
@@ -133,7 +132,7 @@ public class TransferService {
             // 같은 키의 동시 요청이 먼저 저장되면 UNIQUE(sender_id, idempotency_key)에 걸립니다.
             Transfer concurrent = transferRepository.findBySenderIdAndIdempotencyKey(senderId, idempotencyKey)
                     .orElseThrow(() -> exception);
-            return replay(concurrent, requestHash, senderId);
+            return replay(concurrent, request, memo, senderId);
         }
         Transfer current = saved.getStatus() == TransferStatus.PROCESSING ? attempt(saved).transfer() : saved;
         return respond(current, senderId);
@@ -283,8 +282,17 @@ public class TransferService {
     private record AttemptResult(Transfer transfer, Outcome outcome) {
     }
 
-    private TransferResponse replay(Transfer transfer, String requestHash, UUID senderId) {
-        if (!transfer.getRequestHash().equals(requestHash)) {
+    /**
+     * 같은 키의 송금이 이미 있으면, 요청 내용이 그 송금에 저장된 값과 같을 때만 현재 결과로 응답합니다.
+     * 요청 필드(수취인·금액·통화·메모)는 모두 송금 행에 저장되므로 저장된 값과 직접 비교합니다.
+     * memo는 저장할 때와 같이 정규화한 값을 전달해야 합니다.
+     */
+    private TransferResponse replay(Transfer transfer, TransferCreateRequest request, String memo, UUID senderId) {
+        boolean sameRequest = transfer.getReceiverId().equals(request.receiverId())
+                && transfer.getAmount() == request.amount()
+                && transfer.getCurrency().equals(request.currency())
+                && Objects.equals(transfer.getMemo(), memo);
+        if (!sameRequest) {
             throw new BusinessException(TransferErrorCode.IDEMPOTENCY_KEY_REUSED);
         }
         return respond(transfer, senderId);
