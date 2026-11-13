@@ -19,7 +19,6 @@ import com.travelpay.ledger.domain.transaction.LedgerTransactionRepository;
 import com.travelpay.ledger.domain.transaction.ReferenceType;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
@@ -79,7 +78,7 @@ public class LedgerTransactionService {
         }
     }
 
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public TransactionDetailResult getByReference(ReferenceType referenceType, UUID referenceId) {
         Objects.requireNonNull(referenceType, "referenceType");
         Objects.requireNonNull(referenceId, "referenceId");
@@ -98,7 +97,7 @@ public class LedgerTransactionService {
      * size + 1건을 읽어 다음 페이지 여부를 정하고, 다음 커서는 돌려주는 마지막 행으로 만든다.
      * 항목은 페이지 거래 id를 모아 한 번에 읽는다 (거래가 없으면 읽지 않음).
      */
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public TransactionPeriodResult getByPeriod(TransactionPeriodQuery query) {
         Objects.requireNonNull(query, "query");
         ReferenceType referenceType = Objects.requireNonNull(query.referenceType(), "referenceType");
