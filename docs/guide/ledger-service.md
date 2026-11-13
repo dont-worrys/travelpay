@@ -124,6 +124,8 @@ Swagger UI는 없습니다(ledger-service에 springdoc 의존성이 없음). API
 - 같은 두 지갑 사이의 반대 방향 송금(A→B, B→A) 두 건이 모두 앞 계정에서 대기하는 동안, 다른 연결이 뒤 계정에 `FOR NO KEY UPDATE NOWAIT`를 걸어 바로 성공했습니다. 대기 중인 요청이 뒤 계정을 먼저 잠그지 않았다는 실행 근거입니다.
 - 반대 방향 동시 송금을 50회 반복한 검증에서 송금 형태(`TRANSFER_OUT`/`TRANSFER_IN`) 원장 거래 100건이 모두 `POSTED`되었고, DB 교착 횟수(`pg_stat_database.deadlocks`) 증가량은 0이었습니다.
 
+트랜잭션 격리 수준은 READ COMMITTED이며, 트랜잭션마다 명시하지 않고 Hikari 커넥션 설정(`spring.datasource.hikari.transaction-isolation: TRANSACTION_READ_COMMITTED`, `application.yml`·`application-prod.yml` 같은 블록)으로 고정합니다. 계정을 잠그고 기다린 뒤 최신 커밋 행을 읽는 동작이 이 격리 수준을 전제로 합니다.
+
 ### entry_type 허용 값
 
 `CHARGE_OUT`, `CHARGE_IN`, `PAYMENT_OUT`, `PAYMENT_IN`, `PAYMENT_REFUND_OUT`, `PAYMENT_REFUND_IN`, `EXCHANGE_OUT`, `EXCHANGE_IN`, `EXCHANGE_FEE`, `TRANSFER_OUT`, `TRANSFER_IN`, `SETTLEMENT_OUT`, `SETTLEMENT_IN`  (13개, `EntryType` enum과 V7 CHECK가 같음).
@@ -470,7 +472,6 @@ reference(`referenceType` + `referenceId`)가 원장의 멱등 키입니다. 헤
 | 항목 | 현재 동작 | 정할 것 |
 |---|---|---|
 | V5 CHECK 검증 | `NOT VALID`라 기존 행은 검사하지 않음 | 모든 환경의 옛 값 정리 후 `ALTER TABLE … VALIDATE CONSTRAINT ck_ledger_entries_entry_type` 마이그레이션 추가 시점 |
-| prod 설정 | `application-prod.yml`에 `spring.flyway.default-schema`·`schemas`와 Hikari `connection-timeout`·`validation-timeout`이 없음(`application.yml`에만 있음) | 배포 설정에 같은 값을 둘지 |
 | 취소·되돌림 분개 | `originalTransactionId`와 원거래 존재 검사만 있음. 되돌림용 entry_type 없음 | 완료된 송금 등의 취소 분개(referenceType·entryType, 원거래 연결) |
 | referenceType별 추가 검증 | 없음(코드 TODO) | 환불의 원거래 상태·중복·금액 등 유형별 정책. 해당 도메인 담당이 추가 |
 | `MERCHANT` 계정 지정 | 요청에 쓰면 400. 가맹점은 `USER` + 가맹점 ID 지갑 계정 사용 | 가맹점 계정 지정 방식 |
