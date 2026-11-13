@@ -16,9 +16,9 @@ public record AdminTransferHistoryResponse(
         TransferStatus toStatus,
         @Schema(description = "변경 사유")
         String reason,
-        @Schema(description = "변경 주체. OPERATOR 운영자")
+        @Schema(description = "변경 주체. OPERATOR 운영자, SYSTEM MANUAL_REVIEW 자동 대사")
         TransferStatusHistory.ActorType actorType,
-        @Schema(description = "변경한 운영자 회원 ID")
+        @Schema(description = "변경한 운영자 회원 ID. SYSTEM이면 없음", nullable = true)
         UUID actorId,
         @Schema(description = "확정 근거 원장 거래 ID. 재처리로 돌린 경우 없음", nullable = true)
         UUID ledgerTransactionId,

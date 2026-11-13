@@ -17,7 +17,11 @@
 //   AMOUNT 송금 금액(원, 기본 1). 측정 중 잔액이 바닥나지 않게 작게 둠
 //   GATEWAY 1이면 Gateway(BASE_URL=http://host.docker.internal:8080)를 거쳐 호출. 가상 사용자마다 처음에 한 번
 //          CSRF 발급 → 로그인 → CSRF 재발급을 하고, 세션 쿠키와 Csrf-Token 헤더로 송금 요청(User-Id 헤더 없음).
-//          로그인 이메일은 data/users.json의 senderEmail, 비밀번호는 prepare.py의 측정 전용 값
+//          로그인 이메일은 data/users.json의 senderEmail, 비밀번호는 prepare.py의 측정 전용 값.
+//          급증 측정(LOAD=spike)에서는 setup에서 송금인마다 한 번 로그인해 세션을 가상 사용자들이 나눠 씁니다.
+//          가상 사용자가 쌍 수보다 많아 같은 송금인을 여러 명이 맡고, 급증 중에 처음 쓰이는 가상 사용자가
+//          그때 로그인하면 로그인 시간이 급증 구간에 섞이기 때문입니다
+//   LOAD 등 급증 측정 변수는 k6-common.js
 //
 // 성공은 201(COMPLETED)입니다. 202(원장 결과 모름 → PROCESSING)와 422(잔액 부족 등)는 따로 세고,
 // 실패율(http_req_failed)에서는 빼고 결과 JSON의 오류율(429·기타 4xx·5xx·응답 없음)로 판단합니다.
@@ -25,7 +29,8 @@
 import http from 'k6/http';
 import exec from 'k6/execution';
 import {
-    BASE_URL, DURATION, LABEL, VUS, count, currentPhase, options as baseOptions, parseSeconds, round, summarize,
+    BASE_URL, LABEL, MEASURE_SECONDS, SPIKE, VUS, count, currentPhase, currentStage, options as baseOptions, round,
+    summarize,
 } from './k6-common.js';
 
 const MODE = __ENV.MODE || 'spread';
@@ -71,8 +76,26 @@ export function setup() {
         // 송금인이 겹치면 spread가 아니므로 막는다(송금인 계정 잠금이 겹침)
         throw new Error(`spread는 VUS(${__ENV.VUS}) 이하의 송금인이 필요합니다. 준비된 쌍: ${DATA.pairs.length}`);
     }
+    if (SPIKE && MODE === 'mixed') {
+        throw new Error('급증 측정(LOAD=spike)은 mixed를 지원하지 않습니다(가상 사용자 번호로 그룹을 나눌 수 없음)');
+    }
     // 실행마다 다른 멱등성 키 접두사 (같은 키 재요청이 섞이지 않게)
-    return { runId: `${LABEL}-${Date.now()}` };
+    return { runId: `${LABEL}-${Date.now()}`, sessions: SPIKE && GATEWAY ? loginAll() : null };
+}
+
+/** 급증 측정 + Gateway: 송금인마다 한 번 로그인해 세션 쿠키와 CSRF 토큰을 모은다 */
+function loginAll() {
+    const jar = http.cookieJar();
+    const sessions = {};
+    for (const email of new Set(DATA.pairs.map((pair) => pair.senderEmail))) {
+        jar.clear(BASE_URL);
+        const token = login(email);
+        const cookies = Object.fromEntries(Object.entries(jar.cookiesForURL(BASE_URL))
+            .map(([name, values]) => [name, values[0]]));
+        sessions[email] = { cookies, csrf: token };
+    }
+    jar.clear(BASE_URL);
+    return sessions;
 }
 
 /** Gateway 세션 로그인: CSRF 발급 → 로그인 → (세션 ID가 바뀌므로) CSRF 재발급. 쿠키는 가상 사용자별 쿠키 저장소가 보관 */
@@ -100,7 +123,7 @@ export default function (setupData) {
     };
     if (GATEWAY) {
         if (csrf === null) {
-            csrf = login(sender.senderEmail);
+            csrf = setupData.sessions ? useSession(setupData.sessions[sender.senderEmail]) : login(sender.senderEmail);
         }
         headers[csrf.headerName] = csrf.token;
     } else {
@@ -108,13 +131,26 @@ export default function (setupData) {
         headers['User-Role'] = 'USER';
     }
     const phase = currentPhase();
+    const stage = currentStage();
     const tags = { phase, name: 'POST /api/v1/transfers' };
     if (group) {
         tags.group = group;
     }
+    if (stage) {
+        tags.stage = stage;
+    }
     const response = http.post(`${BASE_URL}/api/v1/transfers`,
         JSON.stringify({ receiverId, amount: AMOUNT, currency: 'KRW' }), { headers, tags });
-    count(response, phase, response.status === 201);
+    count(response, phase, response.status === 201, stage);
+}
+
+/** setup에서 받은 세션 쿠키를 이 가상 사용자의 쿠키 저장소에 넣고 CSRF 토큰을 돌려준다 */
+function useSession(session) {
+    const jar = http.cookieJar();
+    for (const [name, value] of Object.entries(session.cookies)) {
+        jar.set(BASE_URL, name, value);
+    }
+    return session.csrf;
 }
 
 /** 가상 사용자 번호(1부터)로 송금인·수취인을 정한다 */
@@ -162,10 +198,10 @@ function groupSummary(data, measureSeconds) {
 export function handleSummary(data) {
     const extra = { mode: MODE, amount: AMOUNT, gateway: GATEWAY };
     if (MODE !== 'mixed') {
-        return summarize(data, `송금 요청(${MODE}${GATEWAY ? ', Gateway' : ''})`, extra);
+        return summarize(data, `송금 요청(${MODE}${GATEWAY ? ', Gateway' : ''}${SPIKE ? ', 급증' : ''})`, extra);
     }
     extra.hotVus = HOT_VUS;
-    extra.groups = groupSummary(data, parseSeconds(DURATION));
+    extra.groups = groupSummary(data, MEASURE_SECONDS);
     const output = summarize(data, `송금 요청(mixed, hot ${HOT_VUS}명)`, extra);
     const lines = GROUPS.map((group) => {
         const g = extra.groups[group];

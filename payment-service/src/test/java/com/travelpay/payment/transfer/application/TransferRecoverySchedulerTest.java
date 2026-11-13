@@ -17,20 +17,23 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class TransferRecoverySchedulerTest {
 
     private TransferService transferService;
+    private TransferReviewReconciler reviewReconciler;
     private SimpleMeterRegistry meterRegistry;
     private TransferRecoveryScheduler scheduler;
 
     @BeforeEach
     void setUp() {
         transferService = mock(TransferService.class);
+        reviewReconciler = mock(TransferReviewReconciler.class);
         meterRegistry = new SimpleMeterRegistry();
-        scheduler = new TransferRecoveryScheduler(transferService, meterRegistry);
+        scheduler = new TransferRecoveryScheduler(transferService, reviewReconciler, meterRegistry);
         when(transferService.findStuckProcessing(any(), anyInt())).thenReturn(new StuckTransfers(0, List.of()));
     }
 
@@ -87,6 +90,28 @@ class TransferRecoverySchedulerTest {
         when(transferService.findStuckProcessing(any(), anyInt())).thenThrow(new IllegalStateException("db down"));
 
         assertDoesNotThrow(scheduler::recover);
+    }
+
+    /** MANUAL_REVIEW 자동 대사는 첫 주기와 그 뒤 6주기마다 10건씩 실행합니다. */
+    @Test
+    void reconcilesManualReviewEverySixCycles() {
+        for (int i = 0; i < 13; i++) {
+            scheduler.recover();
+        }
+
+        verify(transferService, times(13)).recoverDue(any(), eq(10));
+        verify(reviewReconciler, times(3)).reconcile(any(), eq(10));
+    }
+
+    /** 자동 대사가 실패해도 예외를 밖으로 던지지 않고 알림 수치는 갱신합니다. */
+    @Test
+    void reportsCountsEvenWhenReconcileFails() {
+        when(reviewReconciler.reconcile(any(), anyInt())).thenThrow(new IllegalStateException("ledger down"));
+        when(transferService.countManualReview()).thenReturn(2L);
+
+        assertDoesNotThrow(scheduler::recover);
+
+        assertEquals(2.0, gauge("transfer.manual_review"));
     }
 
     private double gauge(String name) {
