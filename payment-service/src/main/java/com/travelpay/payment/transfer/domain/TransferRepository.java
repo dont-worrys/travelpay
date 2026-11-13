@@ -56,24 +56,44 @@ public interface TransferRepository extends JpaRepository<Transfer, UUID>, JpaSp
     int finishProcessing(UUID transferId, TransferStatus status, TransferFailureReason failureReason, Instant updatedAt);
 
     /**
-     * 복구 대상: 처리 중이고 재시도 대기 시간(30초 × 2^max(attempt_count - 1, 0))이 지난 송금을 수정 시각 오래된 순으로 조회합니다.
-     * 지갑 충전 복구와 같은 간격(30초 → 1분 → 2분 → 4분)입니다. 첫 updated_at 조건은 대기 시간의 하한으로,
-     * 부분 인덱스(ix_transfer_processing_updated_at) 범위 스캔을 쓰게 하려는 중복 조건입니다.
+     * 복구 대상 선점: 처리 중이고 재시도 대기 시간(30초 × 2^max(attempt_count - 1, 0))이 지난 송금을 수정 시각 오래된 순으로
+     * 최대 limit건 잠그고, 수정 시각을 선점 시각(claimedAt)으로 바꿔 선점한 송금을 같은 순서로 반환합니다(한 문장, 자체 트랜잭션으로 커밋).
+     * <ul>
+     *     <li>다른 서버가 잠근 행은 기다리지 않고 건너뛰므로(SKIP LOCKED) 서버마다 서로 다른 송금을 가져갑니다.</li>
+     *     <li>커밋 뒤에는 수정 시각이 바뀌어 대기 시간이 다시 시작되므로, 다른 서버가 같은 송금을 바로 다시 가져가지 않습니다.
+     *         원장 호출은 커밋 뒤 트랜잭션 밖에서 합니다.</li>
+     *     <li>지갑 충전 복구와 같은 간격(30초 → 1분 → 2분 → 4분)입니다. 첫 updated_at 조건은 대기 시간의 하한으로,
+     *         부분 인덱스(ix_transfer_processing_updated_at) 범위 스캔을 쓰게 하려는 중복 조건입니다.</li>
+     * </ul>
+     * now는 대기 시간 판단 기준(테스트에서 미래 시각을 넣을 수 있음), claimedAt은 실제로 기록할 선점 시각입니다.
      */
+    @Transactional
     @Query(nativeQuery = true, value = """
-            select * from transfer
-            where status = 'PROCESSING'
-              and updated_at < cast(:now as timestamptz) - interval '30 seconds'
-              and updated_at < cast(:now as timestamptz)
-                  - interval '30 seconds' * power(2, greatest(attempt_count - 1, 0))
-            order by updated_at, id
-            limit :limit
+            with picked as (
+                select id, updated_at from transfer
+                where status = 'PROCESSING'
+                  and updated_at < cast(:now as timestamptz) - interval '30 seconds'
+                  and updated_at < cast(:now as timestamptz)
+                      - interval '30 seconds' * power(2, greatest(attempt_count - 1, 0))
+                order by updated_at, id
+                limit :limit
+                for update skip locked
+            ), claimed as (
+                update transfer t set updated_at = cast(:claimedAt as timestamptz)
+                from picked p
+                where t.id = p.id
+                returning t.*
+            )
+            select c.* from claimed c join picked p on p.id = c.id
+            order by p.updated_at, p.id
             """)
-    List<Transfer> findRecoveryTargets(Instant now, int limit);
+    List<Transfer> claimRecoveryTargets(Instant now, Instant claimedAt, int limit);
 
     /**
-     * 복구 선점: 조회 이후 아무도 바꾸지 않았을 때(상태·수정 시각이 그대로)만 수정 시각을 갱신하고 변경된 행 수를 반환합니다.
-     * 여러 인스턴스가 같은 송금을 동시에 다시 요청하지 않게 합니다.
+     * 선점 확인: 원장 호출 직전, 처리 중이고 수정 시각이 일괄 선점 때 기록한 값(claimedAt) 그대로일 때만 수정 시각을 지금으로 갱신하고
+     * 변경된 행 수(0 또는 1)를 반환합니다. 0이면 선점 뒤 시간이 지나 다른 서버가 다시 선점했거나 그 사이 결과가 반영된 것입니다.
+     * 갱신으로 대기 시간이 실제 원장 호출 시점부터 다시 시작되므로, 한 주기의 뒤쪽 송금도 호출 중에 다른 서버가 가져가지 않습니다.
+     * 원장 호출 전에 커밋되도록 자체 트랜잭션으로 실행합니다.
      */
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
@@ -82,9 +102,9 @@ public interface TransferRepository extends JpaRepository<Transfer, UUID>, JpaSp
             set t.updatedAt = :now
             where t.id = :transferId
               and t.status = com.travelpay.payment.transfer.domain.TransferStatus.PROCESSING
-              and t.updatedAt = :seenUpdatedAt
+              and t.updatedAt = :claimedAt
             """)
-    int claimForRecovery(UUID transferId, Instant seenUpdatedAt, Instant now);
+    int renewRecoveryClaim(UUID transferId, Instant claimedAt, Instant now);
 
     /**
      * 결과 모름 기록: 처리 중이고 시도 횟수가 기대값일 때만 횟수를 1 늘리고 상태를 바꿉니다.
