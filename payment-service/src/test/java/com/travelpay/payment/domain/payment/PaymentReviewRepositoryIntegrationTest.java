@@ -352,6 +352,36 @@ class PaymentReviewRepositoryIntegrationTest extends PostgresContainerSupport {
         assertFalse(page2.stream().map(Refund::getId).toList().contains(recent.getId()));
     }
 
+    // 복구 일괄 선점 (서버끼리 나눠 갖는 동작은 PaymentSchedulerMultiServerIntegrationTest)
+
+    @Test
+    void recoveryClaimTakesWaitingPendingPaymentsAndRequestedRefundsAndMovesUpdatedAt() {
+        Payment pending = savePayment(PaymentStatus.PENDING, null);
+        Payment manualReview = savePayment(PaymentStatus.MANUAL_REVIEW, SettlementReviewReason.RETRY_EXHAUSTED);
+        Refund requested = saveRefund(pending.getId(), RefundStatus.REQUESTED, null);
+        jdbcTemplate.update("update payments set updated_at = timestamptz '2000-01-01 00:00:00+00' where id in (?, ?)",
+                pending.getId(), manualReview.getId());
+        jdbcTemplate.update("update refunds set updated_at = timestamptz '2000-01-01 00:00:00+00' where id = ?",
+                requested.getId());
+        entityManager.clear();
+        Instant now = Instant.now();
+        Instant claimedAt = Instant.parse("2026-11-13T00:00:00Z");
+
+        List<Payment> payments = paymentRepository.claimRecoveryTargets(now, claimedAt, 1000);
+        List<Refund> refunds = refundRepository.claimRecoveryTargets(now, claimedAt, 1000);
+
+        Payment claimedPayment = payments.stream().filter(p -> p.getId().equals(pending.getId())).findFirst()
+                .orElseThrow();
+        assertEquals(claimedAt, claimedPayment.getUpdatedAt());
+        assertFalse(payments.stream().anyMatch(p -> p.getId().equals(manualReview.getId())));
+        Refund claimedRefund = refunds.stream().filter(r -> r.getId().equals(requested.getId())).findFirst()
+                .orElseThrow();
+        assertEquals(claimedAt, claimedRefund.getUpdatedAt());
+        // 원장 호출 직전 확인은 선점 시각 그대로일 때만 통과
+        assertEquals(1, paymentRepository.claimForRecovery(pending.getId(), claimedAt, now));
+        assertEquals(1, refundRepository.claimForRecovery(requested.getId(), claimedAt, now));
+    }
+
     @Test
     void paymentListIndexesExist() {
         List<String> indexes = jdbcTemplate.queryForList(

@@ -217,15 +217,15 @@ public class SettlementService {
         return SettlementDetailResult.from(settlement, merchant.getName(), items);
     }
 
-    // 재시도 대기가 지난 REQUESTED 정산을 선점해 같은 정산 ID로 원장에 다시 보냄
+    // 재시도 대기가 지난 REQUESTED 정산을 일괄 선점해 같은 정산 ID로 원장에 다시 보냄 (서버끼리 서로 다른 건)
     public RecoveryBatchResult recoverSettlements(Instant now, int limit) {
         int consecutiveUnknown = 0;
-        List<Settlement> targets = settlementRepository.findRecoveryTargets(now, limit);
+        List<Settlement> targets = settlementRepository.claimRecoveryTargets(now, Instant.now(), limit);
         for (Settlement target : targets) {
             boolean unknown;
             try {
                 if (settlementRepository.claimForRecovery(target.getId(), target.getUpdatedAt(), Instant.now()) == 0) {
-                    // 다른 인스턴스가 먼저 선점했거나 그 사이 결과가 반영됨
+                    // 원장 호출 직전 선점 확인: 일괄 선점 뒤 대기 시간이 지나 다른 서버가 다시 가져갔거나 그 사이 결과가 반영됨
                     continue;
                 }
                 // 선점으로 수정 시각·버전이 바뀌었을 수 있어 다시 읽어 보냄

@@ -53,8 +53,8 @@ public class SettlementRepositoryImpl implements SettlementRepository {
     }
 
     @Override
-    public List<Settlement> findRecoveryTargets(Instant now, int limit) {
-        return settlementJpaRepository.findRecoveryTargets(now, limit);
+    public List<Settlement> claimRecoveryTargets(Instant now, Instant claimedAt, int limit) {
+        return settlementJpaRepository.claimRecoveryTargets(now, claimedAt, limit);
     }
 
     @Override
