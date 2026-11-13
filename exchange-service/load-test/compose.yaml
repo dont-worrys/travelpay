@@ -64,6 +64,33 @@ services:
   # 실행마다 처리량이 2배 넘게 흔들렸습니다(README "측정 환경을 Docker 안에 두는 이유").
   # 이미지는 JRE가 아닌 JDK. #211 이전 jar(v0·v0.5·v1)는 가짜 환율 공급자가 RandomGenerator.getDefault()를 써서
   # jdk.random 모듈이 없는 Temurin JRE 이미지에서 시작하다 실패합니다. 이전 jar와 같은 조건으로 재려고 JDK를 유지합니다.
+  # 가짜 지갑·원장(#282). 환전 신청 측정(measure-ledger.sh)에서만 띄운다(profile). 기존 환율·견적 측정은 지갑·원장을 부르지 않아 쓰지 않음.
+  # 원장 응답 지연은 measure-ledger.sh가 관리 API로 회차마다 바꾼다(wiremock/mappings/ledger-register.json).
+  # 지연 응답은 비동기로 보내(async-response) 느린 원장을 흉내 내는 동안 WireMock 스레드가 모자라지 않게 하고,
+  # 요청 기록(journal)은 쌓이면 메모리를 먹어 끈다
+  ledger-stub:
+    image: ${WIREMOCK_IMAGE:-wiremock/wiremock:3.9.1}
+    profiles: ["stub"]
+    command:
+      - --port=8080
+      - --async-response-enabled=true
+      - --async-response-threads=50
+      - --container-threads=400
+      - --no-request-journal
+      - --disable-banner
+    environment:
+      JAVA_OPTS: -Xmx256m
+    volumes:
+      - ./wiremock:/home/wiremock:ro
+    ports:
+      # 손으로 확인할 때만 쓰는 PC 쪽 포트. 앱은 Docker 네트워크 안에서 ledger-stub:8080으로 부름
+      - "127.0.0.1:18090:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/__admin/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   app:
     image: ${APP_IMAGE:-eclipse-temurin:21.0.13_9-jdk}
     profiles: ["app"]
@@ -89,6 +116,10 @@ services:
       # 변수를 빠뜨린 측정도 공식 측정 조건이 되게 하고, Grafana 캡처용 측정만 MEASURE_HISTOGRAM=true로 켠다.
       # 값을 바꾸면 compose가 앱 컨테이너를 새로 만듦
       - --management.metrics.distribution.percentiles-histogram.http.server.requests=${MEASURE_HISTOGRAM:-false}
+      # 톰캣 요청 스레드 지표(tomcat_threads_busy_threads)를 내보냄(#282, 원장 지연이 요청 스레드를 붙잡는지 봄).
+      # 켜면 톰캣 MBean을 등록해 실행 조건이 달라지므로 기본은 꺼 두어 기존 환율·견적 측정과 조건을 같게 한다.
+      # measure-ledger.sh만 MEASURE_TOMCAT_THREADS=true로 켠다
+      - --server.tomcat.mbeanregistry.enabled=${MEASURE_TOMCAT_THREADS:-false}
     environment:
       EXCHANGE_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=exchange_service
       EXCHANGE_DB_USERNAME: exchange_app
@@ -98,6 +129,10 @@ services:
       REDIS_CACHE_HOST: measure-redis
       REDIS_CACHE_PORT: "6379"
       REDIS_CACHE_PASSWORD: load-test-only
+      # 지갑·원장 주소(#282). 비어 있으면 앱 기본값(Eureka에서 찾음)과 같다. 기존 측정은 지갑·원장을 부르지 않아 비워 둔다.
+      # measure-ledger.sh가 가짜 지갑·원장(ledger-stub)으로 채운다
+      EXCHANGE_WALLET_URL: ${MEASURE_WALLET_URL:-}
+      EXCHANGE_LEDGER_URL: ${MEASURE_LEDGER_URL:-}
     ports:
       # 손으로 확인할 때만 쓰는 PC 쪽 포트. 측정(k6·지표 수집)은 Docker 네트워크 안에서 app:18084/18085로 요청함
       - "127.0.0.1:18084:18084"

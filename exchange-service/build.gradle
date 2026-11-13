@@ -19,6 +19,11 @@ dependencies {
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
 
+    // 원장 거래 등록을 서킷 브레이커로 감쌈(#282). 원장이 느리거나 응답하지 않을 때 요청 스레드·환율 수집 스레드가
+    // 원장을 기다리며 묶이지 않게 한다. 버전은 Spring Cloud BOM이 관리(payment-service와 같음)
+    implementation 'io.github.resilience4j:resilience4j-circuitbreaker'
+    implementation 'io.github.resilience4j:resilience4j-micrometer'
+
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
     runtimeOnly 'org.postgresql:postgresql'

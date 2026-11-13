@@ -89,6 +89,18 @@ exchange:
       enabled: true
       fixed-delay: 30s
       batch-size: 50
+  ledger:
+    # 원장 거래 등록 서킷 브레이커(#282). 최근 10초 동안 20건 이상 호출됐고 절반 이상이 실패(시간 초과·연결 실패·5xx)이거나
+    # 2초 이상 걸리면 열고, 10초 동안 원장에 보내지 않은 뒤 5건만 시험으로 보낸다. 열린 동안 주문은 PROCESSING으로 두고
+    # 복구 스케줄러가 확정한다. 값이 없으면 같은 기본값을 씀(LedgerCircuitBreakerProperties)
+    circuit-breaker:
+      sliding-window: 10s
+      minimum-calls: 20
+      failure-rate-percent: 50
+      slow-call-duration: 2s
+      slow-call-rate-percent: 50
+      wait-in-open: 10s
+      half-open-calls: 5
   reservation:
     # 예약 환전: 최대 예약 기간과 회원당 동시 대기 예약 수 (값이 없으면 같은 기본값을 씀)
     max-period: 30d

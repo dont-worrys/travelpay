@@ -282,6 +282,47 @@ sequenceDiagram
 - 신청 후 **24시간**이 지나도 결과를 모르면 `MANUAL_REVIEW`(`LEDGER_UNCONFIRMED_TOO_LONG`)로 보냅니다.
 - 끄려면 `exchange.order.recovery.enabled=false`. 이때 아래 정체·대기 지표도 갱신되지 않습니다.
 
+### 서킷 브레이커 (#282)
+
+원장이 느리거나 응답하지 않을 때, 원장을 부르는 쪽이 응답(최대 약 7초)을 기다리며 스레드를 붙잡지 않게 합니다. 원장 거래 등록(`LedgerClientAdapter.post`) 한 곳에 걸려 있어 원장을 부르는 경로가 모두 같은 서킷을 거칩니다.
+
+| 경로 | 붙잡히던 스레드 | 대책 없을 때 (개선 전 측정, 원장 시간 초과) | 해결 |
+|---|---|---|---|
+| 환전 신청 | 요청 스레드(Tomcat 200개) | 스레드가 모두 사용 중이 되어 원장과 상관없는 환율 조회·견적도 사용자 쪽에서 8~10초씩 기다림 | 서킷 |
+| 예약 체결 | 환율 수집 스레드(스케줄러 2개 중 1개) | 체결하는 동안 다음 수집이 늦어져 mock 환율이 30초 넘게 오래되면 견적이 503 | 체결 전용 스레드 분리([체결 흐름](#체결-흐름)) |
+| 복구 스케줄러 | 스케줄러 스레드 | 원장이 죽어 있는데 주문마다 원장을 다시 부름 | 서킷 (한 주기 50건이 몰려 열리는 경우) |
+
+예약 체결은 서킷만으로는 막지 못했습니다(개선 후 측정: 수집 0번 → 1번). 체결은 한 스레드에서 하나씩 원장을 불러 10초에 2건 정도라, 서킷이 판단하는 최소 호출 수(20건)에 닿지 않아 열리지 않습니다. 그래서 체결을 수집 스레드에서 떼어 냈습니다. 신청처럼 동시에 많이 부르는 경로는 서킷이, 하나씩 차례로 부르는 경로는 스레드 분리가 지킵니다.
+
+**동작**
+
+- 닫힘(평소): 원장을 부르고, 걸린 시간과 결과를 기록합니다.
+- 열림: 최근 10초 동안 20건 이상 불렀고, 그중 절반 이상이 실패했거나 2초 이상 걸렸으면 엽니다. 10초 동안 원장을 부르지 않고 바로 결과 모름(`Unknown`)으로 처리합니다. 주문은 시간 초과 때와 같이 `PROCESSING`(202)으로 남고, 원장이 회복되면 복구 스케줄러가 확정합니다.
+- 반열림: 10초가 지나면 다음 호출 5건을 시험으로 보냅니다. 괜찮으면 닫고, 아니면 다시 엽니다.
+
+**무엇을 실패로 세나**
+
+- 실패: 결과 모름(시간 초과·연결 실패·5xx·본문 해석 실패)만.
+- 세지 않음: 거절(422, 잔액 부족 등)은 원장이 제대로 답한 것이고, `Invalid`(400·409 등)는 원장 장애가 아니라 요청 문제라서입니다.
+- 느린 호출: 결과와 상관없이 2초 이상 걸리면 셉니다. 원장이 3초씩 걸리며 성공하기만 해도 신청이 요청 스레드를 거의 다 썼기 때문입니다(개선 전 측정: 평균 181/200). 대신 원장이 느리기만 해도 서킷이 열려, 3초 기다리면 완료됐을 신청이 `PROCESSING`으로 남습니다.
+- 관리자 처리의 원장 단건 조회(`findByOrderId`)는 감싸지 않습니다. 사람이 가끔 하는 일이고, 원장의 실제 상태가 보여야 합니다.
+
+**설정** (`exchange.ledger.circuit-breaker`, 값이 없으면 같은 기본값)
+
+| 키 | 기본값 | 뜻 |
+|---|---|---|
+| `sliding-window` | `10s` | 최근 몇 초의 호출로 판단할지 |
+| `minimum-calls` | `20` | 이보다 적게 불렀으면 판단하지 않음 |
+| `failure-rate-percent` | `50` | 실패 비율 기준 |
+| `slow-call-duration` | `2s` | 이보다 오래 걸리면 느린 호출 |
+| `slow-call-rate-percent` | `50` | 느린 호출 비율 기준 |
+| `wait-in-open` | `10s` | 열린 뒤 시험 호출까지 기다리는 시간 |
+| `half-open-calls` | `5` | 시험으로 보내는 호출 수 |
+
+기준값은 결제 서비스의 원장 서킷과 같습니다. 상태가 바뀌면 WARN 로그(`원장 서킷 상태 변경 ...`, 바뀌기 전·후 상태)를 남깁니다. 열린 동안 막힌 호출마다는 남기지 않고(DEBUG), 수는 지표로 봅니다.
+
+**감수한 점:** 열린 동안 복구 스케줄러가 고른 주문도 원장에 보내지 않고 결과 모름이 되어 확인 횟수가 올라갑니다. 그만큼 다음 재시도 간격이 늘어나, 원장이 회복된 뒤 확정이 늦어질 수 있습니다(시간 초과일 때와 같은 동작). 원장 회복 뒤 확정 속도는 후속 이슈에서 다룹니다.
+
 ### 지표
 
 `/actuator/prometheus`로 내보냅니다.
@@ -292,6 +333,9 @@ sequenceDiagram
 | `exchange_order_manual_review` | 관리자 처리를 기다리는 주문 수 |
 | `exchange_rate_cache_lookups_total{result=hit/miss/error}` | 환율 캐시 조회 결과 |
 | `hikaricp_connections_*` | DB 커넥션 풀 (사용 중·대기·획득 시간) |
+| `resilience4j_circuitbreaker_state{name="exchangeLedger",state=...}` | 원장 서킷 상태 (지금 상태만 1) |
+| `resilience4j_circuitbreaker_not_permitted_calls_total{name="exchangeLedger"}` | 서킷이 열려 원장에 보내지 않은 호출 수 |
+| `resilience4j_circuitbreaker_failure_rate`, `..._slow_call_rate` | 최근 창의 실패·느린 호출 비율 (판단 전이면 -1) |
 
 정체·대기 수는 복구 스케줄러가 30초마다 세어 두고, 지표는 그 값만 읽습니다. 세기에 실패하면 0이 아니라 이전 값을 유지합니다.
 
@@ -336,12 +380,14 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant S as 환율 수집 스케줄러
+    participant T as 체결 전용 스레드
     participant E as exchange-service
     participant W as wallet-service
     participant L as ledger-service
     S->>E: 새 환율 저장(커밋)·캐시 갱신
     E->>E: 조건에 닿은 대기 예약 찾기 (만료 전, 먼저 예약한 순)
-    loop 예약마다
+    E-->>T: 예약 목록 넘김 (수집 스레드는 기다리지 않고 끝)
+    loop 예약마다 (체결 전용 스레드에서 하나씩)
         E->>W: 지갑 확인 (트랜잭션 밖)
         E->>E: [한 트랜잭션] 예약 잠금 → 조건 재확인 → 주문 저장 → 예약 EXECUTED
         E->>L: 원장 거래 등록 (보통 환전과 같은 처리)
@@ -365,7 +411,12 @@ sequenceDiagram
 | 사용자 취소·다른 서버의 체결과 겹침 | 먼저 잠근 쪽만 반영. 체결이 먼저면 취소는 409 `EXCHANGE_RESERVATION_NOT_WAITING` |
 | DB 장애 등 예상 밖 오류 | 롤백되어 `WAITING`. 다른 예약은 계속 체결 |
 
-- 지금은 수집 스레드에서 바로 체결합니다(`SynchronousReservationDispatcher`). 체결할 예약이 많으면 그만큼 다음 수집이 늦어지므로, 이후 Kafka로 넘기는 구현으로 바꿀 수 있게 `ReservationDispatcher`로 나눠 두었습니다.
+- 체결은 **체결 전용 스레드 하나**(`AsyncReservationDispatcher`, 스레드 이름 `reservation-execution`)에서 합니다(#282). 수집 스레드는 예약 목록을 넘기고 바로 끝나, 원장이 느려도 환율 수집과 견적이 멈추지 않습니다.
+  - 예전에는 수집 스레드에서 바로 체결해, 원장이 3초로 느리기만 해도 체결하는 동안 수집이 멈추고 견적의 약 77%가 503이었습니다. 분리 후에는 원장이 응답하지 않아도 수집이 5초마다 돌고 503은 0건입니다(load-test README "원장 장애 측정").
+  - 체결 스레드가 앞 목록을 아직 처리 중이면 이번 목록은 넘기지 않습니다. 체결하지 못한 예약은 `WAITING`으로 남아 다음 새 환율 때 다시 매칭되므로 잃어버리지 않고, 같은 예약이 수집마다 대기열에 중복으로 쌓이지도 않습니다.
+  - 체결은 여전히 하나씩 원장을 불러 체결 속도는 원장 응답 시간에 묶입니다(원장이 5초면 5초에 1건). 서버 종료 때는 체결을 기다리지 않고, 진행 중인 목록의 남은 예약도 체결하지 않습니다. 트랜잭션 중이면 롤백되어 `WAITING`, 원장 호출 중이면 주문이 `PROCESSING`으로 남아 복구 스케줄러가 확정합니다.
+  - 체결이 오래 밀리면 뒤쪽 예약은 조건에 닿았던 그 환율로 체결됩니다. 체결 직전에 그 환율로 조건을 다시 확인하므로 사용자는 항상 목표 환율이거나 그보다 좋은 환율로 체결됩니다.
+- 서버 여러 대가 나눠 체결해야 할 만큼 예약이 많아지면 Kafka로 넘기고 소비자가 체결하는 구현으로 바꿀 수 있게 `ReservationDispatcher`로 나눠 두었습니다.
 - `koreaexim` 모드는 하루 한 번 고시라 체결 판단도 하루 한 번입니다. 시연은 5초마다 환율이 바뀌는 `mock` 모드로 확인합니다.
 
 ### 만료 스케줄러
@@ -475,11 +526,13 @@ Redis 키
 | 주문은 견적의 스냅샷 | 견적이 사라져도 주문만으로 금액·환율 근거를 증빙 | 주문 행이 넓음 |
 | 원장 호출은 트랜잭션 밖 | 원장 응답(최대 수 초)을 기다리는 동안 DB 연결을 잡지 않음 | 주문 저장과 원장 반영 사이에 `PROCESSING` 상태가 생김 → 복구 스케줄러 |
 | 결과 모름은 재전송, 다시 보내도 안 풀리면 `MANUAL_REVIEW` | 원장이 reference로 멱등이라 재전송이 안전. 장애가 풀리면 자동으로 끝남 | 24시간 넘게 모르면 사람이 확인 |
+| 원장 거래 등록에 서킷 브레이커, 열리면 결과 모름 | 원장이 느리면 신청이 요청 스레드 200개를 붙잡아 원장과 상관없는 환율 조회·견적까지 막힘(개선 전 측정). 열렸을 때를 결과 모름으로 두면 기존 `PROCESSING` → 복구 흐름을 그대로 씀 | 원장이 느리기만 해도 열려 완료될 신청이 `PROCESSING`으로 쌓임. 열린 동안 복구 대상도 확인 횟수가 올라 원장 회복 뒤 재시도가 늦어질 수 있음 |
 | 같은 키 재요청은 원장을 부르지 않음 | 원장 호출을 첫 신청과 복구 스케줄러 두 곳으로 줄여 경쟁과 부하를 막음 | 재요청한 사용자는 스케줄러 확정까지 202 |
 | 관리자 처리 결과는 서버가 원장 조회로 정함 | 돈의 원본은 원장. 사람이 상태를 고르면 원장과 어긋날 수 있음 | 원장 항목이 다르면 처리 못 함(원장 보정 필요) |
 | 최신 환율 Redis 캐시 | DB 연결 대기가 병목이었음(쿼리를 줄인 v0.5도 대기 159) | 캐시 장애 시 DB로 읽어 느려짐 |
 | 전일 환율은 서버 메모리에 기억 | 전일 값은 최신 고시일이 같으면 바뀌지 않음. Redis 캐시 형식을 바꾸지 않고, 환율 조회가 요청마다 DB를 쓰지 않게 함 | 서버마다 따로 기억해 서버 수만큼 하루 한 번씩 DB를 읽음. 재시작하면 다시 읽음 |
 | 예약 체결은 메모리 견적 → 보통 주문 | 주문 테이블·원장 처리·복구·관리자 처리를 그대로 재사용 | 체결 견적은 따로 저장하지 않음(주문에 값이 복사됨) |
+| 예약 체결은 수집 스레드에서 떼어 체결 전용 스레드 하나에서 | 순차로 원장을 부르는 경로는 서킷 최소 호출 수에 닿지 않아 서킷이 열리지 않음(측정). 수집이 체결을 기다리지 않아야 환율과 견적이 멈추지 않음. 스레드 하나라 원장·지갑에 한꺼번에 몰리지 않음 | 체결 속도는 원장 응답 시간에 묶임. 체결 중이면 새 매칭은 다음 수집 때로 미룸 |
 | 예약 매칭은 수집 직후 한 번 | 환율은 수집할 때만 바뀜. 주기적으로 전체를 훑지 않고 부분 인덱스로 조건에 닿은 예약만 읽음 | `koreaexim`은 하루 한 번만 판단 |
 | 예약할 때 잔액을 묶지 않음 | 잔액 홀드는 지갑·원장 변경이 필요 | 체결 때 잔액이 부족하면 주문이 `FAILED` |
 | 견적 Redis 저장 | 5분짜리 데이터에 DB INSERT·커밋이 연결을 잡음 | Redis 장애·재시작 시 아직 안 쓴 견적은 다시 받아야 함. 배포 때 옛·새 버전을 함께 띄우면 서로 견적을 못 찾아 옛 인스턴스를 내린 뒤 새 버전을 띄움 |
@@ -493,18 +546,19 @@ Redis 키
 - 단위 테스트는 DB 없이 돕니다. 원장·지갑은 가짜 객체로 바꿔 응답별 주문 상태, 재요청, 복구 대기 시간, 관리자 처리 규칙을 확인합니다.
 - 통합 테스트(`*IntegrationTest`)는 Testcontainers로 PostgreSQL(`postgres:18.6-bookworm`)과 Redis(`redis:8.2.11-bookworm`)를 띄웁니다. Docker만 실행 중이면 되고, 없으면 건너뜁니다.
   - 견적을 쓰는 테스트는 공용 Redis 컨테이너(`TestRedis`)를 함께 씁니다.
-- 2026-11-10 기준(#254 브랜치) 656건이 모두 통과합니다.
+- 2026-11-13 기준(#282 브랜치) 698건이 모두 통과합니다.
 
 | 확인 대상 | 테스트 |
 |---|---|
 | 금액 계산·통화·견적 규칙 | `MoneyTest`, `ExchangeQuoteTest`, `QuotePolicyTest`, `FeeRateTest`, `QuoteCurrenciesTest` |
 | 환전 신청·재요청·원장 결과별 상태 | `ExchangeOrderServiceTest`, `ExchangeOrderLedgerProcessorTest`, `ExchangeOrderIntegrationTest` |
 | 원장 HTTP 응답 해석, 실제 Feign | `LedgerClientAdapterTest`, `ExchangeOrderLedgerHttpIntegrationTest` |
+| 원장 서킷 브레이커 (설정, 열림·복구) | `LedgerCircuitBreakerConfigurationTest`, `LedgerClientAdapterTest`, `ExchangeOrderLedgerCircuitIntegrationTest` |
 | 복구 스케줄러·정체 지표 | `ExchangeOrderRecoveryServiceTest`, `ExchangeOrderBacklogMonitorTest`, `ExchangeOrderPersistenceIntegrationTest` |
 | 관리자 처리 (원장 흉내 HTTP 서버) | `ManualReviewResolutionTest`, `ExchangeAdminServiceTest`, `AdminExchangeManualReviewHttpIntegrationTest` |
 | 환율 수집·캐시·Redis 장애 | `ExchangeRateCollectorTest`, `KoreaEximRateProviderTest`, `ExchangeRateCacheIntegrationTest`, `ExchangeRateCacheOutageIntegrationTest`, `ExchangeRatePartialCollectionIntegrationTest` |
 | 견적 Redis 저장·상태 | `ExchangeQuoteServiceTest`, `ExchangeQuoteIntegrationTest` |
-| 예약 등록·매칭·체결·실패·만료 | `ExchangeReservationTest`, `ExchangeReservationServiceTest`, `ExchangeReservationExecutorTest`, `ExchangeReservationPersistenceIntegrationTest`, `ExchangeReservationIntegrationTest` |
+| 예약 등록·매칭·체결·실패·만료 | `ExchangeReservationTest`, `ExchangeReservationServiceTest`, `ExchangeReservationExecutorTest`, `AsyncReservationDispatcherTest`, `ExchangeReservationPersistenceIntegrationTest`, `ExchangeReservationIntegrationTest` |
 | 계층 규칙, API 문서 | `ArchitectureTest`, `ApiDocsProfileTest` |
 
 부하 측정 도구(k6, 버전 비교)는 `exchange-service/load-test/README.md`에 있습니다.

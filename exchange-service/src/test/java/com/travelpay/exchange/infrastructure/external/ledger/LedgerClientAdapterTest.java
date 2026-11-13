@@ -1,6 +1,7 @@
 package com.travelpay.exchange.infrastructure.external.ledger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -21,6 +22,8 @@ import feign.Request;
 import feign.Response;
 import feign.RetryableException;
 import feign.codec.DecodeException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -34,6 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class LedgerClientAdapterTest {
@@ -51,7 +57,8 @@ class LedgerClientAdapterTest {
                     LedgerDirection.CREDIT, LedgerEntryType.EXCHANGE_OUT)));
 
     private final LedgerFeignClient feignClient = mock(LedgerFeignClient.class);
-    private final LedgerClientAdapter adapter = new LedgerClientAdapter(feignClient);
+    /** 기본 서킷(최근 100건 기준)이라 이 클래스의 테스트 호출 몇 건으로는 열리지 않는다. 서킷 동작은 아래 서킷 테스트가 따로 본다 */
+    private final LedgerClientAdapter adapter = new LedgerClientAdapter(feignClient, CircuitBreaker.ofDefaults("test"));
 
     /** 원장 서비스의 성공 응답 JSON이 공통 ApiResponse와 data record로 해석되는지 확인합니다. Feign도 Jackson으로 같은 타입을 만듭니다. */
     @Test
@@ -311,6 +318,78 @@ class LedgerClientAdapterTest {
 
     private static LedgerPostResult invalid(InvalidKind kind) {
         return new LedgerPostResult.Invalid(kind);
+    }
+
+    // ---- 원장 서킷(#282) ----
+
+    /** 서킷이 열려 있으면 원장을 부르지 않고 결과 모름이다. 주문은 PROCESSING으로 남아 복구 스케줄러가 확정한다 */
+    @Test
+    void doesNotCallLedgerWhileCircuitIsOpen() {
+        CircuitBreaker circuit = CircuitBreaker.ofDefaults("test");
+        circuit.transitionToOpenState();
+        LedgerClientAdapter guarded = new LedgerClientAdapter(feignClient, circuit);
+
+        LedgerPostResult result = guarded.post(POSTING);
+
+        assertEquals(new LedgerPostResult.Unknown(LedgerClientAdapter.CIRCUIT_OPEN), result);
+        verify(feignClient, never()).register(any());
+    }
+
+    /** 원장 시간 초과(결과 모름)가 이어지면 서킷이 열리고, 그 뒤 호출은 원장에 보내지 않는다 */
+    @Test
+    void opensAfterTimeoutsAndStopsCallingLedger() {
+        when(feignClient.register(any())).thenThrow(
+                new RetryableException(-1, "Read timed out", Request.HttpMethod.POST, (Long) null, REQUEST));
+        LedgerClientAdapter guarded = new LedgerClientAdapter(feignClient, smallCircuit(Duration.ofSeconds(2)));
+
+        guarded.post(POSTING);
+        guarded.post(POSTING);
+        LedgerPostResult third = guarded.post(POSTING);
+
+        assertEquals(new LedgerPostResult.Unknown(LedgerClientAdapter.CIRCUIT_OPEN), third);
+        verify(feignClient, times(2)).register(any());
+    }
+
+    /** 성공했어도 느린 호출 기준보다 오래 걸리면 느린 호출로 세어 서킷이 열린다(개선 전 측정의 원장 3초 상황) */
+    @Test
+    void opensAfterSlowSuccessfulCalls() {
+        when(feignClient.register(any())).thenAnswer(invocation -> {
+            Thread.sleep(30);
+            return ApiResponse.success(new LedgerTransactionResponse(TX_ID, "POSTED"));
+        });
+        LedgerClientAdapter guarded = new LedgerClientAdapter(feignClient, smallCircuit(Duration.ofMillis(10)));
+
+        assertEquals(new LedgerPostResult.Posted(TX_ID), guarded.post(POSTING));
+        assertEquals(new LedgerPostResult.Posted(TX_ID), guarded.post(POSTING));
+        LedgerPostResult third = guarded.post(POSTING);
+
+        assertEquals(new LedgerPostResult.Unknown(LedgerClientAdapter.CIRCUIT_OPEN), third);
+        verify(feignClient, times(2)).register(any());
+    }
+
+    /** 원장이 바로 거절(잔액 부족)하는 건 원장이 건강하다는 뜻이라 서킷을 열지 않는다 */
+    @Test
+    void staysClosedWhenLedgerRejects() {
+        when(feignClient.register(any())).thenThrow(error(422,
+                "{\"success\":false,\"data\":null,\"error\":{\"code\":\"LEDGER_REJECTED_INSUFFICIENT_BALANCE\",\"message\":\"x\"}}"));
+        LedgerClientAdapter guarded = new LedgerClientAdapter(feignClient, smallCircuit(Duration.ofSeconds(2)));
+
+        for (int i = 0; i < 5; i++) {
+            assertInstanceOf(LedgerPostResult.Rejected.class, guarded.post(POSTING));
+        }
+        verify(feignClient, times(5)).register(any());
+    }
+
+    /** 최근 2건 중 절반이 실패·느린 호출이면 여는 작은 서킷(테스트용). 결과 판단은 실제 설정과 같다 */
+    private static CircuitBreaker smallCircuit(Duration slowCall) {
+        return CircuitBreaker.of("test", CircuitBreakerConfig.custom()
+                .slidingWindowSize(2)
+                .minimumNumberOfCalls(2)
+                .failureRateThreshold(50)
+                .slowCallDurationThreshold(slowCall)
+                .slowCallRateThreshold(50)
+                .recordResult(result -> result instanceof LedgerPostResult.Unknown)
+                .build());
     }
 
     /** Feign이 2xx가 아닌 응답을 받았을 때 던지는 예외와 같은 것을 만듭니다. */
