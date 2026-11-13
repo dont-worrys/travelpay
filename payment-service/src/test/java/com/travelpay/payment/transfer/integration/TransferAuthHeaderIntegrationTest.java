@@ -31,9 +31,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
 
-    /** TC-26-I1: 회원 헤더가 없으면 5개 API 모두 401 COMMON_UNAUTHORIZED이고 다른 서비스를 호출하지 않습니다. */
+    /** TC-26-I1: 회원 헤더가 없으면 4개 API 모두 401 COMMON_UNAUTHORIZED이고 다른 서비스를 호출하지 않습니다. */
     @ParameterizedTest
-    @ValueSource(strings = {"LIST", "DETAIL", "CREATE", "CANCEL", "RECIPIENT"})
+    @ValueSource(strings = {"LIST", "DETAIL", "CREATE", "RECIPIENT"})
     void everyEndpointRequiresMemberHeaders(String endpoint) throws Exception {
         mvc.perform(endpoint(endpoint))
                 .andExpect(status().isUnauthorized())
@@ -101,7 +101,7 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
         verify(walletFeignApi, never()).getWallet(spoofed);
     }
 
-    /** TC-26-I5: 상세는 송금인·수취인만(각자 기준 direction), 제3자는 404. 취소는 송금인만이며 수취인·제3자는 404입니다. */
+    /** TC-26-I5: 완료 송금의 상세는 송금인·수취인만(각자 기준 direction), 제3자는 404입니다. */
     @Test
     void transferIsScopedToItsParticipants() throws Exception {
         doReturn(posted(UUID.randomUUID())).when(ledgerFeignApi).register(any());
@@ -120,11 +120,6 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
         mvc.perform(asUser(get("/api/v1/transfers/{id}", UUID.randomUUID()), senderId))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
-        for (UUID notSender : new UUID[] {receiverId, stranger}) {
-            mvc.perform(asUser(post("/api/v1/transfers/{id}/cancel", transferId), notSender))
-                    .andExpect(status().isNotFound())
-                    .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
-        }
         assertEquals("COMPLETED", row(transferId).get("status"));
     }
 
@@ -144,11 +139,11 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
     }
 
     /**
-     * TC-26-I7: 사용자 송금 API 5개는 MASTER면 403 COMMON_FORBIDDEN이고(wallet-service 회원 API와 같음),
+     * TC-26-I7: 사용자 송금 API 4개는 MASTER면 403 COMMON_FORBIDDEN이고(wallet-service 회원 API와 같음),
      * 다른 서비스를 호출하거나 송금을 남기지 않습니다. 관리자 송금 API의 MASTER 허용은 AdminTransferApiIntegrationTest에서 확인합니다.
      */
     @ParameterizedTest
-    @ValueSource(strings = {"LIST", "DETAIL", "CREATE", "CANCEL", "RECIPIENT"})
+    @ValueSource(strings = {"LIST", "DETAIL", "CREATE", "RECIPIENT"})
     void masterRoleIsForbiddenOnUserTransferApi(String endpoint) throws Exception {
         mvc.perform(endpoint(endpoint)
                         .header(AuthHeaders.USER_ID, senderId.toString())
@@ -170,7 +165,6 @@ class TransferAuthHeaderIntegrationTest extends TransferApiIntegrationSupport {
                     .header(TransferController.IDEMPOTENCY_KEY_HEADER, "tc26-noauth")
                     .contentType(MediaType.APPLICATION_JSON)
                     .content(BODY.formatted(receiverId));
-            case "CANCEL" -> post("/api/v1/transfers/{id}/cancel", id);
             case "RECIPIENT" -> get("/api/v1/transfers/recipients/{id}", receiverId);
             default -> throw new IllegalArgumentException(name);
         };

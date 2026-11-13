@@ -28,11 +28,11 @@ public record TransferResponse(
         String currency,
         @Schema(description = """
                 송금 상태
-                - REQUESTED: 접수(원장 연동 전 생성된 송금, 취소 가능)
+                - REQUESTED: 접수(원장 연동 전에 생성된 예전 송금, 새로 만들지 않음)
                 - PROCESSING: 원장 처리 결과 미확정(서버가 자동 재처리)
                 - COMPLETED: 자금 이동 완료
                 - FAILED: 원장 거절(잔액 부족·계정 사용 불가)
-                - CANCELLED: 취소됨
+                - CANCELLED: 취소됨(예전 접수 송금의 취소, 새로 만들지 않음)
                 - MANUAL_REVIEW: 자동 처리 중단, 운영자 확인 필요""")
         TransferStatus status,
         @Schema(description = """

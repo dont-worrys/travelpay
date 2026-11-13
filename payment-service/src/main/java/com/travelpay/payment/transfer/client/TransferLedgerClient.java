@@ -2,7 +2,7 @@ package com.travelpay.payment.transfer.client;
 
 /**
  * 송금을 원장 거래로 등록하는 인터페이스입니다. 구현은 원장 {@code POST /internal/v1/ledger/transactions}를 호출하는
- * {@link TransferLedgerClientAdapter}입니다. 구현 bean이 없으면 송금은 접수(REQUESTED)까지만 처리합니다.
+ * {@link TransferLedgerClientAdapter}입니다.
  *
  * <p>구현체는 다음을 보장해야 합니다. 현재 ledger-service 코드 기준이며 팀 확정 전입니다.
  * <ul>

@@ -178,6 +178,8 @@ class TransferRecoverySchedulerIntegrationTest extends TransferApiIntegrationSup
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.data.status").value("PROCESSING")));
         assertEquals(1, ((Number) row(id).get("attempt_count")).intValue());
+        // 준비용으로 낸 원장 실패가 쌓여 서킷이 열리면 복구가 원장에 보내지 않으므로, 서킷 기록을 지웁니다.
+        resetLedgerCircuitBreaker();
         return id;
     }
 

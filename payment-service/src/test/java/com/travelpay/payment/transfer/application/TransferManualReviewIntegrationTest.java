@@ -140,7 +140,7 @@ class TransferManualReviewIntegrationTest extends PostgresContainerSupport {
         verify(ledgerClient, times(5)).register(any());
         assertRow(transferId, "MANUAL_REVIEW", 5, "RETRY_EXHAUSTED");
 
-        // 상세·목록은 MANUAL_REVIEW, 취소는 409(REQUESTED만 취소 가능)
+        // 송금인의 상세·목록은 MANUAL_REVIEW, 수취인에게는 완료 전 송금이라 보이지 않음(상세 404, 받은 목록 없음)
         mvc.perform(get("/api/v1/transfers/{transferId}", transferId)
                         .header(AuthHeaders.USER_ID, senderId.toString())
                         .header(AuthHeaders.USER_ROLE, "USER"))
@@ -152,11 +152,17 @@ class TransferManualReviewIntegrationTest extends PostgresContainerSupport {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.items[0].transferId").value(transferId.toString()))
                 .andExpect(jsonPath("$.data.items[0].status").value("MANUAL_REVIEW"));
-        mvc.perform(post("/api/v1/transfers/{transferId}/cancel", transferId)
-                        .header(AuthHeaders.USER_ID, senderId.toString())
+        mvc.perform(get("/api/v1/transfers/{transferId}", transferId)
+                        .header(AuthHeaders.USER_ID, receiverId.toString())
                         .header(AuthHeaders.USER_ROLE, "USER"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
+        mvc.perform(get("/api/v1/transfers")
+                        .param("direction", "RECEIVED")
+                        .header(AuthHeaders.USER_ID, receiverId.toString())
+                        .header(AuthHeaders.USER_ROLE, "USER"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.items").isEmpty());
         assertRow(transferId, "MANUAL_REVIEW", 5, "RETRY_EXHAUSTED");
 
         // 운영 지표(게이지 transfer.manual_review)의 원천 값에 포함됩니다.

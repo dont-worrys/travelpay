@@ -59,7 +59,7 @@ class TransferControllerTest {
         UUID transferId = UUID.randomUUID();
         when(transferService.request(eq(SENDER.userId()), eq("key-1"), any(TransferCreateRequest.class)))
                 .thenReturn(new TransferResponse(transferId, TransferDirection.SENT, SENDER.userId(), RECEIVER_ID,
-                        10_000L, "KRW", TransferStatus.REQUESTED, null, "저녁값",
+                        10_000L, "KRW", TransferStatus.COMPLETED, null, "저녁값",
                         Instant.parse("2026-10-28T01:02:03.123456Z")));
 
         mvc(SENDER).perform(post("/api/v1/transfers")
@@ -69,7 +69,7 @@ class TransferControllerTest {
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.success").value(true))
                 .andExpect(jsonPath("$.data.transferId").value(transferId.toString()))
-                .andExpect(jsonPath("$.data.status").value("REQUESTED"))
+                .andExpect(jsonPath("$.data.status").value("COMPLETED"))
                 .andExpect(jsonPath("$.data.createdAt").value("2026-10-28T01:02:03.123456Z"))
                 .andExpect(jsonPath("$.error").doesNotExist());
     }
@@ -179,52 +179,6 @@ class TransferControllerTest {
     }
 
     @Test
-    void cancelsTransferWithOkAndCancelledStatus() throws Exception {
-        UUID transferId = UUID.randomUUID();
-        when(transferService.cancel(SENDER.userId(), transferId))
-                .thenReturn(new TransferResponse(transferId, TransferDirection.SENT, SENDER.userId(), RECEIVER_ID,
-                        10_000L, "KRW", TransferStatus.CANCELLED, null, null, Instant.parse("2026-10-29T01:02:03Z")));
-
-        mvc(SENDER).perform(post("/api/v1/transfers/{transferId}/cancel", transferId))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.success").value(true))
-                .andExpect(jsonPath("$.data.transferId").value(transferId.toString()))
-                .andExpect(jsonPath("$.data.status").value("CANCELLED"))
-                .andExpect(jsonPath("$.error").doesNotExist());
-    }
-
-    @Test
-    void returnsNotFoundWhenCancellingTransferOutsideSenderScope() throws Exception {
-        UUID transferId = UUID.randomUUID();
-        when(transferService.cancel(SENDER.userId(), transferId))
-                .thenThrow(new BusinessException(TransferErrorCode.NOT_FOUND));
-
-        mvc(SENDER).perform(post("/api/v1/transfers/{transferId}/cancel", transferId))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.success").value(false))
-                .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
-    }
-
-    @Test
-    void returnsConflictWhenTransferCannotBeCancelled() throws Exception {
-        UUID transferId = UUID.randomUUID();
-        when(transferService.cancel(SENDER.userId(), transferId))
-                .thenThrow(new BusinessException(CommonErrorCode.CONFLICT));
-
-        mvc(SENDER).perform(post("/api/v1/transfers/{transferId}/cancel", transferId))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
-    }
-
-    @Test
-    void requiresAuthenticatedUserToCancel() throws Exception {
-        mvc(null).perform(post("/api/v1/transfers/{transferId}/cancel", UUID.randomUUID()))
-                .andExpect(status().isUnauthorized())
-                .andExpect(jsonPath("$.error.code").value("COMMON_UNAUTHORIZED"));
-        verifyNoInteractions(transferService);
-    }
-
-    @Test
     void returnsRecipientWithMaskedNameAndTransferableFlagOnly() throws Exception {
         when(transferService.findRecipient(SENDER.userId(), RECEIVER_ID))
                 .thenReturn(new RecipientResponse(RECEIVER_ID, "홍*동", true));
@@ -281,7 +235,7 @@ class TransferControllerTest {
     void listsTransfersWithCommonPageResponse() throws Exception {
         UUID transferId = UUID.randomUUID();
         var item = new TransferResponse(transferId, TransferDirection.RECEIVED, RECEIVER_ID, SENDER.userId(),
-                10_000L, "KRW", TransferStatus.REQUESTED, null, null, Instant.parse("2026-10-28T01:02:03Z"));
+                10_000L, "KRW", TransferStatus.COMPLETED, null, null, Instant.parse("2026-10-28T01:02:03Z"));
         when(transferService.list(SENDER.userId(), TransferDirection.RECEIVED, 0, 20))
                 .thenReturn(new PageResponse<>(List.of(item), 0, 20, 1, 1));
 

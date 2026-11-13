@@ -74,12 +74,10 @@ class TransferAccountSuspendedIntegrationTest extends TransferApiIntegrationSupp
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("FAILED"))
                 .andExpect(jsonPath("$.data.failureReason").value("ACCOUNT_UNAVAILABLE"));
+        // 수취인에게는 실패 송금이 보이지 않아 송금인 쪽 실패 사유도 드러나지 않습니다.
         mvc.perform(asUser(get("/api/v1/transfers/{id}", transferId), receiverId))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.failureReason").value("ACCOUNT_UNAVAILABLE"));
-        mvc.perform(asUser(post("/api/v1/transfers/{id}/cancel", transferId), senderId))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code").value("COMMON_CONFLICT"));
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("TRANSFER_NOT_FOUND"));
         assertEquals("FAILED", row(transferId).get("status"));
         assertEquals(1L, countTransfersOf(senderId));
     }
