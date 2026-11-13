@@ -17,6 +17,8 @@ import org.springframework.scheduling.annotation.Scheduled;
  * 원장 거래 등록 결과를 모른 채 처리 중(PROCESSING)으로 남은 송금을 같은 reference로 원장에 다시 요청합니다.
  * 재시도 간격(30초 → 1분 → 2분 → 4분)과 한도(결과 모름 5회면 MANUAL_REVIEW)는 지갑 충전 복구와 같습니다.
  * 원장 장애로 밀린 송금이 회복 시점에 한꺼번에 몰리지 않도록 건마다 대기 시간을 늘리고, 한 주기에 다루는 건수를 제한합니다.
+ * 서버가 여러 대면 모두 돌지만, 복구 대상은 SKIP LOCKED로 선점해 서버끼리 서로 다른 송금을 나눠 처리합니다
+ * ({@link TransferService#recoverDue}). 분산 락은 쓰지 않습니다.
  * 6주기(약 1분)마다 MANUAL_REVIEW 송금을 원장 결과로 자동 대사합니다({@link TransferReviewReconciler}).
  * 결제 정산 복구와 스레드를 나눈 풀(2개)을 늘리지 않도록 같은 스레드에서 복구 뒤에 실행합니다.
  * transfer.recovery.enabled=false이면 돌지 않습니다. (테스트·수동 확인용)

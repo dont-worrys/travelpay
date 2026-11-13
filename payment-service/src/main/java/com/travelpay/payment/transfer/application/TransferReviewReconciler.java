@@ -31,6 +31,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * </ul>
  * 원장 조회는 DB 트랜잭션 밖에서 하고, MANUAL_REVIEW일 때만 바꾸는 조건부 UPDATE와 SYSTEM 이력 저장을 한 트랜잭션으로 묶습니다.
  * 운영자 확정·다른 인스턴스와 겹쳐도 조건부 UPDATE에서 한쪽만 반영됩니다.
+ * 복구와 달리 선점하지 않으므로 서버가 여러 대면 같은 송금을 서버마다 원장에 조회할 수 있습니다. 조회는 상태를 바꾸지 않고
+ * 양이 적어(서버당 1분 10건 이하) 그대로 두며, 원장 호출 동안 DB 잠금을 잡지 않으려는 것이기도 합니다.
  */
 @Component
 public class TransferReviewReconciler {
