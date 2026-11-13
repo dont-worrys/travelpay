@@ -44,9 +44,11 @@ import org.springframework.transaction.support.TransactionOperations;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -69,6 +71,8 @@ class SettlementServiceTest {
 
     private static final UUID MERCHANT_ID = UUID.fromString("22222222-2222-2222-2222-222222222222");
     private static final UUID OTHER_MERCHANT_ID = UUID.fromString("55555555-5555-5555-5555-555555555555");
+    private static final String MERCHANT_NAME = "정산 가맹점";
+    private static final String OTHER_MERCHANT_NAME = "두 번째 가맹점";
     private static final UUID OWNER_ID = UUID.fromString("33333333-3333-3333-3333-333333333333");
     private static final UUID MASTER_ID = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     private static final UUID STRANGER_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -134,6 +138,7 @@ class SettlementServiceTest {
         assertEquals(2, result.paymentCount());
         assertEquals(LEDGER_TRANSACTION_ID, result.ledgerTransactionId());
         assertEquals(OWNER_ID, result.ownerUserId());
+        assertEquals(MERCHANT_NAME, result.merchantName());
 
         ArgumentCaptor<PaymentLedgerSettlementCommand> command = ArgumentCaptor.forClass(PaymentLedgerSettlementCommand.class);
         verify(ledgerClient).settlementTransaction(command.capture());
@@ -502,6 +507,9 @@ class SettlementServiceTest {
 
         assertEquals(1, page.getContent().size());
         assertEquals(2, page.getContent().get(0).paymentCount());
+        // 권한 확인 때 읽은 가맹점 이름을 그대로 씀(추가 조회 없음)
+        assertEquals(MERCHANT_NAME, page.getContent().get(0).merchantName());
+        verify(merchantRepository, never()).findAllById(any());
         ArgumentCaptor<Pageable> pageable =
                 ArgumentCaptor.forClass(Pageable.class);
         verify(settlementRepository).findPageByMerchantId(eq(MERCHANT_ID), eq(null), pageable.capture());
@@ -528,10 +536,15 @@ class SettlementServiceTest {
                 .thenReturn(new PageImpl<>(List.of(paid)));
         when(settlementItemRepository.countBySettlementIds(List.of(SETTLEMENT_ID)))
                 .thenReturn(Map.of(SETTLEMENT_ID, 3L));
+        Merchant merchant = mock(Merchant.class);
+        when(merchant.getId()).thenReturn(MERCHANT_ID);
+        when(merchant.getName()).thenReturn(MERCHANT_NAME);
+        when(merchantRepository.findAllById(any())).thenReturn(List.of(merchant));
 
         var page = settlementService.getMySettlements(OWNER, SettlementStatus.PAID, 0, 500);
 
         assertEquals(3, page.getContent().get(0).paymentCount());
+        assertEquals(MERCHANT_NAME, page.getContent().get(0).merchantName());
         ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
         verify(settlementRepository).findPageByOwnerUserId(eq(OWNER_ID), eq(SettlementStatus.PAID),
                 pageable.capture());
@@ -547,9 +560,38 @@ class SettlementServiceTest {
         settlementService.getMySettlements(MASTER, null, 0, 20);
 
         verify(settlementRepository).findPageByOwnerUserId(eq(MASTER_ID), eq(null), any());
+        // 정산이 없으면 가맹점 이름을 조회하지 않음
+        verify(merchantRepository, never()).findAllById(any());
         BusinessException invalid = assertThrows(BusinessException.class,
                 () -> settlementService.getMySettlements(OWNER, null, -1, 20));
         assertEquals(CommonErrorCode.INVALID_REQUEST, invalid.getErrorCode());
+    }
+
+    @Test
+    void mySettlementsAcrossMerchantsGetEachMerchantNameWithOneLookup() {
+        Settlement first = settlementWithId(SETTLEMENT_ID);
+        UUID otherSettlementId = UUID.randomUUID();
+        Settlement second = settlement(OTHER_MERCHANT_ID);
+        ReflectionTestUtils.setField(second, "id", otherSettlementId);
+        Settlement third = settlementWithId(UUID.randomUUID());   // 첫 가맹점의 정산 하나 더
+        when(settlementRepository.findPageByOwnerUserId(eq(OWNER_ID), any(), any()))
+                .thenReturn(new PageImpl<>(List.of(first, second, third)));
+        Merchant merchant = mock(Merchant.class);
+        when(merchant.getId()).thenReturn(MERCHANT_ID);
+        when(merchant.getName()).thenReturn(MERCHANT_NAME);
+        Merchant other = otherMerchant();
+        when(merchantRepository.findAllById(any())).thenReturn(List.of(merchant, other));
+
+        var page = settlementService.getMySettlements(OWNER, null, 0, 20);
+
+        assertEquals(List.of(MERCHANT_NAME, OTHER_MERCHANT_NAME, MERCHANT_NAME),
+                page.getContent().stream().map(SettlementResult::merchantName).toList());
+        // 페이지에 나온 가맹점(중복 없이 2곳)을 한 번에 조회
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Collection<UUID>> ids = ArgumentCaptor.forClass(Collection.class);
+        verify(merchantRepository, times(1)).findAllById(ids.capture());
+        assertEquals(Set.of(MERCHANT_ID, OTHER_MERCHANT_ID), Set.copyOf(ids.getValue()));
+        verify(merchantRepository, never()).findById(any());
     }
 
     @Test
@@ -573,6 +615,7 @@ class SettlementServiceTest {
 
         assertEquals(SettlementStatus.PAID, detail.settlement().status());
         assertEquals(2, detail.settlement().paymentCount());
+        assertEquals(MERCHANT_NAME, detail.settlement().merchantName());
         assertEquals(PAYMENT_A, detail.items().get(0).paymentId());
         assertEquals(10_000L, detail.items().get(0).amount());
     }
@@ -697,6 +740,7 @@ class SettlementServiceTest {
     private void givenMerchant(UUID ledgerWalletId) {
         Merchant merchant = mock(Merchant.class);
         when(merchant.getId()).thenReturn(MERCHANT_ID);
+        when(merchant.getName()).thenReturn(MERCHANT_NAME);
         when(merchant.getCurrency()).thenReturn(CurrencyCode.KRW);
         when(merchant.getLedgerWalletId()).thenReturn(ledgerWalletId);
         when(merchant.getOwnerUserId()).thenReturn(OWNER_ID);
@@ -704,10 +748,16 @@ class SettlementServiceTest {
     }
 
     private void givenOtherMerchantOwnedByOwner() {
+        Merchant other = otherMerchant();
+        when(merchantRepository.findById(OTHER_MERCHANT_ID)).thenReturn(Optional.of(other));
+    }
+
+    private static Merchant otherMerchant() {
         Merchant merchant = mock(Merchant.class);
         when(merchant.getId()).thenReturn(OTHER_MERCHANT_ID);
+        when(merchant.getName()).thenReturn(OTHER_MERCHANT_NAME);
         when(merchant.getOwnerUserId()).thenReturn(OWNER_ID);
-        when(merchantRepository.findById(OTHER_MERCHANT_ID)).thenReturn(Optional.of(merchant));
+        return merchant;
     }
 
     private static Payment payment(UUID paymentId, long amount) {

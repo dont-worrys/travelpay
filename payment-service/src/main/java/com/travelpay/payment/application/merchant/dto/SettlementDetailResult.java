@@ -12,9 +12,9 @@ public record SettlementDetailResult(SettlementResult settlement, List<Item> ite
     public record Item(UUID paymentId, Long amount) {
     }
 
-    public static SettlementDetailResult from(Settlement settlement, List<SettlementItem> items) {
+    public static SettlementDetailResult from(Settlement settlement, String merchantName, List<SettlementItem> items) {
         return new SettlementDetailResult(
-                SettlementResult.from(settlement, items.size()),
+                SettlementResult.from(settlement, merchantName, items.size()),
                 items.stream().map(item -> new Item(item.getPaymentId(), item.getAmount())).toList());
     }
 }

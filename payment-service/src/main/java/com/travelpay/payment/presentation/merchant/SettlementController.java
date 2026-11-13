@@ -91,7 +91,7 @@ public class SettlementController {
     @Operation(summary = "내 정산 목록")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
-                    description = "내가 주인인 모든 가맹점의 정산을 최신순으로 합친 페이지. 가맹점은 항목의 `merchantId`로 구분. `status`로 거름")
+                    description = "내가 주인인 모든 가맹점의 정산을 최신순으로 합친 페이지. 가맹점은 항목의 `merchantId`·`merchantName`으로 구분. `status`로 거름")
     })
     @GetMapping("/settlements/me")
     public ResponseEntity<ApiResponse<PageResponse<SettlementResponse>>> getMySettlements(
