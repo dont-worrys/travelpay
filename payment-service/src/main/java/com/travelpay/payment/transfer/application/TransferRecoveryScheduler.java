@@ -17,6 +17,8 @@ import org.springframework.scheduling.annotation.Scheduled;
  * 원장 거래 등록 결과를 모른 채 처리 중(PROCESSING)으로 남은 송금을 같은 reference로 원장에 다시 요청합니다.
  * 재시도 간격(30초 → 1분 → 2분 → 4분)과 한도(결과 모름 5회면 MANUAL_REVIEW)는 지갑 충전 복구와 같습니다.
  * 원장 장애로 밀린 송금이 회복 시점에 한꺼번에 몰리지 않도록 건마다 대기 시간을 늘리고, 한 주기에 다루는 건수를 제한합니다.
+ * 6주기(약 1분)마다 MANUAL_REVIEW 송금을 원장 결과로 자동 대사합니다({@link TransferReviewReconciler}).
+ * 결제 정산 복구와 스레드를 나눈 풀(2개)을 늘리지 않도록 같은 스레드에서 복구 뒤에 실행합니다.
  * transfer.recovery.enabled=false이면 돌지 않습니다. (테스트·수동 확인용)
  */
 @Configuration(proxyBeanMethods = false)
@@ -32,13 +34,20 @@ public class TransferRecoveryScheduler {
     static final Duration STUCK_AFTER = Duration.ofMinutes(30);
     // 로그 한 줄이 너무 길어지지 않도록 오래된 순 10개만 남깁니다.
     static final int STUCK_SAMPLE_SIZE = 10;
+    // MANUAL_REVIEW 자동 대사는 6주기(약 1분)마다, 한 번에 10건까지 봅니다.
+    static final int RECONCILE_EVERY_CYCLES = 6;
+    static final int RECONCILE_BATCH_SIZE = 10;
 
     private final TransferService transferService;
+    private final TransferReviewReconciler reviewReconciler;
+    private long cycle;
     private final AtomicLong stuckTransfers = new AtomicLong();
     private final AtomicLong manualReviewTransfers = new AtomicLong();
 
-    public TransferRecoveryScheduler(TransferService transferService, MeterRegistry meterRegistry) {
+    public TransferRecoveryScheduler(TransferService transferService, TransferReviewReconciler reviewReconciler,
+            MeterRegistry meterRegistry) {
         this.transferService = transferService;
+        this.reviewReconciler = reviewReconciler;
         Gauge.builder("transfer.processing.stuck", stuckTransfers, AtomicLong::get)
                 .description("생성 후 30분이 지나도 확정되지 않은 처리 중 송금 수")
                 .register(meterRegistry);
@@ -55,6 +64,13 @@ public class TransferRecoveryScheduler {
             transferService.recoverDue(now, BATCH_SIZE);
         } catch (RuntimeException exception) {
             log.error("처리 중 송금 복구 주기가 실패했습니다.", exception);
+        }
+        if (cycle++ % RECONCILE_EVERY_CYCLES == 0) {
+            try {
+                reviewReconciler.reconcile(now, RECONCILE_BATCH_SIZE);
+            } catch (RuntimeException exception) {
+                log.error("MANUAL_REVIEW 자동 대사 주기가 실패했습니다.", exception);
+            }
         }
         try {
             reportStuck(now.minus(STUCK_AFTER));
