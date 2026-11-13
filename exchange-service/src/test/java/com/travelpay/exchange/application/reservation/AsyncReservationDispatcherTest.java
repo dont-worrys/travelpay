@@ -61,9 +61,15 @@ class AsyncReservationDispatcherTest {
         assertEquals(AsyncReservationDispatcher.THREAD_NAME, threadName.get());
     }
 
-    /** 앞 체결이 진행 중이면 이번 목록은 넘기지 않는다. 그 예약은 대기로 남아 다음 새 환율 때 다시 매칭된다 */
+    /**
+     * 앞 체결이 진행 중이면 이번 목록은 넘기지 않는다. 그 예약은 대기로 남아 다음 새 환율 때 다시 매칭된다.
+     * 실제와 같은 체결 스레드를 쓰고, 앞 체결을 풀어 준 뒤 남은 일이 모두 끝날 때까지 기다렸다가 확인한다.
+     * 두 번째 목록이 버려지지 않고 대기열에 들어갔다면 그때 실행되어 이 테스트가 실패한다.
+     */
     @Test
     void dropsMatchesWhileWorkerIsBusy() throws Exception {
+        ExecutorService worker = AsyncReservationDispatcher.singleWorker();
+        AsyncReservationDispatcher withRealWorker = new AsyncReservationDispatcher(executor, worker);
         UUID first = UUID.randomUUID();
         UUID second = UUID.randomUUID();
         CountDownLatch started = new CountDownLatch(1);
@@ -72,14 +78,43 @@ class AsyncReservationDispatcherTest {
             release.await();
             return ReservationExecution.of(first, ReservationExecution.Outcome.SKIPPED);
         });
-        dispatcher.dispatch(List.of(new ReservationMatch(YEN, List.of(first))));
+        withRealWorker.dispatch(List.of(new ReservationMatch(YEN, List.of(first))));
         assertTrue(started.await(3, TimeUnit.SECONDS), "체결이 시작되지 않았습니다");
 
-        dispatcher.dispatch(List.of(new ReservationMatch(YEN, List.of(second))));
+        withRealWorker.dispatch(List.of(new ReservationMatch(YEN, List.of(second))));
         release.countDown();
-        dispatcher.shutdown();
+        worker.shutdown();
+        assertTrue(worker.awaitTermination(3, TimeUnit.SECONDS), "체결이 끝나지 않았습니다");
 
+        verify(executor).execute(first, YEN);
         verify(executor, never()).execute(eq(second), any());
+    }
+
+    /** 서버 종료가 시작되면 진행 중인 목록의 남은 예약은 체결하지 않는다. 남은 예약은 대기로 남는다 */
+    @Test
+    void stopsRemainingReservationsWhenShutdownStarts() throws Exception {
+        ExecutorService worker = AsyncReservationDispatcher.singleWorker();
+        AsyncReservationDispatcher withRealWorker = new AsyncReservationDispatcher(executor, worker);
+        UUID first = UUID.randomUUID();
+        UUID next = UUID.randomUUID();
+        CountDownLatch started = new CountDownLatch(1);
+        // 중단 신호(interrupt)를 삼키고 정상 반환하는 호출: 신호만 믿으면 다음 예약으로 넘어간다
+        when(executor.execute(first, YEN)).thenAnswer(invocation -> {
+            started.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException ignored) {
+                // 라이브러리가 신호를 지운 것과 같은 상황
+            }
+            return ReservationExecution.of(first, ReservationExecution.Outcome.SKIPPED);
+        });
+        withRealWorker.dispatch(List.of(new ReservationMatch(YEN, List.of(first, next))));
+        assertTrue(started.await(3, TimeUnit.SECONDS), "체결이 시작되지 않았습니다");
+
+        withRealWorker.shutdown();
+        assertTrue(worker.awaitTermination(3, TimeUnit.SECONDS), "체결 스레드가 멈추지 않았습니다");
+
+        verify(executor, never()).execute(eq(next), any());
     }
 
     /** 예약마다 그 예약을 찾은 환율로 체결하고, 하나가 예상 밖 오류로 실패해도 나머지는 계속 체결한다 */

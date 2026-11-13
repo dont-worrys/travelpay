@@ -371,7 +371,9 @@ SUMMARY_ONLY=1 SCRIPT=quote-issue.js ./measure-compare.sh quote250 quote-db=../.
 ```bash
 # 1. 저장소 루트에서: 개선 전·후 커밋으로 jar 빌드 (측정 끝나도 지우지 않음)
 git worktree add ../travelpay-ledger-pre282 <개선 전 커밋> && (cd ../travelpay-ledger-pre282 && ./gradlew :exchange-service:bootJar)
-git worktree add ../travelpay-ledger-282 <개선 후 커밋> && (cd ../travelpay-ledger-282 && ./gradlew :exchange-service:bootJar)
+git worktree add ../travelpay-ledger-282 <서킷만 넣은 커밋> && (cd ../travelpay-ledger-282 && ./gradlew :exchange-service:bootJar)
+git worktree add ../travelpay-ledger-282-split <예약 체결 분리 커밋> && (cd ../travelpay-ledger-282-split && ./gradlew :exchange-service:bootJar)
+# #282에서 쓴 커밋: 개선 전 2afc64c, 서킷만 29991bc, 체결 분리 d701058
 
 # 2. 측정 폴더에서: 신청은 견적(Redis 키)을 읽으므로 측정 Redis를 noeviction으로. 같은 셸에서 끝까지 잽니다
 cd exchange-service/load-test

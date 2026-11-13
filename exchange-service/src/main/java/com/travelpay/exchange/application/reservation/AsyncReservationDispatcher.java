@@ -29,7 +29,7 @@ import org.springframework.stereotype.Component;
  *   남아 다음 새 환율 때 다시 매칭되므로 잃어버리지 않습니다. 대기열에 쌓으면 같은 예약이 수집마다 중복으로 쌓입니다.
  *   같은 예약이 겹쳐 체결되려 해도 체결의 행 잠금(SKIP LOCKED)과 상태 재확인이 한 번만 체결합니다.
  * - 예약 하나가 예상 밖 오류로 실패해도 나머지는 계속 체결합니다. 실패한 예약은 대기로 남습니다.
- * - 서버가 꺼질 때 체결이 끝나기를 기다리지 않습니다. 트랜잭션 중이면 롤백되어 대기로 남고, 원장 호출 중이면 주문이
+ * - 서버가 꺼질 때 체결이 끝나기를 기다리지 않고, 진행 중인 목록의 남은 예약도 건드리지 않습니다. 트랜잭션 중이면 롤백되어 대기로 남고, 원장 호출 중이면 주문이
  *   PROCESSING으로 남아 복구 스케줄러가 확정합니다.
  */
 @Slf4j
@@ -40,6 +40,8 @@ public class AsyncReservationDispatcher implements ReservationDispatcher {
 
     private final ExchangeReservationExecutor executor;
     private final ExecutorService worker;
+    /** 서버 종료가 시작됐는지. 체결 스레드가 읽고 종료하는 스레드가 쓰므로 volatile */
+    private volatile boolean stopping;
 
     @Autowired
     public AsyncReservationDispatcher(ExchangeReservationExecutor executor) {
@@ -65,8 +67,18 @@ public class AsyncReservationDispatcher implements ReservationDispatcher {
     private void executeAll(List<ReservationMatch> matches) {
         Map<Outcome, Integer> outcomes = new EnumMap<>(Outcome.class);
         int failed = 0;
+        int done = 0;
+        int total = matches.stream().mapToInt(match -> match.reservationIds().size()).sum();
         for (ReservationMatch match : matches) {
             for (UUID reservationId : match.reservationIds()) {
+                // 서버가 꺼지는 중이면 남은 예약은 건드리지 않는다. 닫히는 DB·지갑·원장 연결을 쓰지 않게 하려는 것이고,
+                // 남은 예약은 대기로 남아 다음 새 환율 때 다시 매칭된다
+                if (stopping) {
+                    log.info("서버 종료 중이라 남은 예약 {}건은 체결하지 않습니다. 대기로 남습니다.", total - done);
+                    log.info("예약 체결 결과: outcomes={}, failed={}", outcomes, failed);
+                    return;
+                }
+                done++;
                 try {
                     outcomes.merge(executor.execute(reservationId, match.rate()).outcome(), 1, Integer::sum);
                 } catch (RuntimeException e) {
@@ -78,14 +90,18 @@ public class AsyncReservationDispatcher implements ReservationDispatcher {
         log.info("예약 체결 결과: outcomes={}, failed={}", outcomes, failed);
     }
 
-    /** 체결 중이던 스레드를 깨워 멈춥니다. 남은 예약은 대기로 남습니다 */
+    /**
+     * 종료 표시를 먼저 켠 뒤 체결 중이던 스레드를 깨워 멈춥니다. 남은 예약은 대기로 남습니다.
+     * 깨우는 신호(interrupt)는 체결 중에 부른 라이브러리가 지울 수 있어, 반복문은 이 표시를 봅니다.
+     */
     @PreDestroy
     void shutdown() {
+        stopping = true;
         worker.shutdownNow();
     }
 
     /** 스레드 하나, 대기열 없음: 바쁘면 넘기는 쪽이 RejectedExecutionException을 받는다. 서버 종료를 막지 않게 데몬 스레드 */
-    private static ExecutorService singleWorker() {
+    static ExecutorService singleWorker() {
         return new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS, new SynchronousQueue<>(), runnable -> {
             Thread thread = new Thread(runnable, THREAD_NAME);
             thread.setDaemon(true);
