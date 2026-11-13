@@ -403,6 +403,43 @@ k6 결과 파일이 없거나 JSON이 아니거나 필수 필드가 빠지면 �
 - Postgres 컨테이너 이름·관리자 계정은 `PG_CONTAINER`(기본 `travelpay-local-postgres-1`, 측정 환경은 `travelpay-charge-load-test-measure-postgres-1`), `POSTGRES_USER`(기본 `travelpay_admin`), `POSTGRES_DB`(기본 `travelpay`) 환경 변수로 바꿉니다. 사전 확인·지표·정합성은 psql이 필요하고, 1초 DB 표본만 실패하면 `db.error`로 남기고 계속합니다.
 - 업무 주소는 `USER_URL`, `WALLET_URL`, `LEDGER_URL`, `MOCK_BANK_URL`(k6는 `BASE_URL`, 기본 `http://wallet:8082`), health·지표 주소는 `USER_METRICS_URL`, `WALLET_METRICS_URL`, `LEDGER_METRICS_URL`, `MOCK_BANK_METRICS_URL`(지정하지 않으면 업무 주소와 같음)로 바꿉니다.
 
+## 측정 결과 (2026-11-13, 격리 수준 조회 제거)
+
+### 무엇을 바꿨나
+
+트랜잭션마다 `isolation = READ_COMMITTED`를 명시해, 트랜잭션을 시작할 때마다 Spring이 격리 수준을 조회하고 드라이버가 `SHOW TRANSACTION ISOLATION LEVEL`을 보냈습니다. 명시를 빼고 격리 수준은 Hikari 커넥션 설정(`spring.datasource.hikari.transaction-isolation: TRANSACTION_READ_COMMITTED`)으로 옮겼습니다. 격리 수준은 그대로 READ COMMITTED입니다(#306).
+
+### 조건
+
+- 이 문서 1절 구성(앱까지 Docker), 동시성 1, 초당 150건, 3,000건, Outbox batch-size 200 (A' 조건)
+- 원장 JDBC batch(#294) 적용 후 같은 날 개선 전·후를 모두 다시 잼
+- 절차: 앱 4개를 `--force-recreate`로 새로 띄움 → 예열 100건 → 5회 → **3~5회차 중앙값**
+- SQL 횟수: `pg_stat_statements_reset()` 뒤 초당 50건 1,000건을 따로 재고 `wallet_app` 문장 수 ÷ 1,000
+
+앱을 새로 띄운 뒤 1회차는 완료 지연 P95가 30초를 넘어 복구 스케줄러가 큐에서 기다린 충전을 처리했고(`recoveredCharges` 15~117건), 2회차도 예열이 덜 돼 느렸습니다. 개선 전·후 모두 같은 패턴이라 두 회차를 빼고 비교합니다.
+
+### 결과
+
+| 지표 | 개선 전 | 개선 후 |
+| --- | --- | --- |
+| 건당 `SHOW TRANSACTION ISOLATION LEVEL` | 9.19 | 0 |
+| 격리 수준 SET 문장 | - | 0 (트랜잭션마다 나가지 않음) |
+| `BEGIN READ ONLY` / `BEGIN` | 6.05 / 4.15 | 6.04 / 4.12 |
+| 완료 처리량 (3회 범위) | 82.45건/초 (80.62~83.78) | 84.17건/초 (83.25~85.11) |
+| 완료 지연 P50 / P95 | 8.55 / 16.76초 | 8.35 / 16.67초 |
+| 정합성 | 모두 COMPLETED, 대사 어긋남 0 | 모두 COMPLETED, 대사 어긋남 0 |
+
+### 해석
+
+- 건당 격리 수준 조회 9번이 사라졌습니다(코드 기준 컨슈머 왕복 25 → 18).
+- 처리량 차이(+2.1%)는 개선 전 회차 편차(약 3.9%) 안이고 두 범위가 겹쳐, **처리량 개선으로 보지 않습니다.**
+- 같은 Docker 네트워크 안에서는 왕복 한 번이 짧아, 9번을 줄여도 한 건 시간(약 12ms)에 드러나지 않은 것으로 봅니다(추정).
+
+### 한계
+
+- 서비스와 DB가 다른 서버에 있는 배포 환경에서는 왕복이 더 길어 효과가 클 수 있지만 재지 않았습니다.
+- 각 조건 5회 중 3회만 비교에 썼습니다.
+
 ## 측정 결과 (2026-11-10, 앱까지 Docker)
 
 ### 조건
@@ -463,6 +500,8 @@ A'의 서비스 수치는 `a2-r2` 한 회차 값이고, 지갑 자체 시간은 
 | `SHOW TRANSACTION ISOLATION LEVEL` | 9.16 | 9 (접수 2 + 컨슈머 7) |
 | 트랜잭션 시작 (`BEGIN READ ONLY` 6 + `BEGIN` 4) | 10.16 | 10 |
 
+> 2026-11-13에 격리 수준 명시를 Hikari 커넥션 설정으로 옮겨 `SHOW TRANSACTION ISOLATION LEVEL`은 건당 0번이 됐습니다(#306, [측정 결과 (2026-11-13)](#측정-결과-2026-11-13-격리-수준-조회-제거)).
+
 소수점 아래는 측정 중 1초마다 도는 Outbox 발행기의 배경 쿼리입니다. 표에 없는 두 가지는 왕복 계산에서 뺐습니다: 외래 키 확인으로 Postgres 안에서 실행된 `SELECT … FOR KEY SHARE`(건당 5, `track=all`이라 내부 쿼리까지 잡힘)는 네트워크 왕복이 아니고, `BEGIN`은 드라이버가 첫 쿼리와 한 번에 보냅니다. `COMMIT`은 이 통계에 거의 잡히지 않아(원인 미확인) 트랜잭션 수로 대신 셌습니다.
 
 **남은 8.2ms**: 앱↔DB 왕복, 트랜잭션 처리, Feign 호출, 직렬화 같은 비용이 섞여 있습니다. 이 중 앱↔DB 왕복이 차지하는 몫은 지갑 환경에서 재지 않았습니다. CPU 7%라 자원 부족이 아니라 한 스레드가 단계를 차례로 기다리는 구조의 한계는 그대로입니다.
@@ -483,7 +522,7 @@ A'의 서비스 수치는 `a2-r2` 한 회차 값이고, 지갑 자체 시간은 
 
 | 후보 | 건당 왕복 | 근거 | 판단 |
 | --- | --- | --- | --- |
-| 격리 수준 명시로 생기는 `SHOW TRANSACTION ISOLATION LEVEL` | 7번 | Postgres 로그로 발생 확인. 기본값이 이미 READ COMMITTED라 명시를 빼면 사라짐 | 변경은 작지만 모든 트랜잭션 설정에 걸쳐 있어 별도 작업 |
+| 격리 수준 명시로 생기는 `SHOW TRANSACTION ISOLATION LEVEL` | 7번 | Postgres 로그로 발생 확인. 기본값이 이미 READ COMMITTED라 명시를 빼면 사라짐 | **구현함(#306)**. 건당 9.19 → 0번. 처리량 차이는 회차 편차 안 ([2026-11-13 결과](#측정-결과-2026-11-13-격리-수준-조회-제거)) |
 | 단계마다 다시 읽는 조회 전용 트랜잭션 | 약 8번 | 코드 경로 분석 | 실행기 구조 변경 |
 | 레코드마다 동기 오프셋 커밋 | 1번 | `AckMode.RECORD`, 동기 커밋 기본값 | 배치 커밋이면 줄지만 재전달 범위가 넓어짐(실행기가 멱등이라 정합성은 안전) |
 | Outbox batch-size 기본값 | | 이 환경에서는 동시성 1로도 기본 상한(초당 50건)을 넘음 | 동시성을 올리지 않아도 검토 대상 |

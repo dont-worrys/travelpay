@@ -572,6 +572,7 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 - 404는 경로 없음(`COMMON_NOT_FOUND`)과 구분하려고 지갑 전용 코드를 씁니다.
 - DB 장애 503은 `WalletDatabaseExceptionHandler`가 임시로 맡고 있습니다(추후 common 처리기로 이전 예정). 503은 결과 모름이므로 같은 요청(충전은 같은 `Idempotency-Key`)으로 다시 보냅니다.
 - DB 트랜잭션 제한 시간은 3초(Outbox 발행만 10초), Hikari 커넥션 획득 2초·검증 1초입니다.
+- 트랜잭션 격리 수준은 READ COMMITTED이며, 트랜잭션마다 명시하지 않고 Hikari 커넥션 설정(`spring.datasource.hikari.transaction-isolation: TRANSACTION_READ_COMMITTED`, `application.yml`·`application-prod.yml` 양쪽)으로 정합니다. 트랜잭션마다 명시하면 시작할 때마다 격리 수준 조회(`SHOW TRANSACTION ISOLATION LEVEL`)가 나가 충전 한 건당 약 9번의 DB 왕복이 생겼습니다([부하 측정 README](../../wallet-service/load-test/README.md#측정-결과-2026-11-13-격리-수준-조회-제거)). 다른 트랜잭션이 커밋한 행을 다시 읽는 경로가 이 격리 수준을 전제로 하므로 바꾸지 않습니다.
 
 ## DB 스키마 (Flyway)
 
@@ -624,6 +625,7 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 | `OutboxPublisherIntegrationTest` | 실제 Kafka로 발행, Outbox 상태, Kafka 중단 시 동작 |
 | `OutboxPublishOrderIntegrationTest` | `PENDING` 조회 순서(재시도 적은 순 → 오래된 순) |
 | `ChargeQueryIntegrationTest` | 충전 내역 조회 API(회원·관리자) |
+| `ConnectionIsolationIntegrationTest` | 서버 기본 격리 수준을 serializable로 띄운 PostgreSQL에서도 쓰기·조회 트랜잭션이 READ COMMITTED인지(Hikari 설정 적용 확인) |
 
 ## 고려 중
 
