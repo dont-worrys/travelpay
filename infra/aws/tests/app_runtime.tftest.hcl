@@ -309,14 +309,15 @@ run "environment_points_to_private_endpoints_and_production_profile" {
     error_message = "컨테이너 환경 변수는 task_environment의 값을 빠짐없이 그대로 써야 합니다."
   }
 
-  # 다른 서비스가 빠진 주소를 반영하는 최대 시간(서버 응답 캐시 + 목록 조회 + LoadBalancer 캐시)이 종료 전 대기보다 짧아야 하고,
+  # 중복 캐시를 끈 상태에서 서버 응답 캐시 + 목록 조회 주기의 합은 종료 전 대기보다 짧아야 합니다.
+  # 이 합은 네트워크 지연·재시도가 없는 경우의 설정상 여유이며 실제 전파 시간의 상한을 보장하지는 않습니다.
   # 종료 전 대기 + OUT_OF_SERVICE 호출(entrypoint.sh의 curl 최대 5초) + Spring 정상 종료(단계별 기본 30초)가 stopTimeout 안에 끝나야 합니다.
   assert {
     condition = alltrue([
       for key in ["gateway", "user", "wallet", "payment", "exchange", "ledger"] : (
+        local.task_environment[key].SPRING_CLOUD_LOADBALANCER_CACHE_ENABLED == "false" &&
         tonumber(local.task_environment.eureka.EUREKA_SERVER_RESPONSE_CACHE_UPDATE_INTERVAL_MS) / 1000 +
-        tonumber(local.task_environment[key].EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS) +
-        tonumber(trimsuffix(local.task_environment[key].SPRING_CLOUD_LOADBALANCER_CACHE_TTL, "s")) <
+        tonumber(local.task_environment[key].EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS) <
         tonumber(local.task_environment[key].TRAVELPAY_DRAIN_SECONDS) &&
         tonumber(local.task_environment[key].TRAVELPAY_DRAIN_SECONDS) + 5 + 30 <= jsondecode(aws_ecs_task_definition.application[key].container_definitions)[0].stopTimeout &&
         local.task_environment[key].TRAVELPAY_SERVICE_PORT == tostring(local.application_services[key].port) &&
@@ -389,6 +390,44 @@ run "environment_points_to_private_endpoints_and_production_profile" {
       { for item in jsondecode(aws_ecs_task_definition.application["eureka"].container_definitions)[0].environment : item.name => item.value }.EUREKA_SERVER_ENABLE_SELF_PRESERVATION == "false"
     )
     error_message = "Redis·Kafka·Mock Bank·ALB 주소와 Eureka 응답 캐시·자기 보호 설정이 운영 값과 같아야 합니다."
+  }
+}
+
+run "eureka_clients_do_not_cache_the_registry_twice" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for key in ["gateway", "user", "wallet", "payment", "exchange", "ledger"] : (
+        lookup(local.task_environment[key], "SPRING_CLOUD_LOADBALANCER_CACHE_ENABLED", "true") == "false" &&
+        !contains(keys(local.task_environment[key]), "SPRING_CLOUD_LOADBALANCER_CACHE_TTL")
+      )
+    ])
+    error_message = "Eureka가 보관한 목록을 바로 사용하도록 클라이언트 6개는 LoadBalancer의 중복 캐시를 꺼야 합니다."
+  }
+
+  assert {
+    condition = alltrue([
+      for key in ["eureka", "mock_bank"] :
+      !contains(keys(local.task_environment[key]), "SPRING_CLOUD_LOADBALANCER_CACHE_ENABLED")
+    ])
+    error_message = "Eureka 클라이언트가 아닌 앱에는 LoadBalancer 캐시 설정을 추가하지 않습니다."
+  }
+}
+
+run "eureka_heartbeats_and_server_renewal_expectations_agree" {
+  command = plan
+
+  assert {
+    condition = alltrue([
+      for key in ["gateway", "user", "wallet", "payment", "exchange", "ledger"] : (
+        lookup(local.task_environment[key], "EUREKA_INSTANCE_LEASE_RENEWAL_INTERVAL_IN_SECONDS", "30") == "5" &&
+        lookup(local.task_environment.eureka, "EUREKA_SERVER_EXPECTED_CLIENT_RENEWAL_INTERVAL_SECONDS", "30") ==
+        lookup(local.task_environment[key], "EUREKA_INSTANCE_LEASE_RENEWAL_INTERVAL_IN_SECONDS", "30") &&
+        lookup(local.task_environment[key], "EUREKA_INSTANCE_LEASE_EXPIRATION_DURATION_IN_SECONDS", "90") == "90"
+      )
+    ])
+    error_message = "클라이언트는 5초마다 갱신하고 서버의 기대 주기도 같아야 하며, 만료 시간은 기본 90초를 유지합니다."
   }
 }
 

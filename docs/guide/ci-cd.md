@@ -99,7 +99,7 @@ eureka → mock-bank → ledger → user → wallet → payment → exchange →
 - 서비스마다 정상 Task 1개를 유지한 채 새 Task를 띄우고, 새 Task가 정상(헬스 체크·Gateway는 ALB 상태 확인)이 된 뒤 이전 Task를 내립니다.
 - Eureka에 등록하는 6개 서비스(eureka-server·mock-bank 제외)는 내려갈 때 Eureka에 `OUT_OF_SERVICE`를 알리고 20초 기다린 뒤 종료합니다. 처리 중인 요청이 끝나고 다른 서비스가 주소 목록을 갱신할 시간입니다.
 - 이전 Task와 새 Task가 잠깐 함께 돕니다. Payment·Wallet·Exchange의 스케줄러는 두 Task에서 함께 돌아도 안전하다고 각 담당자가 확인했습니다(조건부 갱신, `SKIP LOCKED`, 유일 인덱스).
-- 2026-11-13 운영 시험에서 wallet·gateway·payment를 다시 배포하는 동안 0.5초마다 보낸 요청이 모두 성공했습니다. **eureka는 예외입니다.** 새 Eureka는 빈 목록으로 시작하므로, 이전 Eureka가 내려간 뒤 각 서비스가 다음 상태 신호(30초 간격) 때 다시 등록할 때까지 약 26초 동안 일부 요청이 503이었습니다.
+- 2026-11-13 초기 운영 시험에서 wallet·gateway·payment를 다시 배포하는 동안 0.5초마다 보낸 요청이 모두 성공했습니다. 당시 Eureka는 heartbeat 30초 설정에서 약 26초 동안 일부 요청이 503이었습니다. 이후 heartbeat를 5초로 줄이고 중복 LoadBalancer 캐시를 껐습니다. 한 조건의 로컬 재현에서는 목록 공백이 약 25초에서 약 5초로 줄었지만, 추가 시험에서 조회 시점이 달라지면 약 10초도 관측했습니다. 운영 반영 후 Eureka 교체 중 읽기 전용 약관 조회 339건은 모두 200이었습니다. 여러 업무 API를 포함한 초기 시험과 조건이 같지 않으므로 전체 API의 무중단을 보장하는 결과는 아닙니다. 주기별 비교와 선택 근거는 AWS 가이드의 "heartbeat 5초 선택 근거"에 있습니다.
 
 ### 팀원이 지킬 규칙
 
@@ -108,7 +108,7 @@ eureka → mock-bank → ledger → user → wallet → payment → exchange →
 - **API 제거·변경:** 새 API(또는 필드)를 먼저 추가해 배포하고, 호출하는 쪽이 모두 새 API로 바꾼 뒤 다음 배포에서 이전 것을 지웁니다.
 - **DB(Flyway):** 컬럼·테이블 추가처럼 이전 코드가 계속 동작하는 변경만 먼저 하고, 삭제·이름 변경은 이전 코드가 더 이상 쓰지 않게 된 뒤의 배포에서 합니다. 롤링 중에는 이전 Task가 새 스키마로 돕니다.
 - **Enum·메시지 형식:** 새 값을 받는 쪽을 먼저 배포한 뒤 보내는 쪽에서 쓰기 시작합니다.
-- **eureka가 다시 배포되는 머지:** `eureka-server/`, 루트 `build.gradle`·`settings.gradle`·`gradlew`·`gradle/`, `deploy/docker/`의 Dockerfile·시작 스크립트, `.dockerignore`가 바뀌면 eureka도 다시 배포되어 약 26초 동안 일부 요청이 503이 됩니다(위 "롤링 배포 중 동작"). 이런 머지는 사용자가 없는 시간에 합니다. `services`에 `eureka`를 넣는 수동 실행도 같습니다.
+- **eureka가 다시 배포되는 머지:** `eureka-server/`(테스트·부하 시험 제외), 루트 `build.gradle`·`settings.gradle`·`gradlew`·`gradle/`, `deploy/docker/`의 Dockerfile·시작 스크립트, `.dockerignore`가 바뀌면 eureka도 다시 배포되어 목록 복원 중 일부 요청이 503일 수 있습니다(위 "롤링 배포 중 동작"). 이런 머지는 사용자가 없는 시간에 합니다. `services`에 `eureka`를 넣는 수동 실행도 같습니다.
 
 ### 다시 배포하기
 

@@ -1,7 +1,7 @@
 # 8개 앱을 서비스마다 Task 1개로 상시 실행합니다. 배포는 새 Task가 정상이 된 뒤 이전 Task를 내리는 롤링입니다.
 # 스케줄러가 있는 Payment·Wallet·Exchange는 롤링 중 두 Task에서 함께 돌아도 안전하다고 담당자가 확인했습니다(2026-11-12).
 # 기동 순서는 두지 않습니다. 호스트 교체·장애 복구 때도 Task는 순서 없이 시작하므로 앱이 이를 견뎌야 합니다. Eureka 클라이언트는
-# 서버에 닿지 못하면 30초마다 등록을 다시 시도하고, 서버가 모르는 인스턴스라고 답하면(heartbeat 404) 다시 등록합니다.
+# 설정한 heartbeat 주기로 갱신을 시도하고, 서버가 모르는 인스턴스라고 답하면(heartbeat 404) 다시 등록합니다.
 resource "aws_ecs_service" "application" {
   for_each = var.enable_app_services ? local.application_services : {}
 
