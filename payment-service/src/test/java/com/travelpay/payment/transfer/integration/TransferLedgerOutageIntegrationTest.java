@@ -73,9 +73,9 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
         assertNull(row.get("review_reason"));
     }
 
-    /** TC-08-I7: 장애 중 같은 키 재요청·상세 조회는 PROCESSING이고 원장을 다시 부르지 않으며, 취소는 409입니다. */
+    /** TC-08-I7: 장애 중 같은 키 재요청·상세 조회는 PROCESSING이고 원장을 다시 부르지 않으며, 수취인에게는 보이지 않습니다. */
     @Test
-    void retryDetailAndCancelDuringOutage() throws Exception {
+    void retryAndDetailDuringOutage() throws Exception {
         givenLedgerOutage("CONNECT_REFUSED");
         UUID transferId = transferIdOf(requestTransfer("tc08-during").andExpect(status().isAccepted()));
 
@@ -86,8 +86,8 @@ class TransferLedgerOutageIntegrationTest extends TransferApiIntegrationSupport 
         mvc.perform(asUser(get("/api/v1/transfers/{id}", transferId), senderId))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.status").value("PROCESSING"));
-        mvc.perform(asUser(post("/api/v1/transfers/{id}/cancel", transferId), senderId))
-                .andExpect(status().isConflict());
+        mvc.perform(asUser(get("/api/v1/transfers/{id}", transferId), receiverId))
+                .andExpect(status().isNotFound());
 
         verify(ledgerFeignApi, times(1)).register(any());
         assertEquals(1, ((Number) row(transferId).get("attempt_count")).intValue());

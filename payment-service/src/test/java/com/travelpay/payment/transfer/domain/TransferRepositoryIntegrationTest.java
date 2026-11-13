@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
-import com.travelpay.common.error.BusinessException;
 import com.travelpay.common.response.PageResponse;
 import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.transfer.application.TransferService;
@@ -22,10 +21,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -67,7 +66,7 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
 
         assertEquals(saved.getId(), found.getId());
         assertEquals("KRW", found.getCurrency());
-        assertEquals(TransferStatus.REQUESTED, found.getStatus());
+        assertEquals(TransferStatus.COMPLETED, found.getStatus());
         // 접수 응답의 생성 시각이 이후 조회한 DB 저장 값(마이크로초)과 정확히 같아야 합니다.
         assertEquals(saved.getCreatedAt(), found.getCreatedAt());
     }
@@ -146,33 +145,18 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
     }
 
     @Test
-    void cancelChangesRequestedTransferOnceAndKeepsCancelledOnRetry() {
-        UUID senderId = UUID.randomUUID();
-        Transfer saved = transferRepository.saveAndFlush(transfer(senderId, UUID.randomUUID(), "cancel", 1_000L));
+    void receivedTransfersIncludeOnlyCompletedWhileSentTransfersIncludeEveryStatus() {
+        UUID userId = UUID.randomUUID();
+        UUID otherId = UUID.randomUUID();
+        Instant base = Instant.parse("2026-10-28T01:00:00Z");
 
-        TransferResponse first = transferService.cancel(senderId, saved.getId());
-        TransferResponse retry = transferService.cancel(senderId, saved.getId());
+        Transfer receivedCompleted = saveAt(transfer(otherId, userId, "r-done", 1_000L), base);
+        saveAt(processing(otherId, userId, "r-processing"), base.plusSeconds(1));
+        Transfer sentProcessing = saveAt(processing(userId, otherId, "s-processing"), base.plusSeconds(2));
+        entityManager.clear();
 
-        assertEquals(TransferStatus.CANCELLED, first.status());
-        assertEquals(TransferStatus.CANCELLED, retry.status());
-        assertEquals("CANCELLED", jdbcTemplate.queryForObject(
-                "select status from transfer where id = ?", String.class, saved.getId()));
-    }
-
-    @Test
-    void receiverAndOtherUserCannotCancelAndStatusStaysRequested() {
-        UUID receiverId = UUID.randomUUID();
-        Transfer saved = transferRepository.saveAndFlush(transfer(UUID.randomUUID(), receiverId, "keep", 1_000L));
-
-        var receiver = assertThrows(BusinessException.class,
-                () -> transferService.cancel(receiverId, saved.getId()));
-        var otherUser = assertThrows(BusinessException.class,
-                () -> transferService.cancel(UUID.randomUUID(), saved.getId()));
-
-        assertSame(TransferErrorCode.NOT_FOUND, receiver.getErrorCode());
-        assertSame(TransferErrorCode.NOT_FOUND, otherUser.getErrorCode());
-        assertEquals("REQUESTED", jdbcTemplate.queryForObject(
-                "select status from transfer where id = ?", String.class, saved.getId()));
+        assertEquals(List.of(receivedCompleted.getId()), collectAllPages(userId, TransferDirection.RECEIVED, 10));
+        assertEquals(List.of(sentProcessing.getId(), receivedCompleted.getId()), collectAllPages(userId, null, 10));
     }
 
     @Test
@@ -430,8 +414,9 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
                 1_000L, "KRW", null, idempotencyKey);
     }
 
+    /** 완료된 송금입니다. 받은 내역에는 완료 송금만 보이므로 목록 테스트의 기본 데이터로 씁니다. */
     private static Transfer transfer(UUID senderId, UUID receiverId, String idempotencyKey, long amount) {
-        return Transfer.request(
+        Transfer transfer = Transfer.process(
                 senderId,
                 receiverId,
                 UUID.randomUUID(),
@@ -441,5 +426,12 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
                 null,
                 idempotencyKey
         );
+        ReflectionTestUtils.setField(transfer, "status", TransferStatus.COMPLETED);
+        return transfer;
+    }
+
+    private static Transfer processing(UUID senderId, UUID receiverId, String idempotencyKey) {
+        return Transfer.process(senderId, receiverId, UUID.randomUUID(), UUID.randomUUID(),
+                1_000L, "KRW", null, idempotencyKey);
     }
 }

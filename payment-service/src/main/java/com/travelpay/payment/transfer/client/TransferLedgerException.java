@@ -13,7 +13,12 @@ public class TransferLedgerException extends RuntimeException {
          * 확정 거절이 아닌 4xx(409 reference 충돌, 400 형식 오류, 알 수 없는 422 코드, 경로 오류 404 등).
          * 원장에 반영되지 않았지만 송금 요청을 잘못 만든 버그이거나 계약 불일치라 실패로 단정하지 않습니다.
          */
-        REQUEST_NOT_ACCEPTED
+        REQUEST_NOT_ACCEPTED,
+        /**
+         * 원장 서킷이 열려 있어 원장에 보내지 않았습니다. 원장에 닿지 않았으므로 결과 모름 시도 횟수에 넣지 않고,
+         * 복구 스케줄러가 대기 시간 뒤 다시 보냅니다.
+         */
+        NOT_SENT
     }
 
     private final Kind kind;
@@ -29,6 +34,10 @@ public class TransferLedgerException extends RuntimeException {
 
     public static TransferLedgerException requestNotAccepted(String message, Throwable cause) {
         return new TransferLedgerException(Kind.REQUEST_NOT_ACCEPTED, message, cause);
+    }
+
+    public static TransferLedgerException notSent(String message) {
+        return new TransferLedgerException(Kind.NOT_SENT, message, null);
     }
 
     public Kind getKind() {

@@ -44,7 +44,6 @@ class TransferApiDocsIntegrationTest extends PostgresContainerSupport {
                 .andExpect(jsonPath("$.paths.keys()", containsInAnyOrder(
                         "/api/v1/transfers",
                         "/api/v1/transfers/{transferId}",
-                        "/api/v1/transfers/{transferId}/cancel",
                         "/api/v1/transfers/recipients/{receiverId}")));
     }
 
@@ -69,8 +68,8 @@ class TransferApiDocsIntegrationTest extends PostgresContainerSupport {
                 .andExpect(jsonPath(CREATE + ".responses.keys()", not(hasItem("200"))))
                 .andExpect(jsonPath("$.paths['/api/v1/transfers/recipients/{receiverId}'].get.responses.keys()",
                         hasItems("200", "404", "429", "503")))
-                .andExpect(jsonPath("$.paths['/api/v1/transfers/{transferId}/cancel'].post.responses.keys()",
-                        hasItems("200", "404", "409")));
+                .andExpect(jsonPath("$.paths['/api/v1/transfers/{transferId}'].get.responses.keys()",
+                        hasItems("200", "404")));
     }
 
     @Test

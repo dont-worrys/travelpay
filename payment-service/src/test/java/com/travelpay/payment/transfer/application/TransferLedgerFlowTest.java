@@ -204,6 +204,49 @@ class TransferLedgerFlowTest {
         assertEquals(3_000L, ledger.balance(TARGET_WALLET_ID));
     }
 
+    /**
+     * 원장 서킷이 열려 보내지 않은 송금은 PROCESSING(202)으로 두고 시도 횟수를 늘리지 않습니다. 원장에 닿지 않았으므로
+     * 재시도 한도(MANUAL_REVIEW)에 넣지 않고, 서킷이 닫힌 뒤 복구가 같은 reference로 완료합니다.
+     */
+    @Test
+    void keepsProcessingWithoutCountingAttemptWhenLedgerRequestIsNotSent() {
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.notSent("원장 서킷 열림");
+        };
+        TransferResponse first = transferService.request(SENDER_ID, KEY, REQUEST);
+        assertEquals(TransferStatus.PROCESSING, first.status());
+        assertEquals(0, onlyTransfer().getAttemptCount());
+        verify(transferRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+        ledger.onRegister = ledger::apply;
+
+        int settled = transferService.recoverDue(farFuture(), 10);
+
+        assertEquals(1, settled);
+        assertEquals(TransferStatus.COMPLETED, onlyTransfer().getStatus());
+        assertEquals(7_000L, ledger.balance(SOURCE_WALLET_ID));
+    }
+
+    /** 복구 중 서킷이 열려 있으면 첫 건에서 주기를 멈춥니다. 남은 송금은 부르지 않고, 시도 횟수와 상태는 그대로입니다. */
+    @Test
+    void recoveryStopsCycleWithoutCountingAttemptsWhenCircuitIsOpen() {
+        Instant base = Instant.parse("2026-11-02T00:00:00Z");
+        Transfer first = staleProcessingTransfer("first-key", base);
+        Transfer second = staleProcessingTransfer("second-key", base.plusSeconds(10));
+        ledger.onRegister = request -> {
+            throw TransferLedgerException.notSent("원장 서킷 열림");
+        };
+
+        int settled = transferService.recoverDue(farFuture(), 10);
+
+        assertEquals(0, settled);
+        assertEquals(List.of(first.getId()), ledger.requests.stream().map(LedgerTransactionRequest::referenceId).toList());
+        assertEquals(TransferStatus.PROCESSING, first.getStatus());
+        assertEquals(TransferStatus.PROCESSING, second.getStatus());
+        assertEquals(first.getAttemptCount(), second.getAttemptCount());
+        verify(transferRepository, never()).recordUnknownAttempt(any(), anyInt(), any(), any(), any());
+        verify(transferRepository, never()).markManualReview(any(), any(), any());
+    }
+
     /** 원장이 요청을 받아들이지 않으면(409·400 등) FAILED로 단정하지 않고, 재시도 없이 MANUAL_REVIEW로 둡니다. */
     @Test
     void movesToManualReviewWithoutFailingWhenLedgerDoesNotAcceptRequest() {
@@ -708,18 +751,6 @@ class TransferLedgerFlowTest {
         assertEquals(List.of(LedgerTransactionRequest.of(recent)), ledger.requests);
     }
 
-    @Test
-    void recoveryDoesNothingWithoutLedgerClient() {
-        savedProcessingTransfer(KEY);
-        TransferService withoutLedger = new TransferService(transferRepository, mock(TransferWalletReader.class),
-                mock(TransferUserReader.class), Optional.empty());
-
-        int recovered = withoutLedger.recoverDue(farFuture(), 10);
-
-        assertEquals(0, recovered);
-        verify(transferRepository, never()).claimRecoveryTargets(any(), any(), anyInt());
-    }
-
     /** 모든 재시도 대기 시간(최대 4분)이 지난 시각입니다. */
     private static Instant farFuture() {
         return Instant.now().plusSeconds(3600);
@@ -738,7 +769,7 @@ class TransferLedgerFlowTest {
         TransferUserReader userReader = mock(TransferUserReader.class);
         when(userReader.findRecipient(RECEIVER_ID))
                 .thenReturn(Optional.of(new UserRecipientResponse(RECEIVER_ID, "홍길동")));
-        return new TransferService(transferRepository, walletReader, userReader, Optional.of(fakeLedger));
+        return new TransferService(transferRepository, walletReader, userReader, fakeLedger);
     }
 
     private Transfer onlyTransfer() {

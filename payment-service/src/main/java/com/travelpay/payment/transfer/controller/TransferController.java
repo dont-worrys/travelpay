@@ -36,7 +36,7 @@ import org.springframework.web.bind.annotation.RestController;
  * 송금 외부 API입니다. 회원(USER)만 사용하며, MASTER는 403입니다(wallet-service 회원 API와 같은 방식).
  * 응답 본문은 공통 ApiResponse이며, 문서의 응답 코드 설명(Swagger의 ApiResponse)은 이름이 겹쳐 전체 이름으로 씁니다.
  */
-@Tag(name = "송금", description = "사용자 간 지갑 송금 요청·조회·취소")
+@Tag(name = "송금", description = "사용자 간 지갑 송금 요청·조회")
 @RestController
 @RequestMapping("/api/v1/transfers")
 public class TransferController {
@@ -51,7 +51,7 @@ public class TransferController {
 
     /**
      * 실제 자금 이동 여부는 응답의 status로 구분합니다.
-     * 원장 처리 결과가 확정되지 않은 송금(PROCESSING·MANUAL_REVIEW)은 202, 그 외(REQUESTED·COMPLETED)는 201이며,
+     * 원장 처리 결과가 확정되지 않은 송금(PROCESSING·MANUAL_REVIEW)은 202, 그 외(COMPLETED, 예전 송금의 REQUESTED·CANCELLED)는 201이며,
      * 원장이 거절한 송금은 422입니다.
      */
     @Operation(summary = "송금 요청", description = """
@@ -64,7 +64,7 @@ public class TransferController {
             재시도 한도를 넘거나 원장이 요청을 받지 않으면 `MANUAL_REVIEW`가 됩니다.""")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "201",
-                    description = "송금 완료(`COMPLETED`) 또는 접수(`REQUESTED`)"),
+                    description = "송금 완료(`COMPLETED`)"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "202",
                     description = "원장 처리 결과 미확정(`PROCESSING`) 또는 수동 확인 대상(`MANUAL_REVIEW`). "
                             + "상세 조회로 최종 상태를 확인합니다."),
@@ -108,7 +108,9 @@ public class TransferController {
     }
 
     @Operation(summary = "송금 상세 조회",
-            description = "송금인 또는 수취인만 조회할 수 있습니다. 그 밖의 사용자에게는 송금이 없는 것과 같이 404를 반환합니다.")
+            description = """
+                    송금인은 모든 상태를, 수취인은 완료(`COMPLETED`) 송금만 조회할 수 있습니다.
+                    그 밖의 경우에는 송금이 없는 것과 같이 404를 반환합니다.""")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "조회 성공"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
@@ -116,7 +118,7 @@ public class TransferController {
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
                     description = "`COMMON_FORBIDDEN` MASTER는 사용자 송금 API를 쓸 수 없음"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
-                    description = "`TRANSFER_NOT_FOUND` 송금이 없거나 당사자가 아님")
+                    description = "`TRANSFER_NOT_FOUND` 송금이 없거나, 당사자가 아니거나, 수취인이 완료 전 송금을 조회")
     })
     @GetMapping("/{transferId}")
     public ApiResponse<TransferResponse> get(
@@ -157,33 +159,11 @@ public class TransferController {
         return ApiResponse.success(transferService.findRecipient(requireTransferUser(user), receiverId));
     }
 
-    /** 접수 상태의 송금만 취소하며, 이미 취소된 송금은 현재 상태를 그대로 반환합니다. */
-    @Operation(summary = "송금 취소", description = """
-            송금인만 취소할 수 있으며, 접수(`REQUESTED`) 상태의 송금만 취소합니다.
-            이미 취소된 송금은 200과 현재 상태를 그대로 반환합니다.""")
-    @ApiResponses({
-            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200",
-                    description = "취소 완료 또는 이미 취소됨(`CANCELLED`)"),
-            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "401",
-                    description = "`COMMON_UNAUTHORIZED` 회원 헤더 없음"),
-            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "403",
-                    description = "`COMMON_FORBIDDEN` MASTER는 사용자 송금 API를 쓸 수 없음"),
-            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "404",
-                    description = "`TRANSFER_NOT_FOUND` 송금이 없거나 송금인이 아님"),
-            @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "409",
-                    description = "`COMMON_CONFLICT` 취소할 수 없는 상태(`PROCESSING`·`COMPLETED`·`FAILED`·`MANUAL_REVIEW`)")
-    })
-    @PostMapping("/{transferId}/cancel")
-    public ApiResponse<TransferResponse> cancel(
-            @CurrentUser AuthenticatedUser user,
-            @Parameter(description = "송금 ID") @PathVariable UUID transferId
-    ) {
-        return ApiResponse.success(transferService.cancel(requireTransferUser(user), transferId));
-    }
-
     /** 생성 시각 내림차순 고정이며, page는 0부터 시작합니다. */
     @Operation(summary = "송금 내역 조회",
-            description = "요청자가 보내거나 받은 송금만 반환합니다. 정렬은 생성 시각 내림차순(같으면 ID 내림차순)으로 고정입니다.")
+            description = """
+                    요청자가 보낸 송금(모든 상태)과 받은 송금(완료 `COMPLETED`만)을 반환합니다.
+                    정렬은 생성 시각 내림차순(같으면 ID 내림차순)으로 고정입니다.""")
     @ApiResponses({
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "200", description = "조회 성공"),
             @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode = "400",
@@ -196,7 +176,7 @@ public class TransferController {
     @GetMapping
     public ApiResponse<PageResponse<TransferResponse>> list(
             @CurrentUser AuthenticatedUser user,
-            @Parameter(description = "`SENT` 보낸 내역, `RECEIVED` 받은 내역. 생략하면 둘 다")
+            @Parameter(description = "`SENT` 보낸 내역, `RECEIVED` 받은 내역(완료만). 생략하면 둘 다")
             @RequestParam(required = false) TransferDirection direction,
             @Parameter(description = "페이지 번호(0부터)")
             @RequestParam(defaultValue = "0") @Min(0) int page,

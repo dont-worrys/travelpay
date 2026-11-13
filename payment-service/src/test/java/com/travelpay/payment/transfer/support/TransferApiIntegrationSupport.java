@@ -13,7 +13,10 @@ import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.infra.client.ledger.LedgerFeignApi;
 import com.travelpay.payment.infra.client.user.UserFeignApi;
 import com.travelpay.payment.infra.client.wallet.WalletFeignApi;
+import com.travelpay.payment.transfer.client.TransferLedgerClientAdapter;
 import com.travelpay.payment.transfer.controller.TransferController;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import org.springframework.test.util.ReflectionTestUtils;
 import jakarta.persistence.EntityManager;
 import feign.FeignException;
 import feign.Request;
@@ -62,6 +65,9 @@ public abstract class TransferApiIntegrationSupport extends PostgresContainerSup
     @Autowired
     protected EntityManager entityManager;
 
+    @Autowired
+    private TransferLedgerClientAdapter ledgerClientAdapter;
+
     @MockitoBean
     protected LedgerFeignApi ledgerFeignApi;
 
@@ -79,6 +85,7 @@ public abstract class TransferApiIntegrationSupport extends PostgresContainerSup
 
     @BeforeEach
     void setUpTransferApi() {
+        resetLedgerCircuitBreaker();
         mvc = MockMvcBuilders.webAppContextSetup(context).build();
         senderId = UUID.randomUUID();
         receiverId = UUID.randomUUID();
@@ -88,6 +95,14 @@ public abstract class TransferApiIntegrationSupport extends PostgresContainerSup
         givenWallet(receiverId, targetWalletId, "ACTIVE");
         when(userFeignApi.getActiveUser(receiverId))
                 .thenReturn(ApiResponse.success(new UserFeignApi.UserResponse(receiverId, "홍길동")));
+    }
+
+    /**
+     * 원장 서킷(transferLedger)을 닫힌 상태로 되돌립니다. 서킷은 컨텍스트에 하나라 앞 테스트의 원장 실패가 이어지지 않도록
+     * 테스트마다 초기화하고, 테스트 준비 과정에서 일부러 낸 원장 실패가 서킷을 열지 않게 할 때도 씁니다.
+     */
+    protected void resetLedgerCircuitBreaker() {
+        ((CircuitBreaker) ReflectionTestUtils.getField(ledgerClientAdapter, "circuitBreaker")).reset();
     }
 
     protected void givenWallet(UUID userId, UUID walletId, String status) {

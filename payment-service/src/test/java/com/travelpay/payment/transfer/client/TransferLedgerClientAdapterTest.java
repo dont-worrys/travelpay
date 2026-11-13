@@ -15,6 +15,8 @@ import com.travelpay.payment.transfer.client.LedgerTransactionResponse.RejectRea
 import com.travelpay.payment.transfer.client.TransferLedgerException.Kind;
 import com.travelpay.payment.transfer.domain.Transfer;
 import feign.FeignException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import feign.Request;
 import feign.Response;
 import feign.RetryableException;
@@ -32,7 +34,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -57,7 +62,7 @@ class TransferLedgerClientAdapterTest {
     @BeforeEach
     void setUp() {
         feignClient = mock(LedgerFeignApi.class);
-        adapter = new TransferLedgerClientAdapter(feignClient);
+        adapter = new TransferLedgerClientAdapter(feignClient, new SimpleMeterRegistry());
     }
 
     /** 새로 기록(201)과 같은 reference 재요청(200) 모두 본문이 같아 POSTED로 해석합니다. */
@@ -180,6 +185,53 @@ class TransferLedgerClientAdapterTest {
     @Test
     void disablesAutomaticRetry() {
         assertSame(Retryer.NEVER_RETRY, new LedgerFeignConfig().ledgerRetryer());
+    }
+
+    /** 원장 실패(5xx)가 이어지면 서킷이 열리고, 열린 뒤에는 원장을 부르지 않고 NOT_SENT로 알립니다. */
+    @Test
+    void opensCircuitAfterRepeatedFailuresAndStopsSending() {
+        when(feignClient.register(REGISTER_REQUEST)).thenThrow(feignError(503, errorBody("COMMON_SERVICE_UNAVAILABLE")));
+        for (int i = 0; i < 20; i++) {
+            var unknown = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
+            assertSame(Kind.RESULT_UNKNOWN, unknown.getKind());
+        }
+
+        var exception = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
+
+        assertSame(Kind.NOT_SENT, exception.getKind());
+        assertSame(CircuitBreaker.State.OPEN, adapter.circuitBreaker().getState());
+        verify(feignClient, times(20)).register(REGISTER_REQUEST);
+    }
+
+    /** 원장이 정상으로 답한 4xx(확정 거절 422, 요청 미수락 409)는 장애가 아니므로 아무리 많아도 서킷을 열지 않습니다. */
+    @Test
+    void ledgerRejectionsDoNotOpenCircuit() {
+        when(feignClient.register(REGISTER_REQUEST))
+                .thenThrow(feignError(422, errorBody("LEDGER_REJECTED_INSUFFICIENT_BALANCE")));
+        for (int i = 0; i < 15; i++) {
+            adapter.register(REQUEST);
+        }
+        doThrow(feignError(409, errorBody("LEDGER_REFERENCE_CONFLICT"))).when(feignClient).register(REGISTER_REQUEST);
+        for (int i = 0; i < 15; i++) {
+            var notAccepted = assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST));
+            assertSame(Kind.REQUEST_NOT_ACCEPTED, notAccepted.getKind());
+        }
+
+        assertSame(CircuitBreaker.State.CLOSED, adapter.circuitBreaker().getState());
+    }
+
+    /** 서킷이 닫히면(원장 회복) 다시 원장을 부릅니다. */
+    @Test
+    void sendsAgainAfterCircuitCloses() {
+        adapter.circuitBreaker().transitionToOpenState();
+        assertSame(Kind.NOT_SENT, assertThrows(TransferLedgerException.class, () -> adapter.register(REQUEST)).getKind());
+        verify(feignClient, never()).register(any());
+        when(feignClient.register(REGISTER_REQUEST))
+                .thenReturn(ApiResponse.success(new LedgerFeignApi.TransactionResponse(TRANSACTION_ID, "POSTED")));
+
+        adapter.circuitBreaker().transitionToClosedState();
+
+        assertEquals(LedgerTransactionResponse.posted(TRANSACTION_ID), adapter.register(REQUEST));
     }
 
     private void assertResultUnknownFor(ApiResponse<LedgerFeignApi.TransactionResponse> response) {

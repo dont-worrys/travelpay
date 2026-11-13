@@ -122,6 +122,34 @@ class TransferListApiIntegrationTest extends TransferApiIntegrationSupport {
                 .andExpect(jsonPath("$.data.totalElements").value(0));
     }
 
+    /**
+     * TC-25-I7: 받은 내역은 완료(COMPLETED) 송금만 보입니다. 처리 중·실패·확인 대상 송금은 수취인에게 보이지 않고
+     * (송금인 쪽 실패 사유·메모가 드러나지 않음) 송금인의 보낸 내역에는 모두 보입니다.
+     */
+    @Test
+    void receiverSeesOnlyCompletedTransfersWhileSenderSeesEveryStatus() throws Exception {
+        Instant base = Instant.parse("2026-10-28T03:00:00Z");
+        UUID completed = save(receiverId, senderId, "tc25-done", base);
+        saveIn(receiverId, senderId, "tc25-processing", base.plusSeconds(1), "PROCESSING", null, null);
+        saveIn(receiverId, senderId, "tc25-failed", base.plusSeconds(2), "FAILED", "INSUFFICIENT_BALANCE", null);
+        saveIn(receiverId, senderId, "tc25-review", base.plusSeconds(3), "MANUAL_REVIEW", null, "RETRY_EXHAUSTED");
+        entityManager.clear();
+
+        for (String direction : new String[] {"RECEIVED", null}) {
+            var builder = get("/api/v1/transfers");
+            if (direction != null) {
+                builder.param("direction", direction);
+            }
+            list(builder)
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.totalElements").value(1))
+                    .andExpect(jsonPath("$.data.items[0].transferId").value(completed.toString()));
+        }
+        mvc.perform(asUser(get("/api/v1/transfers").param("direction", "SENT"), receiverId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.totalElements").value(4));
+    }
+
     /** TC-25-I6: 잘못된 page·size·direction은 400 COMMON_INVALID_REQUEST입니다(1 미만 size는 400, 대소문자 다른 방향 값 포함). */
     @ParameterizedTest
     @CsvSource({"page, -1", "size, 0", "size, -5", "size, abc", "page, x", "direction, ALL", "direction, sent"})
@@ -158,11 +186,19 @@ class TransferListApiIntegrationTest extends TransferApiIntegrationSupport {
         entityManager.clear();
     }
 
+    /** 완료 송금을 만듭니다. 받은 내역에는 완료 송금만 보이므로 목록 테스트의 기본 데이터입니다. */
     private UUID save(UUID sender, UUID receiver, String key, Instant createdAt) {
-        Transfer saved = transferRepository.saveAndFlush(Transfer.request(sender, receiver, UUID.randomUUID(),
+        return saveIn(sender, receiver, key, createdAt, "COMPLETED", null, null);
+    }
+
+    /** 생성 경로는 PROCESSING뿐이므로 저장 뒤 SQL로 상태·사유(CHECK 조합)와 생성 시각을 맞춥니다. */
+    private UUID saveIn(UUID sender, UUID receiver, String key, Instant createdAt,
+                        String status, String failureReason, String reviewReason) {
+        Transfer saved = transferRepository.saveAndFlush(Transfer.process(sender, receiver, UUID.randomUUID(),
                 UUID.randomUUID(), 1_000L, "KRW", null, key));
-        jdbcTemplate.update("update transfer set created_at = ? where id = ?",
-                createdAt.atOffset(ZoneOffset.UTC), saved.getId());
+        jdbcTemplate.update(
+                "update transfer set created_at = ?, status = ?, failure_reason = ?, review_reason = ? where id = ?",
+                createdAt.atOffset(ZoneOffset.UTC), status, failureReason, reviewReason, saved.getId());
         return saved.getId();
     }
 }
