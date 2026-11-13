@@ -48,7 +48,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Service
@@ -80,7 +82,7 @@ public class SettlementService {
         Optional<Settlement> existing = settlementRepository.findByRequestedByAndIdempotencyKey(
                 user.userId(), idempotencyKey);
         if (existing.isPresent()) {
-            return replay(existing.get(), merchantId);
+            return replay(existing.get(), merchant);
         }
 
         // 원장 계정이 없는(PENDING) 가맹점은 정산할 돈이 없음. 정지(SUSPENDED) 가맹점은 정산함
@@ -103,7 +105,7 @@ public class SettlementService {
             Optional<Settlement> sameKey = settlementRepository.findByRequestedByAndIdempotencyKey(
                     user.userId(), idempotencyKey);
             if (sameKey.isPresent()) {
-                return replay(sameKey.get(), merchantId);
+                return replay(sameKey.get(), merchant);
             }
             throw new BusinessException(CommonErrorCode.CONFLICT);
         }
@@ -113,7 +115,7 @@ public class SettlementService {
         if (settled.getStatus() == SettlementStatus.FAILED) {
             throw new PaymentDeclinedException(PaymentErrorCode.SETTLEMENT_DECLINED, settled.getFailureReason());
         }
-        return SettlementResult.from(settled, created.paymentCount());
+        return SettlementResult.from(settled, merchant.getName(), created.paymentCount());
     }
 
     // 정산 미리보기: 정산 요청과 같은 기준으로 지금 정산될 금액과 환불 기간을 기다리는 금액을 나눔.
@@ -167,13 +169,13 @@ public class SettlementService {
     // 가맹점 정산 목록
     public Page<SettlementResult> getSettlements(AuthenticatedUser user, UUID merchantId, SettlementStatus status,
                                                  int page, int size) {
-        findAccessibleMerchant(user, merchantId);
+        Merchant merchant = findAccessibleMerchant(user, merchantId);
         if (page < 0 || size < 1) {
             throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
         }
         Page<Settlement> settlements = settlementRepository.findPageByMerchantId(merchantId, status,
                 PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE), LIST_SORT));
-        return withPaymentCounts(settlements);
+        return toResults(settlements, Map.of(merchant.getId(), merchant.getName()));
     }
 
     // 내 정산 목록: 가맹점 구분 없이 정산금을 받은 주인 기준
@@ -183,24 +185,36 @@ public class SettlementService {
         }
         Page<Settlement> settlements = settlementRepository.findPageByOwnerUserId(user.userId(), status,
                 PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE), LIST_SORT));
-        return withPaymentCounts(settlements);
+        return toResults(settlements, merchantNames(settlements.getContent()));
     }
 
-    private Page<SettlementResult> withPaymentCounts(Page<Settlement> settlements) {
+    // 페이지에 나온 가맹점 이름을 한 번에 조회. 정산이 없으면 조회하지 않음
+    private Map<UUID, String> merchantNames(List<Settlement> settlements) {
+        Set<UUID> merchantIds = settlements.stream().map(Settlement::getMerchantId).collect(Collectors.toSet());
+        if (merchantIds.isEmpty()) {
+            return Map.of();
+        }
+        return merchantRepository.findAllById(merchantIds).stream()
+                .collect(Collectors.toMap(Merchant::getId, Merchant::getName));
+    }
+
+    // 정산마다 포함된 결제 수와 가맹점 이름을 붙임
+    private Page<SettlementResult> toResults(Page<Settlement> settlements, Map<UUID, String> merchantNames) {
         Map<UUID, Long> counts = settlementItemRepository.countBySettlementIds(
                 settlements.map(Settlement::getId).getContent());
-        return settlements.map(settlement ->
-                SettlementResult.from(settlement, counts.getOrDefault(settlement.getId(), 0L).intValue()));
+        return settlements.map(settlement -> SettlementResult.from(settlement,
+                merchantNames.get(settlement.getMerchantId()),
+                counts.getOrDefault(settlement.getId(), 0L).intValue()));
     }
 
     // 가맹점 정산 상세: 포함된 결제와 금액. 다른 가맹점의 정산이면 404
     public SettlementDetailResult getSettlement(AuthenticatedUser user, UUID merchantId, UUID settlementId) {
-        findAccessibleMerchant(user, merchantId);
+        Merchant merchant = findAccessibleMerchant(user, merchantId);
         Settlement settlement = settlementRepository.findById(settlementId)
                 .filter(found -> found.getMerchantId().equals(merchantId))
                 .orElseThrow(() -> new BusinessException(PaymentErrorCode.SETTLEMENT_NOT_FOUND));
         List<SettlementItem> items = settlementItemRepository.findAllBySettlementId(settlementId);
-        return SettlementDetailResult.from(settlement, items);
+        return SettlementDetailResult.from(settlement, merchant.getName(), items);
     }
 
     // 재시도 대기가 지난 REQUESTED 정산을 선점해 같은 정산 ID로 원장에 다시 보냄
@@ -383,15 +397,16 @@ public class SettlementService {
         }
     }
 
-    private SettlementResult replay(Settlement existing, UUID merchantId) {
-        if (!existing.isSameRequest(merchantId)) {
+    private SettlementResult replay(Settlement existing, Merchant merchant) {
+        if (!existing.isSameRequest(merchant.getId())) {
             throw new BusinessException(PaymentErrorCode.SETTLEMENT_IDEMPOTENCY_KEY_REUSED);
         }
         // 원장 결과를 다시 묻지 않고 현재 상태로 응답. 결과 모름 재전송은 복구 스케줄러만 함
         if (existing.getStatus() == SettlementStatus.FAILED) {
             throw new PaymentDeclinedException(PaymentErrorCode.SETTLEMENT_DECLINED, existing.getFailureReason());
         }
-        return SettlementResult.from(existing, settlementItemRepository.findAllBySettlementId(existing.getId()).size());
+        return SettlementResult.from(existing, merchant.getName(),
+                settlementItemRepository.findAllBySettlementId(existing.getId()).size());
     }
 
     private Merchant findAccessibleMerchant(AuthenticatedUser user, UUID merchantId) {
