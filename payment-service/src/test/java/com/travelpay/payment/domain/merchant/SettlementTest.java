@@ -12,6 +12,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,6 +61,7 @@ class SettlementTest {
 
         assertEquals(SettlementStatus.PAID, settlement.getStatus());
         assertEquals(LEDGER_TRANSACTION_ID, settlement.getLedgerTransactionId());
+        assertNotNull(settlement.getPaidAt());
     }
 
     @Test
@@ -70,6 +72,7 @@ class SettlementTest {
 
         assertEquals(SettlementStatus.FAILED, settlement.getStatus());
         assertEquals("사용할 수 없는 지갑입니다.", settlement.getFailureReason());
+        assertNull(settlement.getPaidAt());
     }
 
     @Test
@@ -99,9 +102,11 @@ class SettlementTest {
         assertEquals(SettlementStatus.PAID, paid.getStatus());
         assertEquals(LEDGER_TRANSACTION_ID, paid.getLedgerTransactionId());
         assertNull(paid.getReviewReason());
+        assertNotNull(paid.getPaidAt());
         assertEquals(SettlementStatus.FAILED, failed.getStatus());
         assertEquals("정산 처리 시간이 초과되어 취소되었습니다.", failed.getFailureReason());
         assertNull(failed.getReviewReason());
+        assertNull(failed.getPaidAt());
 
         // REQUESTED 정산은 운영자 처리 대상이 아니고, MANUAL_REVIEW 정산은 자동 반영 대상이 아님
         BusinessException requested = assertThrows(BusinessException.class,

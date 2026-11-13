@@ -65,6 +65,7 @@ Swagger UI(`http://localhost:8083/swagger-ui.html`, prod에서는 꺼짐)에서 
 | `POST /api/v1/payments/merchants/{merchantId}/settlements` | 정산 요청 | 가맹점 주인·`MASTER` | 필요 | 필수 | 201 |
 | `GET /api/v1/payments/merchants/{merchantId}/settlements` | 정산 목록 | 가맹점 주인·`MASTER` | 불필요 | 없음 | 200 |
 | `GET /api/v1/payments/merchants/{merchantId}/settlements/{settlementId}` | 정산 상세(포함된 결제) | 가맹점 주인·`MASTER` | 불필요 | 없음 | 200 |
+| `GET /api/v1/payments/settlements/me` | 내 정산 목록(가맹점 구분 없음) | 로그인 회원 | 불필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/manual-reviews` | `MANUAL_REVIEW` 결제 목록 | `MASTER` | 불필요 | 없음 | 200 |
 | `GET /api/v1/admin/payments/{paymentId}` | `MANUAL_REVIEW` 결제 단건(원장 조회·예상 결과) | `MASTER` | 불필요 | 없음 | 200 |
 | `POST /api/v1/admin/payments/{paymentId}/resolve` | `MANUAL_REVIEW` 결제 처리 | `MASTER` | 필요 | 없음 | 200 |
@@ -130,7 +131,9 @@ Swagger UI(`http://localhost:8083/swagger-ui.html`, prod에서는 꺼짐)에서 
     - 201 MANUAL_REVIEW: 원장이 요청을 받아들이지 않아 자동 재시도를 멈춤. 관리자가 처리(20~22번)
     - 422 PAYMENT_NO_SETTLEMENT_TARGET: 정산할 결제 없음
 13. GET  /api/v1/payments/merchants/{merchantId}/settlements         → 정산 목록
+    - ?status=PAID: 입금된 정산만
 14. GET  /api/v1/payments/merchants/{merchantId}/settlements/{settlementId} → 정산 상세(포함된 결제)
+    - GET /api/v1/payments/settlements/me: 가맹점 구분 없이 내 정산 전체(status 필터 동일)
 
 [관리자 - 멈춘 결제·환불 처리]
 15. GET  /api/v1/admin/payments/manual-reviews             → MANUAL_REVIEW 결제 목록 (환불은 /refunds/manual-reviews)
@@ -601,6 +604,7 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
     "cutoffAt": "2026-11-12T03:00:00.000000Z",
     "ledgerTransactionId": "7c1e9a4b-3f28-4d6a-8b05-1a9e2c7d6f43",
     "failureReason": null,
+    "paidAt": "2026-11-12T03:00:00.240000Z",
     "createdAt": "2026-11-12T03:00:00.000000Z",
     "updatedAt": "2026-11-12T03:00:00.250000Z"
   },
@@ -609,6 +613,8 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 ```
 
 `cutoffAt`은 요청 시각으로, (승인 시각 + 환불 기간 + 여유 시간)이 이 시각 전인 결제가 들어갔다는 뜻입니다.
+
+`paidAt`은 결제 서비스가 `PAID`를 확정한 시각(입금 시각)이며 `PAID`가 아니면 `null`입니다. 정산 요청·복구 스케줄러·운영자 처리·자동 처리 중 어느 경로로 `PAID`가 되든 채워집니다. `MANUAL_REVIEW`를 거친 정산은 원장에는 더 일찍 반영됐을 수 있지만 `paidAt`은 처리한 시각입니다. 입금 시각은 `updatedAt`이 아니라 `paidAt`을 봅니다(`updatedAt`은 마지막 변경 시각). 이 필드가 생기기 전에 `PAID`가 된 정산은 당시 `updatedAt`으로 채워져 있습니다.
 
 ### 정산 상태
 
@@ -635,8 +641,10 @@ Git Bash에서 한글이 든 본문을 인자로 넘기면 글자가 깨져 400�
 ### 정산 목록·상세
 
 - 목록은 최신순(`createdAt desc, id desc`)이고 `page`·`size`(최대 100) 규칙은 결제 목록과 같습니다. 항목은 정산 응답과 같으며 `paymentCount`가 들어 있습니다.
+- `status`(`REQUESTED`·`PAID`·`FAILED`·`MANUAL_REVIEW`)를 주면 그 상태의 정산만 봅니다. 생략하면 전체입니다. 잘못된 값은 400입니다.
 - 상세는 `{"settlement": 정산 응답, "items": [{"paymentId", "amount"}]}`입니다. `amount`는 그 결제에서 정산된 금액(결제 금액 − 완료된 환불)입니다. `FAILED` 정산은 항목을 지워 `items`가 비어 있습니다.
 - 다른 가맹점의 정산 ID를 넣으면 404 `PAYMENT_SETTLEMENT_NOT_FOUND`입니다.
+- 내 정산 목록(`/settlements/me`)은 정산금을 받은 주인(`ownerUserId`)이 로그인 회원인 정산을 가맹점 구분 없이 최신순으로 합쳐 보여 줍니다. 가맹점 주인은 바뀌지 않으므로 내 가맹점들의 정산 전체와 같습니다. 항목은 가맹점별 목록과 같고 `merchantId`로 가맹점을 구분합니다. `status`·`page`·`size` 규칙도 같으며, 정산이 없으면 빈 페이지입니다.
 
 ### 환불과 정산이 겹칠 때
 
@@ -1007,6 +1015,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `ix_settlement_items_settlement_id` | 정산 상세의 포함 결제 조회, 거절 시 항목 삭제 |
 | `ix_settlements_requested_updated_at_id` | 결과 모름 정산 복구 대상(`REQUESTED` 부분 인덱스) |
 | `ix_settlements_merchant_id_created_at_id` | 가맹점별 정산 목록(최신순) |
+| `ix_settlements_owner_user_id_created_at_id` | 내 정산 목록(`/settlements/me`, 최신순) |
 | `ck_settlements_manual_review_has_reason` | `MANUAL_REVIEW`일 때만 `review_reason`이 있음 |
 | `ix_settlements_manual_review_created_at_id` | `MANUAL_REVIEW` 정산 목록·건수(부분 인덱스) |
 | `fk_settlement_review_resolutions_settlement_id`, `ck_settlement_review_resolutions_*` | 정산 처리 기록 → 정산 FK, 사유·원장 결과·처리 결과 값 목록, 원장 기록 없음일 때만 거래 ID가 비어 있음 |

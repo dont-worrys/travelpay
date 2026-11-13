@@ -35,6 +35,7 @@ import org.junit.jupiter.api.function.Executable;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -492,18 +493,18 @@ class SettlementServiceTest {
     void listsSettlementsNewestFirstWithPaymentCounts() {
         Settlement paid = settlement(MERCHANT_ID);
         paid.paid(LEDGER_TRANSACTION_ID);
-        when(settlementRepository.findPageByMerchantId(eq(MERCHANT_ID), any()))
+        when(settlementRepository.findPageByMerchantId(eq(MERCHANT_ID), any(), any()))
                 .thenReturn(new PageImpl<>(List.of(paid)));
         when(settlementItemRepository.countBySettlementIds(List.of(SETTLEMENT_ID)))
                 .thenReturn(Map.of(SETTLEMENT_ID, 2L));
 
-        var page = settlementService.getSettlements(OWNER, MERCHANT_ID, 0, 500);
+        var page = settlementService.getSettlements(OWNER, MERCHANT_ID, null, 0, 500);
 
         assertEquals(1, page.getContent().size());
         assertEquals(2, page.getContent().get(0).paymentCount());
         ArgumentCaptor<Pageable> pageable =
                 ArgumentCaptor.forClass(Pageable.class);
-        verify(settlementRepository).findPageByMerchantId(eq(MERCHANT_ID), pageable.capture());
+        verify(settlementRepository).findPageByMerchantId(eq(MERCHANT_ID), eq(null), pageable.capture());
         assertEquals(100, pageable.getValue().getPageSize());
         assertEquals(Sort.by(
                 Sort.Order.desc("createdAt"),
@@ -511,11 +512,52 @@ class SettlementServiceTest {
     }
 
     @Test
+    void listPassesStatusFilter() {
+        when(settlementRepository.findPageByMerchantId(any(), any(), any())).thenReturn(Page.empty());
+
+        settlementService.getSettlements(OWNER, MERCHANT_ID, SettlementStatus.PAID, 0, 20);
+
+        verify(settlementRepository).findPageByMerchantId(eq(MERCHANT_ID), eq(SettlementStatus.PAID), any());
+    }
+
+    @Test
+    void mySettlementsListByLoggedInOwnerWithStatusAndPaymentCounts() {
+        Settlement paid = settlement(MERCHANT_ID);
+        paid.paid(LEDGER_TRANSACTION_ID);
+        when(settlementRepository.findPageByOwnerUserId(eq(OWNER_ID), any(), any()))
+                .thenReturn(new PageImpl<>(List.of(paid)));
+        when(settlementItemRepository.countBySettlementIds(List.of(SETTLEMENT_ID)))
+                .thenReturn(Map.of(SETTLEMENT_ID, 3L));
+
+        var page = settlementService.getMySettlements(OWNER, SettlementStatus.PAID, 0, 500);
+
+        assertEquals(3, page.getContent().get(0).paymentCount());
+        ArgumentCaptor<Pageable> pageable = ArgumentCaptor.forClass(Pageable.class);
+        verify(settlementRepository).findPageByOwnerUserId(eq(OWNER_ID), eq(SettlementStatus.PAID),
+                pageable.capture());
+        assertEquals(100, pageable.getValue().getPageSize());
+        assertEquals(Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")), pageable.getValue().getSort());
+        verify(merchantRepository, never()).findById(any());
+    }
+
+    @Test
+    void mySettlementsForMasterAreOnlyMasterOwnAndRejectInvalidPage() {
+        when(settlementRepository.findPageByOwnerUserId(any(), any(), any())).thenReturn(Page.empty());
+
+        settlementService.getMySettlements(MASTER, null, 0, 20);
+
+        verify(settlementRepository).findPageByOwnerUserId(eq(MASTER_ID), eq(null), any());
+        BusinessException invalid = assertThrows(BusinessException.class,
+                () -> settlementService.getMySettlements(OWNER, null, -1, 20));
+        assertEquals(CommonErrorCode.INVALID_REQUEST, invalid.getErrorCode());
+    }
+
+    @Test
     void listRejectsStrangerAndInvalidPage() {
         assertError(PaymentErrorCode.MERCHANT_NOT_FOUND, () -> settlementService.getSettlements(
-                new AuthenticatedUser(STRANGER_ID, AuthRole.USER), MERCHANT_ID, 0, 20));
+                new AuthenticatedUser(STRANGER_ID, AuthRole.USER), MERCHANT_ID, null, 0, 20));
         BusinessException invalid = assertThrows(BusinessException.class,
-                () -> settlementService.getSettlements(OWNER, MERCHANT_ID, -1, 20));
+                () -> settlementService.getSettlements(OWNER, MERCHANT_ID, null, -1, 20));
         assertEquals(CommonErrorCode.INVALID_REQUEST, invalid.getErrorCode());
     }
 

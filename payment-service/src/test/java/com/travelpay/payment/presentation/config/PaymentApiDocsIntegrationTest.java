@@ -62,7 +62,8 @@ class PaymentApiDocsIntegrationTest extends PostgresContainerSupport {
                         "/api/v1/payments/merchants/{merchantId}/payments/{paymentId}",
                         "/api/v1/payments/merchants/{merchantId}/settlements",
                         "/api/v1/payments/merchants/{merchantId}/settlements/preview",
-                        "/api/v1/payments/merchants/{merchantId}/settlements/{settlementId}")));
+                        "/api/v1/payments/merchants/{merchantId}/settlements/{settlementId}",
+                        "/api/v1/payments/settlements/me")));
     }
 
     @Test

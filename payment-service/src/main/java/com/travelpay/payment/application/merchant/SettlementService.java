@@ -165,13 +165,28 @@ public class SettlementService {
     }
 
     // 가맹점 정산 목록
-    public Page<SettlementResult> getSettlements(AuthenticatedUser user, UUID merchantId, int page, int size) {
+    public Page<SettlementResult> getSettlements(AuthenticatedUser user, UUID merchantId, SettlementStatus status,
+                                                 int page, int size) {
         findAccessibleMerchant(user, merchantId);
         if (page < 0 || size < 1) {
             throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
         }
-        Page<Settlement> settlements = settlementRepository.findPageByMerchantId(merchantId,
+        Page<Settlement> settlements = settlementRepository.findPageByMerchantId(merchantId, status,
                 PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE), LIST_SORT));
+        return withPaymentCounts(settlements);
+    }
+
+    // 내 정산 목록: 가맹점 구분 없이 정산금을 받은 주인 기준
+    public Page<SettlementResult> getMySettlements(AuthenticatedUser user, SettlementStatus status, int page, int size) {
+        if (page < 0 || size < 1) {
+            throw new BusinessException(CommonErrorCode.INVALID_REQUEST);
+        }
+        Page<Settlement> settlements = settlementRepository.findPageByOwnerUserId(user.userId(), status,
+                PageRequest.of(page, Math.min(size, MAX_PAGE_SIZE), LIST_SORT));
+        return withPaymentCounts(settlements);
+    }
+
+    private Page<SettlementResult> withPaymentCounts(Page<Settlement> settlements) {
         Map<UUID, Long> counts = settlementItemRepository.countBySettlementIds(
                 settlements.map(Settlement::getId).getContent());
         return settlements.map(settlement ->

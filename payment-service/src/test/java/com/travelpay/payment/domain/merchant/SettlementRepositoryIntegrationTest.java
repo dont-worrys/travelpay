@@ -31,6 +31,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -266,6 +267,25 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         Map<String, Object> row = settlementRow(settlement.getId());
         assertEquals("PAID", row.get("status"));
         assertEquals(ledgerTransactionId, row.get("ledger_transaction_id"));
+        assertNotNull(row.get("paid_at"));
+    }
+
+    // 한 트랜잭션에서 제약 위반이 나면 이후 문장이 실행되지 않아 경우마다 테스트를 나눔
+    @Test
+    void paidWithoutPaidAtIsRejected() {
+        Settlement requested = saveSettlement("key-" + UUID.randomUUID());
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update settlements set status = 'PAID', ledger_transaction_id = ? where id = ?",
+                UUID.randomUUID(), requested.getId()));
+    }
+
+    @Test
+    void paidAtWithoutPaidIsRejected() {
+        Settlement requested = saveSettlement("key-" + UUID.randomUUID());
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update(
+                "update settlements set paid_at = now() where id = ?", requested.getId()));
     }
 
     @Test
@@ -276,11 +296,58 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         setTimestamps(newer.getId(), "2026-11-02T00:00:00Z", 0);
         entityManager.clear();
 
-        List<UUID> ids = settlementRepository.findPageByMerchantId(merchantId,
+        List<UUID> ids = settlementRepository.findPageByMerchantId(merchantId, null,
                         PageRequest.of(0, 20, Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id"))))
                 .map(Settlement::getId).getContent();
 
         assertEquals(List.of(newer.getId(), older.getId()), ids);
+    }
+
+    @Test
+    void merchantSettlementsCanBeFilteredByStatus() {
+        Settlement paid = saveSettlement("key-" + UUID.randomUUID());
+        Settlement requested = saveSettlement("key-" + UUID.randomUUID());
+        paid.paid(UUID.randomUUID());
+        settlementRepository.save(paid);
+        entityManager.flush();
+        entityManager.clear();
+
+        List<UUID> paidIds = settlementRepository.findPageByMerchantId(merchantId, SettlementStatus.PAID,
+                        PageRequest.of(0, 20))
+                .map(Settlement::getId).getContent();
+        List<UUID> requestedIds = settlementRepository.findPageByMerchantId(merchantId, SettlementStatus.REQUESTED,
+                        PageRequest.of(0, 20))
+                .map(Settlement::getId).getContent();
+
+        assertEquals(List.of(paid.getId()), paidIds);
+        assertEquals(List.of(requested.getId()), requestedIds);
+    }
+
+    @Test
+    void ownerSettlementsSpanMerchantsNewestFirstAndCanBeFilteredByStatus() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID otherMerchantId = merchantRepository.save(
+                Merchant.create("정산 가맹점 2", CurrencyCode.KRW, ownerUserId)).getId();
+        Settlement older = saveSettlement(merchantId, ownerUserId, "key-" + UUID.randomUUID());
+        Settlement newer = saveSettlement(otherMerchantId, ownerUserId, "key-" + UUID.randomUUID());
+        saveSettlement(merchantId, UUID.randomUUID(), "key-" + UUID.randomUUID());   // 다른 주인 → 빠짐
+        newer.paid(UUID.randomUUID());
+        settlementRepository.save(newer);
+        entityManager.flush();
+        setTimestamps(older.getId(), "2026-11-01T00:00:00Z", 0);
+        setTimestamps(newer.getId(), "2026-11-02T00:00:00Z", 0);
+        entityManager.clear();
+        PageRequest newestFirst = PageRequest.of(0, 20,
+                Sort.by(Sort.Order.desc("createdAt"), Sort.Order.desc("id")));
+
+        List<UUID> all = settlementRepository.findPageByOwnerUserId(ownerUserId, null, newestFirst)
+                .map(Settlement::getId).getContent();
+        List<UUID> paidOnly = settlementRepository.findPageByOwnerUserId(ownerUserId, SettlementStatus.PAID,
+                        newestFirst)
+                .map(Settlement::getId).getContent();
+
+        assertEquals(List.of(newer.getId(), older.getId()), all);
+        assertEquals(List.of(newer.getId()), paidOnly);
     }
 
     // 복구
@@ -296,8 +363,8 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         setTimestamps(waiting.getId(), "2026-11-07T00:09:00Z", 3);
         setTimestamps(backedOff.getId(), "2026-11-07T00:07:00Z", 3);
         setTimestamps(paid.getId(), "2026-11-07T00:00:00Z", 0);
-        jdbcTemplate.update("update settlements set status = 'PAID', ledger_transaction_id = ? where id = ?",
-                UUID.randomUUID(), paid.getId());
+        jdbcTemplate.update("update settlements set status = 'PAID', ledger_transaction_id = ?, paid_at = now() "
+                + "where id = ?", UUID.randomUUID(), paid.getId());
 
         List<UUID> ids = settlementRepository.findRecoveryTargets(now, 100).stream()
                 .map(Settlement::getId).toList();
@@ -351,8 +418,8 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
     void markManualReviewOnlyChangesRequestedSettlement() {
         Settlement requested = saveSettlement("key-" + UUID.randomUUID());
         Settlement paid = saveSettlement("key-" + UUID.randomUUID());
-        jdbcTemplate.update("update settlements set status = 'PAID', ledger_transaction_id = ? where id = ?",
-                UUID.randomUUID(), paid.getId());
+        jdbcTemplate.update("update settlements set status = 'PAID', ledger_transaction_id = ?, paid_at = now() "
+                + "where id = ?", UUID.randomUUID(), paid.getId());
         Instant now = Instant.parse("2026-11-07T00:00:00Z");
 
         assertEquals(1, settlementRepository.markManualReview(requested.getId(),
@@ -539,8 +606,12 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
     }
 
     private Settlement saveSettlement(String idempotencyKey) {
+        return saveSettlement(merchantId, UUID.randomUUID(), idempotencyKey);
+    }
+
+    private Settlement saveSettlement(UUID merchantId, UUID ownerUserId, String idempotencyKey) {
         Settlement settlement = settlementRepository.save(Settlement.request(merchantId, UUID.randomUUID(),
-                idempotencyKey, UUID.randomUUID(), UUID.randomUUID(), CurrencyCode.KRW, 10_000L, CUTOFF));
+                idempotencyKey, ownerUserId, UUID.randomUUID(), CurrencyCode.KRW, 10_000L, CUTOFF));
         entityManager.flush();
         return settlement;
     }

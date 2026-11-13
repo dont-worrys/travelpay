@@ -18,6 +18,7 @@ public record SettlementResult(
         Instant cutoffAt,
         UUID ledgerTransactionId,
         String failureReason,
+        Instant paidAt,
         Instant createdAt,
         Instant updatedAt
 ) {
@@ -26,7 +27,7 @@ public record SettlementResult(
         return new SettlementResult(
                 settlement.getId(), settlement.getMerchantId(), settlement.getStatus(), settlement.getAmount(),
                 settlement.getCurrency(), settlement.getOwnerUserId(), paymentCount, settlement.getCutoffAt(),
-                settlement.getLedgerTransactionId(), settlement.getFailureReason(),
+                settlement.getLedgerTransactionId(), settlement.getFailureReason(), settlement.getPaidAt(),
                 settlement.getCreatedAt(), settlement.getUpdatedAt());
     }
 }
