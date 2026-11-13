@@ -2,7 +2,7 @@
 
 Terraform 코드는 `infra/aws/`에서 관리합니다. Spring Boot Run과 별개이며 실제 리소스 생성은 Terraform의 `apply`로 실행합니다.
 
-**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3)의 실제 적용과 검증을 완료**했습니다. ECS Service와 첫 기동, CD, Cloudflare API 레코드 전환은 후속 단계(PR4)입니다.
+**State S3와 네트워크·SG(PR1), IAM·SSM·OIDC·ECS 실행 기반·RDS·Data EC2·Redis·Kafka(PR2), 앱 이미지·ECR·Task 정의·ALB·ACM·CloudWatch 경보·AWS 모니터링·운영 실행 설정(PR3), DB 암호 교체·main 이미지·ECS Service 첫 기동·공개 진입점(PR4의 4-1~4-3)의 실제 적용과 검증을 완료**했습니다. PR4의 4-4에서 CI를 dev에 반영하고 CD의 AWS·GitHub 연결을 적용했습니다. 첫 자동 배포와 운영 검증(4-5)은 후속 단계입니다.
 
 설계·구현 기준은 [Terraform 설계·구현 원칙](https://app.notion.com/p/413530b4fe5980cf9edbc37ec93b957e)에 모으고, 이 문서는 인프라 담당자의 실행·이전 절차만 다룹니다.
 
@@ -38,12 +38,13 @@ infra/aws/
 ├── data-config.tf           # Data 설정 묶음의 S3 전달·SSM 적용
 ├── registry.tf              # 앱 이미지 저장소(ECR)·앱 로그 그룹
 ├── task-definitions.tf      # 서비스 8개 Task 정의(이미지 digest·자원·비밀값·헬스 체크)
+├── app-services.tf          # 8개 ECS Service(롤링·자동 롤백, 실행 리비전은 CD가 정함)
 ├── public-ingress.tf        # 공개 API 인증서(ACM)·ALB·HTTPS 리스너·Gateway Target Group
 ├── alarms.tf                # SNS 이메일·CloudWatch 경보
 ├── monitoring.tf            # 모니터링 설정 묶음·앱 호스트 수집기·CloudWatch 대시보드
 ├── host-observability.tf    # 호스트 메모리·디스크·초기화 로그
 ├── templates/               # EC2 기동·Data·모니터링 Compose·systemd·monitoring/ 수집 설정
-├── scripts/                 # 설정 묶음 적용·비밀값 준비·이미지 게시·디스크·DB 초기화 도구
+├── scripts/                 # 설정 묶음 적용·비밀값 준비·이미지 게시·CD 배포·디스크·DB 초기화 도구
 ├── outputs.tf               # 식별자·실행 계약 출력, 비밀값 제외
 ├── .terraform.lock.hcl      # Provider 버전·패키지 체크섬
 ├── tests/                   # Terraform 모의 검증·Python 핵심 동작 검사
@@ -223,7 +224,7 @@ VPC의 원래 Main Route Table도 local만 유지합니다. Public 여부는 IGW
 | 수집 | 모니터링 → 앱 메트릭, 로그 수집기 → Loki 등 필요한 내부 연결 |
 | 외부 HTTPS | App 호스트·Data·Exchange·모니터링의 TCP 443 송신 |
 
-관리 포트·Grafana는 인터넷에 공개하지 않고 SSH 포트도 열지 않습니다. 운영 접속은 후속 IAM·Compute 구현에서 SSM으로 연결합니다. Cloudflare 목록은 코드에 확인한 값을 기록하며, 변경 시 ALB 규칙과 Gateway 신뢰 설정을 함께 검토합니다.
+관리 포트는 인터넷에 공개하지 않고 SSH 포트도 열지 않습니다. Grafana는 공개 진입점을 켠 뒤 Cloudflare Access와 원본 인증 헤더를 거친 요청만 받습니다(공개 진입점 절). 운영 접속은 SSM으로 합니다. Cloudflare 목록은 코드에 확인한 값을 기록하며, 변경 시 ALB 규칙과 Gateway 신뢰 설정을 함께 검토합니다.
 
 SG 본체와 개별 규칙을 분리해 상호 참조에 따른 생성 순환을 피합니다. `aws_vpc_security_group_rules_exclusive`가 선언한 규칙 전체를 관리하고 VPC 기본 SG는 닫습니다. 다른 도구·수동 규칙을 같은 SG에 섞으면 다음 apply에서 제거될 수 있으므로 보존할 변경을 먼저 코드에 반영합니다.
 
@@ -251,11 +252,11 @@ python3 infra/aws/scripts/check-runtime-plan.py infra/aws/stage-4.tfplan --profi
 python3 infra/aws/scripts/prepare-parameters.py infra/aws/stage-4.tfplan --profile travelpay --account 123456789012
 ```
 
-비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가하면 DB 6개·Redis 2개·Grafana 관리자 암호를 SecureString으로 만듭니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. AWS CLI 기록(`cli_history`)이 켜져 있으면 요청 내용이 로컬 기록에 남으므로 쓰기를 거절합니다.
+비밀값 준비 도구는 기본적으로 미리보기만 실행합니다. 승인 후 같은 명령에 `--apply`를 추가하면 DB 6개·Redis 2개·Grafana 관리자 암호·원본 인증 값(`ORIGIN_AUTH`)을 SecureString으로 만듭니다. 인프라 담당자의 Linux에서 비밀값을 익명 메모리 파일로 AWS CLI에 전달하며 기존 SecureString을 덮어쓰지 않습니다. AWS CLI 기록(`cli_history`)이 켜져 있으면 요청 내용이 로컬 기록에 남으므로 쓰기를 거절합니다.
 
 - Wallet 계좌번호 키(무작위 32바이트의 Base64)는 `--apply --create-wallet-key`를 줄 때만 만듭니다. 데이터가 생긴 뒤 바꾸거나, 지워진 뒤 새로 만들면 저장된 계좌번호를 풀 수 없으므로 Wallet 데이터가 생기기 전 처음 한 번만 씁니다.
 - 수출입은행에서 발급받은 환율 API 키는 `--apply --external`을 줄 때만 입력받습니다. 입력을 숨길 수 있는 터미널에서 직접 실행해야 하며, 파이프 입력처럼 입력이 화면에 보일 수 있으면 거절합니다. 키를 명령 인자·파일·채팅에 남기지 않습니다.
-- DB 앱 계정 암호 6개는 `--apply --rotate-database-passwords`를 줄 때만 새 임의 값으로 바꿉니다. SSM 값만 바뀌므로 아래 DB 작업 창에서 초기화 스크립트를 다시 실행해야 DB에 반영되고, 그 전에 시작한 Task는 DB 로그인에 실패합니다. 새 값은 출력하지 않으며 사람이 알 필요가 없습니다. Task는 시작할 때, 초기화 스크립트는 실행할 때 SSM에서 읽습니다.
+- DB 앱 계정 암호 6개는 `--apply --rotate-database-passwords`를 줄 때만 새 임의 값으로 바꿉니다. SSM 값만 바뀌므로 아래 DB 작업 창에서 초기화 스크립트를 다시 실행해야 DB에 반영되고, 그 전에 시작한 Task는 DB 로그인에 실패합니다. 새 값은 출력하지 않으며 사람이 알 필요가 없습니다. Task는 시작할 때, 초기화 스크립트는 실행할 때 SSM에서 읽습니다. 앱이 실행 중일 때 교체했다면 초기화 스크립트를 실행한 뒤 CD의 **Run workflow**에서 DB를 쓰는 서비스를 `services`에 지정해 새 Task로 다시 띄웁니다.
 
 ```bash
 terraform -chdir=infra/aws apply stage-4.tfplan
@@ -360,7 +361,7 @@ python3 infra/aws/scripts/publish-images.py --profile <프로필> --push
 
 ## 앱 실행 정의·공개 진입점·경보
 
-이미지 게시와 인증서 발급을 확인한 뒤 `enable_app_runtime=true`로 Task 정의 8개, ALB, 경보를 만듭니다. 이 옵션은 앱·데이터 기반이 켜져 있고 `application_images`에 8개 서비스의 digest가 모두 있어야 통과합니다. 태그 주소나 다른 저장소의 이미지는 입력 검증에서 거절합니다. ECS Service와 배포는 PR4에서 만들며 이 단계에서는 Task를 계속 실행하지 않습니다.
+이미지 게시와 인증서 발급을 확인한 뒤 `enable_app_runtime=true`로 Task 정의 8개, ALB, 경보를 만듭니다. 이 옵션은 앱·데이터 기반이 켜져 있고 `application_images`에 8개 서비스의 digest가 모두 있어야 통과합니다. 태그 주소나 다른 저장소의 이미지는 입력 검증에서 거절합니다. 이 옵션만으로는 Task를 상시 실행하지 않습니다. ECS Service는 `enable_app_services`로 따로 만듭니다(아래 앱 상시 실행).
 
 Task 정의의 설정은 두 곳에서 옵니다. 비밀이 아닌 값(DB 주소·계정 이름, Redis·Kafka·Eureka·Mock Bank 주소)은 `task-definitions.tf`의 환경 변수입니다. Redis·Kafka·Eureka·Mock Bank 주소는 사설 DNS 이름과 SG가 허용한 포트에서 만들고, DB는 인증서 이름과 맞아야 `verify-full`이 통과하므로 RDS 엔드포인트 이름을 그대로 씁니다. 서비스 이름·포트는 각 서비스의 `application-prod.yml`과 테스트로 대조합니다. 비밀값은 Task 정의에 Parameter Store ARN만 적고, Task 시작 때 서비스별 실행 역할이 꺼내 주입합니다. 각 서비스는 자기 비밀값만 받습니다. 이미지에는 설정·비밀값이 들어가지 않습니다.
 
@@ -375,7 +376,7 @@ Task 정의의 설정은 두 곳에서 옵니다. 비밀이 아닌 값(DB 주소
 | 지표 | `SPRING_APPLICATION_JSON`의 HTTP histogram | `application.yml`에만 있는 설정이며 점이 든 지표 이름은 환경 변수 이름으로 쓸 수 없습니다 |
 | 파일시스템 | 루트 읽기 전용, `/tmp`만 Task 볼륨 | 앱 파일 변조를 막습니다. Tomcat·Netty 임시 파일은 Task와 함께 지워집니다 |
 
-ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합니다. 리스너는 HTTPS만 열고 TLS 1.2·1.3 정책(`ELBSecurityPolicy-TLS13-1-2-2021-06`)과 발급 확인을 거친 인증서를 씁니다. Host가 `api.travelpay.store`인 요청만 Gateway Target Group(IP, 8080)으로 보내고 나머지는 404입니다. Target 상태는 관리 포트 18080의 readiness로 판단하며 등록 해제 대기는 30초입니다. Cloudflare는 마지막 요청 뒤 최대 900초 동안 원본 연결을 다시 쓰므로(Proxy Idle Timeout) ALB 유휴 제한은 1000초로 길게 두어 ALB가 먼저 끊는 순간의 520 오류를 피합니다. Cloudflare의 API 레코드를 ALB로 바꾸는 작업은 Gateway Service가 생기는 PR4에서 합니다.
+ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합니다. 리스너는 HTTPS만 열고 TLS 1.2·1.3 정책(`ELBSecurityPolicy-TLS13-1-2-2021-06`)과 발급 확인을 거친 인증서를 씁니다. Host가 `api.travelpay.store`인 요청만 Gateway Target Group(IP, 8080)으로 보내고 나머지는 404입니다. Target 상태는 관리 포트 18080의 readiness로 판단하며 등록 해제 대기는 30초입니다. Cloudflare는 마지막 요청 뒤 최대 900초 동안 원본 연결을 다시 쓰므로(Proxy Idle Timeout) ALB 유휴 제한은 1000초로 길게 두어 ALB가 먼저 끊는 순간의 520 오류를 피합니다. Cloudflare의 API 레코드를 ALB로 바꾸는 작업은 PR4의 4-3에서 합니다.
 
 경보는 SNS 주제 하나로 보내며 이메일 구독은 받은 메일의 확인 링크를 눌러야 활성화됩니다. 경보 이메일은 Git에서 제외한 개인 입력 파일의 `alert_email`에 둡니다.
 
@@ -395,8 +396,91 @@ ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합�
 - Ledger의 Hikari `connection-timeout`·`validation-timeout`은 `application.yml`에만 있어 운영에서는 기본값(30초·5초)이 적용됩니다. 의도인지 서비스 담당자에게 확인합니다.
 - Exchange는 환율 API 키(`KOREAEXIM_API_KEY`)가 없으면 시작하지 않습니다. 배포 전 비밀값 준비 도구의 `--external`로 저장합니다.
 - ALB 접근 로그는 켜지 않았습니다. Cloudflare만 접근할 수 있고 요청 기록은 Gateway 로그와 ALB 지표로 확인합니다.
-- SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. Cloudflare가 붙이는 비밀 헤더 확인이나 Authenticated Origin Pulls(mTLS)를 Cloudflare 전환과 함께 PR4에서 정합니다.
-- PR4의 CD가 Task 정의를 복사해 이미지만 바꾼 새 리비전을 등록하면, 이후 Terraform이 설정을 바꿀 때 `application_images`가 배포 중인 digest와 같아야 이전 이미지로 되돌아가지 않습니다. 이 규칙은 PR4에서 정합니다.
+- SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. PR4의 4-3에서 Cloudflare가 붙이는 비밀 헤더(`Origin-Auth`)를 ALB 규칙이 확인하도록 해 막습니다.
+- CD(PR4의 4-4)가 새 리비전으로 Service를 갱신하면 Service의 Task 정의 ARN이 Terraform이 아는 리비전과 달라집니다. 그대로 두면 다음 apply가 Terraform의 리비전(이전 이미지)으로 되돌립니다. 그래서 Service가 실행할 리비전은 CD가 정하고 Terraform은 바꾸지 않습니다(`ignore_changes`). 자세한 동작은 [자동 배포(CD) 연결](#자동-배포cd-연결)에 있습니다.
+
+## 앱 상시 실행(ECS Service)
+
+Task 정의·ALB와 앱 호스트 2대를 확인한 뒤 `enable_app_services=true`로 8개 ECS Service를 만듭니다(`app-services.tf`). 이 옵션은 `enable_app_runtime`과 `app_host_count=2`가 있어야 통과합니다. false로 되돌리면 Service와 실행 중인 Task를 지웁니다.
+
+| 설정 | 값 | 이유 |
+|---|---|---|
+| Task 수 | 서비스마다 1개 | 앱 호스트 2대(등록 메모리 각 6759MiB)에 8개 Task 메모리 합계 8448MiB가 들어가고, 롤링 중 가장 큰 Task(1536MiB) 하나가 더 떠도 남습니다. 호스트가 한 대만 남으면 8개가 다 들어가지 않아, ASG가 호스트를 교체할 때까지 일부 Task가 대기합니다 |
+| 배포 | 최소 100%·최대 200% 롤링, 실패 시 자동 롤백(circuit breaker) | 새 Task가 정상이 된 뒤 이전 Task를 내려 배포 중에도 1개를 유지합니다. 스케줄러가 있는 Payment·Wallet·Exchange는 두 Task에서 함께 돌아도 안전하다고 담당자가 확인했고, 선점 쿼리·유니크 제약을 코드로 대조했습니다(2026-11-12). 모든 DB 서비스가 함께 롤링해도 커넥션 풀 상한 합계는 60입니다 |
+| 배치 | 앱 호스트 Capacity Provider, App A/B 서브넷, 공인 IP 없음, 서비스별 SG | Capacity Provider는 클러스터 기본값과 같지만, 생략하면 AWS가 기본값을 Service에 기록해 다음 plan부터 갱신이 거절됩니다(provider 6.72.0 소스) |
+| 서비스 찾기 | Eureka·Mock Bank만 Cloud Map(`eureka`·`mock-bank.travelpay.internal`), 나머지는 Eureka | 다른 앱이 고정 이름으로 찾는 두 서비스입니다. 컨테이너 헬스 체크를 통과한 Task가 있으면 그 Task만 응답하고, 모두 비정상이면 비정상 Task도 응답합니다(Route 53 다중 값 응답 규칙) |
+| 공개 진입점 | Gateway만 ALB Target(IP, 8080), 기동 유예 180초 | 기동 중 ALB 상태 확인을 보지 않습니다. 컨테이너 헬스 체크는 Task 정의의 시작 유예(180초)가 같은 역할을 하므로 다른 서비스에는 두지 않습니다 |
+| apply | 안정 상태까지 대기(`wait_for_steady_state`), 실행 리비전은 바꾸지 않음(`ignore_changes`) | 배포가 실패하거나 되돌려지면 apply가 그 이유와 함께 실패합니다(provider 6.72.0 소스). Service 생성 뒤 실행 리비전은 CD가 정합니다 |
+
+기동 순서는 두지 않습니다.
+
+- 호스트 교체나 장애 복구 때도 Task는 순서 없이 시작하므로 앱이 이를 견뎌야 합니다.
+- Eureka 클라이언트는 서버에 닿지 못하면 30초마다 등록을 다시 시도합니다. 서버가 모르는 인스턴스라고 답하면(heartbeat 404) 다시 등록합니다(eureka-client 2.0.6 소스).
+- Eureka·Mock Bank 이름이 아직 등록되지 않았을 때의 "이름 없음" 응답은 이 영역의 SOA TTL(15초)만큼만 캐시됩니다.
+
+Eureka 재시작·재배포 때는 짧은 공백이 생길 수 있습니다.
+
+- eureka-server는 단독 서버라 받아 올 목록이 없습니다. Spring Cloud는 이 경우에도 조회를 바로 허용하므로, 새 Eureka는 시작 직후부터 비었거나 일부만 찬 목록으로 답합니다(`InstanceRegistry.openForTraffic`, Spring Cloud Netflix 5.0.3 소스).
+- 클라이언트는 200 응답이면 받은 목록으로 바꿉니다. 그래서 각 서비스가 다음 heartbeat(최대 30초)에 다시 등록할 때까지 Gateway가 일부 서비스를 찾지 못해 503을 낼 수 있습니다.
+- 서버에 닿지 못한 동안에는 받아 둔 목록을 그대로 씁니다.
+- 롤링 중에는 이전·새 Eureka가 같은 이름으로 잠시 함께 응답해 목록이 갈릴 수도 있습니다.
+
+이 시간은 4-5의 Eureka 재시작·재배포 시험에서 측정합니다. 길면 Eureka만 이전 Task를 먼저 내리는 배포나 시작 대기 설정을 검토합니다.
+
+Gateway Service가 생긴 뒤부터 원본 인증(4-3)을 넣기 전까지는, 다른 Cloudflare 영역을 거친 요청이 ALB를 통해 Gateway에 닿을 수 있었습니다(앞의 SG 한계). 이 공백은 같은 날 4-3 적용으로 닫혔습니다.
+
+## 공개 진입점(Cloudflare·원본 인증·Grafana 공개)
+
+`api.travelpay.store`와 `grafana.travelpay.store`는 Cloudflare 프록시를 거쳐 ALB로 들어옵니다. ALB에는 원본 인증 헤더 검사와 Grafana 경로를 `enable_public_entry=true`로 켭니다. 이 옵션은 앱이 상시 실행 중(`enable_app_services`)이어야 통과합니다.
+
+| 구간 | 하는 일 |
+|---|---|
+| Cloudflare | 프록시(주황 구름), SSL Full (strict). Transform Rule이 두 이름의 요청에 `Origin-Auth: <ORIGIN_AUTH>`를 붙입니다. Grafana는 Access(팀원 이메일, 일회용 코드)를 먼저 통과해야 합니다 |
+| ALB SG | Cloudflare IPv4 주소의 443만 받습니다 |
+| ALB 규칙 | Host와 `Origin-Auth` 값이 모두 맞을 때만 Gateway·Grafana로 보내고, 아니면 기본 응답 404 |
+| Gateway | `Origin-Auth`를 지운 뒤 업무 서비스로 넘깁니다(`InternalHeaderResetFilter`) |
+| Grafana | Data 호스트 사설 IP 3000(SG가 ALB에서 온 연결만 허용), 공개 주소를 `root_url`로, 세션 쿠키는 HTTPS에서만 |
+
+Cloudflare 주소 허용만으로는 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿습니다. 그래서 우리 영역만 아는 헤더를 함께 확인합니다.
+
+- Cloudflare 문서는 원본 보호 방법으로 "HTTP Header Validation"과 Cloudflare IP 허용을 들고, 각각을 "Moderately secure"로 분류합니다. 여기서는 두 가지를 함께 씁니다.
+- AWS도 CloudFront가 붙인 사용자 헤더를 ALB 규칙으로 확인하는 같은 방식을 안내합니다.
+- 더 강한 방법인 Cloudflare Tunnel과 Authenticated Origin Pulls(mTLS)는 원본에 데몬을 따로 운영하거나 인증서를 따로 관리해야 해서 쓰지 않았습니다.
+
+`ORIGIN_AUTH`는 비밀값 준비 도구가 만듭니다. ALB 헤더 조건은 대소문자를 구분하지 않고 `*`·`?`를 와일드카드로 보며 128자까지라서, 소문자 16진수 64자로 만듭니다. Terraform이 읽어 ALB 규칙에 넣으므로 이 값은 ALB 규칙 설정과 State에도 남습니다. 저장한 plan 파일에도 평문으로 들어가므로 적용 직후 지웁니다. plan 출력에서는 두 규칙의 조건 전체가 `(sensitive value)`로 가려집니다. 호스트·Task 역할은 이 값을 읽지 못합니다. 읽은 값이 이 형식이 아니면(손으로 `*`를 넣은 경우 등) plan이 멈춥니다. 값을 바꾸면 Cloudflare 규칙과 ALB 규칙이 같은 값이 될 때까지 요청이 404가 됩니다.
+
+Grafana 인증서는 쓰고 있는 API 인증서를 바꾸지 않도록 따로 발급합니다. 같은 HTTPS 리스너에 추가 인증서로 붙이고, ALB가 요청의 서버 이름(SNI)으로 고릅니다. 운영 대시보드는 환경이 production 하나뿐이라 환경 선택을 숨기고, 로컬·부하 시험을 설명하는 문구를 운영 문구로 바꿉니다(`monitoring.tf`).
+
+적용 순서는 다음과 같습니다. 인증서가 발급돼야 ALB에 붙일 수 있어서 Terraform을 두 번 적용합니다.
+
+1. Terraform 1차: Grafana 인증서를 만들고 비밀값 계약에 `ORIGIN_AUTH`를 더합니다. `terraform output grafana_certificate`의 검증 레코드를 Cloudflare에 DNS only로 추가합니다.
+2. 비밀값 준비 도구로 `ORIGIN_AUTH`를 만듭니다. Cloudflare SSL 모드를 Full (strict)로 바꿉니다. Transform Rule은 Save as Draft로 저장합니다. 바로 켜면 `api`가 아직 가리키는 이전 원본에도 이 값이 전달되기 때문입니다.
+3. Zero Trust에 One-time PIN 로그인 방법을 추가하고(새 조직에는 자동으로 추가되지 않음), `grafana.travelpay.store` Access 앱과 팀원 이메일 허용 정책을 만듭니다.
+4. Terraform 2차: `enable_public_entry=true`로 ALB 헤더 검사, Grafana 인증서·Target Group·규칙·SG, Grafana 설정을 적용합니다.
+5. Cloudflare에서 `api`·`grafana`를 ALB DNS 이름으로 CNAME(프록시 켬)하고, 저장해 둔 Transform Rule을 Deploy합니다.
+
+## 자동 배포(CD) 연결
+
+GitHub Actions CD(`.github/workflows/deploy.yml`)가 main 커밋을 배포할 수 있게 AWS와 GitHub를 연결합니다. 배포 흐름·대상·순서는 [CI·CD 가이드](ci-cd.md#cd운영-배포)에 있습니다.
+
+| 구성 | 내용 |
+|---|---|
+| OIDC 신뢰 | 배포 역할은 이 저장소 `production` 환경의 토큰만 믿습니다. 저장소가 2026-07-15 이후 만들어져 GitHub가 subject에 소유자·저장소 숫자 ID를 넣으므로(`repo:dont-worrys@348131411/travelpay@1433947730:environment:production`) 그 형식으로 확인합니다. 이름만 쓰는 이전 형식으로는 이 저장소의 토큰이 맞지 않습니다(GitHub OIDC 문서의 immutable subject claims, 저장소 OIDC 설정 API의 `use_immutable_subject: true`·`sub_claim_prefix`로 확인) |
+| 배포 권한 | `enable_github_deployment=true`일 때만 붙습니다. 8개 앱 ECR 저장소의 이미지 조회(`DescribeImages`)·푸시, 8개 Service 조회·갱신, Task 정의 조회·등록, 앱 Task 역할 전달. privileged 컨테이너 등록은 거부합니다 |
+| Service | 실행할 리비전은 CD가 정하고 Terraform은 바꾸지 않습니다(`ignore_changes = [task_definition]`) |
+| Task 정의 | CD는 패밀리의 최신 리비전에서 이미지만 바꾼 새 리비전을 등록합니다(최신 리비전이 이미 그 이미지면 그대로 씀). 태그는 복사하지 않습니다(Service가 Task에 태그를 전파하지 않음, `propagateTags=NONE`) |
+
+연결 순서는 다음과 같습니다. 배포 권한을 붙이기 전에 GitHub 환경 보호를 먼저 확인합니다. 이 환경이 없으면 워크플로가 처음 참조할 때 보호 없이 새로 만들어져, 어느 브랜치의 실행이든 이 역할을 받을 수 있기 때문입니다. GitHub 설정은 저장소 관리자 권한이 필요합니다.
+
+1. GitHub 저장소 **Settings → Environments → production**을 확인합니다(2026-11-10에 만들어 둠).
+   - **Deployment branches and tags:** Selected branches and tags에 `main` 하나만 있어야 합니다(Ref type: Branch). dev나 기능 브랜치에서 시작한 실행은 이 환경을 쓰지 못해 실패합니다. 공개 API로도 확인할 수 있습니다: `curl -s https://api.github.com/repos/dont-worrys/travelpay/environments/production/deployment-branch-policies`
+   - **Environment secrets:** `AWS_DEPLOY_ROLE_ARN`에 `terraform output -json runtime_identity`의 `github_deployment_role` 값을 넣습니다. 공개 저장소의 로그에 계정 ID가 보이지 않도록 변수가 아닌 비밀값으로 둡니다.
+   - 승인자(Required reviewers)는 두지 않습니다. main 머지가 이미 리뷰를 거치고, 머지하면 바로 배포하기로 했습니다.
+2. `runtime.auto.tfvars.json`에 `"enable_github_deployment": true`를 넣고 plan을 검토한 뒤 적용합니다. 바뀌는 것은 배포 역할의 신뢰 조건·권한, 경보 2개입니다. Service는 바뀌지 않습니다.
+3. CD를 담은 PR을 dev에 머지합니다. dev 머지로는 배포하지 않습니다.
+4. dev를 main에 머지하면 첫 CD가 돕니다. 실행 화면에서 Plan의 배포 대상, Deploy의 서비스별 완료를 확인합니다.
+
+Terraform으로 Task 설정(환경 변수·크기 등)을 바꾸면 apply는 새 리비전만 등록하고 Service는 그대로 둡니다. 반영하려면 apply 뒤 CD의 **Run workflow**에서 `main`을 고르고 `services`에 해당 서비스 키를 넣어 실행합니다. CD는 그 최신 리비전에 현재 main 커밋의 이미지를 넣어 배포합니다. Terraform이 등록한 리비전의 이미지(`application_images`)는 이전 값일 수 있으므로, `aws ecs update-service --task-definition`으로 그 리비전을 직접 지정하지 않습니다. 이름·클러스터처럼 Service를 새로 만드는 설정을 바꿔 Terraform이 Service를 다시 만든 경우에도 같은 방법으로 다시 배포합니다. 그 밖의 Service 설정 변경은 제자리에서 바뀌며 CD가 배포한 리비전을 그대로 둡니다.
 
 ## AWS 모니터링(Prometheus·Loki·Grafana·Alloy)
 
@@ -406,7 +490,7 @@ Data 호스트의 모니터링은 Redis·Kafka와 Compose 프로젝트, systemd 
 
 | 위치 | 구성 | 공개 범위 |
 |---|---|---|
-| Data 호스트(Compose 프로젝트 `travelpay-production-monitoring`) | Prometheus(7일·8GB), Loki(7일), Grafana, Alloy(Data 호스트 컨테이너 로그) | Loki만 사설 IP 3100(SG가 로그 수집기 역할에서 온 연결만 허용), 나머지는 호스트 루프백 |
+| Data 호스트(Compose 프로젝트 `travelpay-production-monitoring`) | Prometheus(7일·8GB), Loki(7일), Grafana, Alloy(Data 호스트 컨테이너 로그) | Loki는 사설 IP 3100(SG가 로그 수집기 역할에서 온 연결만 허용). Grafana는 루프백, 공개 진입점을 켜면 사설 IP 3000도(SG가 ALB에서 온 연결만 허용). 나머지는 호스트 루프백 |
 | 앱 호스트(systemd) | Alloy(ECS Task 로그) | 준비 확인용 12345만 호스트 루프백 |
 
 - **지표:** Prometheus가 Eureka로 업무 서비스를 찾습니다. Gateway는 Eureka 메타데이터의 관리 포트 18080으로 수집합니다. Eureka 서버와 Mock Bank는 Cloud Map 사설 DNS로 찾습니다. 레이블은 로컬과 같은 `job=spring-jvm`, `service`, `environment=production`이므로 로컬 대시보드를 그대로 씁니다. 가짜 Eureka 응답과 실제 Prometheus로 주소와 레이블을 확인했습니다.
@@ -424,9 +508,9 @@ Grafana 알림 규칙은 네 개입니다. 알림 채널(contact point)은 두�
 | 서비스 지표 수집 중단 | 서비스별 정상 수집 대상이 0개인 상태가 2분 지속. Eureka에서 사라진 서비스도 0으로 셈 | 경보 |
 | 결제·송금 복구 스케줄러 정지 | `recover` 스케줄러의 실행 횟수가 2분 동안 늘지 않은 상태가 2분 지속. payment-service는 수집되는데 실행 기록 지표가 없는 경우(스케줄러 비활성, 클래스 이름 변경)도 포함 | 정상(payment-service 중단은 수집 중단 규칙이 알림) |
 
-Grafana는 외부에 공개하지 않고 관리자 계정 `admin` 하나로 씁니다. 암호는 Parameter Store의 `GRAFANA_ADMIN_PASSWORD`이며, 비밀값 준비 도구가 처음에 무작위 값으로 만듭니다. 이 값이 없으면 모니터링 유닛이 시작하지 않으므로, 이 단계는 plan을 저장한 뒤 apply 전에 준비 도구를 `--apply`로 실행합니다. 기존 값은 그대로 두고 없는 값만 만듭니다.
+Grafana는 관리자 계정 `admin` 하나로 씁니다. 암호는 Parameter Store의 `GRAFANA_ADMIN_PASSWORD`이며, 비밀값 준비 도구가 처음에 무작위 값으로 만듭니다. 이 값이 없으면 모니터링 유닛이 시작하지 않으므로, 이 단계는 plan을 저장한 뒤 apply 전에 준비 도구를 `--apply`로 실행합니다. 기존 값은 그대로 두고 없는 값만 만듭니다.
 
-접속은 SSM 포트 포워딩으로 합니다. 작업 PC에 AWS CLI용 Session Manager 플러그인(1.2.764.0 이상)이 필요합니다. 출력의 명령을 실행한 뒤 `http://localhost:3000`에 `admin`과 Parameter Store의 암호로 로그인합니다.
+공개 진입점을 켠 뒤에는 `https://grafana.travelpay.store`에서 Cloudflare Access 이메일 코드 확인을 거쳐 `admin`과 Parameter Store의 암호로 로그인합니다. 그 전이나 Cloudflare 장애 때는 SSM 포트 포워딩으로 접속합니다. 작업 PC에 AWS CLI용 Session Manager 플러그인(1.2.764.0 이상)이 필요하고, 출력의 명령을 실행한 뒤 `http://localhost:3000`에 로그인합니다. 공개 주소를 `root_url`로 두므로 로그인 뒤 이동이 공개 주소로 향할 수 있습니다. 세션 쿠키를 HTTPS 전용으로 두므로, `http://localhost`를 안전한 주소로 취급하지 않는 브라우저에서는 포트 포워딩 로그인이 유지되지 않을 수 있습니다.
 
 ```bash
 terraform -chdir=infra/aws output -json monitoring
@@ -450,8 +534,8 @@ aws ssm send-command --profile <프로필> --region ap-northeast-2 --instance-id
 - **권한:** Alloy는 Docker 소켓으로 컨테이너 로그를 읽으므로 사실상 호스트 root 권한입니다. 로컬과 같은 방식이며, 이미지를 digest로 고정하고 다른 권한은 모두 뺐습니다. 사용 통계 전송도 끕니다. Loki는 인증 없이 SG로만 접근을 막습니다.
 - **디스크:** 이미지는 Data 루트 볼륨(16GiB)에 받습니다. 적용 전 사용량은 2.9GiB(18%)였고, 모니터링 이미지 네 개는 로컬 기준 최대 약 3.5GB라 받은 뒤에도 75% 경보 기준보다 낮습니다. 지표·로그는 모니터링 EBS(20GiB)에 쌓습니다.
 - **이미지 받기:** 모니터링 이미지는 Docker Hub에서 받습니다. 비로그인 받기는 NAT 공인 IP 하나에 6시간 100회로 제한되며, 이번 적용에서 받는 것은 Data 4회와 앱 호스트 2회입니다.
-- **복구 스케줄러 규칙의 전제:** payment Task가 하나라고 보고 Task를 합쳐 셉니다. PR4에서 payment를 여러 Task로 늘리면 Task별로 나눠야 한 Task의 정지가 가려지지 않습니다. 스케줄러 클래스 목록(`monitoring.tf`)은 테스트가 payment-service 코드와 대조합니다.
-- **PR4 전까지:** 첫 ECS Service 전(PR4)에는 Eureka와 Mock Bank가 없습니다. 그래서 Prometheus의 대상 발견 오류가 로그에 남고, 수집 중단 규칙은 8개 서비스 모두 경보 상태입니다.
+- **복구 스케줄러 규칙의 전제:** payment Task가 하나라고 보고 Task를 합쳐 셉니다. payment를 여러 Task로 늘리면(지금은 1개) Task별로 나눠야 한 Task의 정지가 가려지지 않습니다. 스케줄러 클래스 목록(`monitoring.tf`)은 테스트가 payment-service 코드와 대조합니다.
+- **ECS Service 전:** 첫 ECS Service 전에는 Eureka와 Mock Bank가 없어 Prometheus의 대상 발견 오류가 로그에 남고, 수집 중단 규칙은 8개 서비스 모두 경보 상태였습니다. 4-2에서 Service를 만든 뒤 해소됐습니다.
 - **앱 호스트 Alloy 지표:** 호스트 주소를 찾을 수단이 없어 수집하지 않습니다. 대신 Loki의 `host` 레이블별 로그 수신으로 동작을 확인합니다.
 
 ## 운영 실행 설정(application-prod.yml) 점검
@@ -498,7 +582,7 @@ Task 정의는 `SPRING_CONFIG_NAME=application-prod`로 운영 파일만 읽습�
 - ECS 메타데이터는 가짜 서버로 대신함
 - 인터넷이 없어 환율 API 호출이 실패함
 
-실제 AWS에서의 첫 기동과 TLS 접속은 PR4에서 확인합니다.
+실제 AWS에서의 첫 기동과 RDS TLS 접속은 4-2에서 확인했습니다(실제 AWS 검증 결과).
 
 **참고로 남긴 것.**
 
@@ -609,7 +693,7 @@ NAT Gateway 1개와 공인 IPv4 1개가 실제로 실행 중입니다. 서울 �
 | 비밀값 | 키 준비 전에는 Exchange Task가 `TaskFailedToStart`(파라미터 없음)로 시작 전에 멈춤. 준비 후 Wallet 키는 32바이트로 풀리고, 환율 API 키는 공백·끝 `;` 없이 실제 API 1회 호출이 HTTP 200·23개 통화·`result=1` |
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task·사용 중 Task ENI 0개, Data 설정 묶음은 다시 적용되지 않음 |
 
-ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱의 실제 기동(RDS 인증서 검증 접속·Flyway)과 업무 통신은 ECS Service를 만드는 PR4에서 검증합니다.
+ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱의 실제 기동(RDS 인증서 검증 접속·Flyway)과 업무 통신은 ECS Service를 만드는 PR4에서 검증합니다(4-2 결과는 아래 표).
 
 2026-11-12 AWS 모니터링 단계는 다음 순서로 확인했습니다.
 
@@ -643,14 +727,14 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 시험 실행 | 8개 서비스 모두 새 이미지로 시험 Task 실행, 종료 코드 0. uid 10001, 루트 읽기 전용, `/tmp` 쓰기, 비밀값 주입, Task IP 확인, 허용 대상(RDS·Redis·Kafka) 연결 |
 | 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
 
-이번 이미지는 기능 브랜치 커밋으로 만든 검증용입니다. 운영에는 main에 머지된 커밋의 이미지만 배포합니다. PR4에서 첫 Service를 만들기 전에 main 커밋으로 다시 빌드해 Task 정의의 digest를 바꾸고, 이후 배포는 CD가 main 커밋으로만 합니다.
+이번 이미지는 기능 브랜치 커밋으로 만든 검증용입니다. 운영에는 main에 머지된 커밋의 이미지만 배포합니다. 그래서 첫 Service를 만들기 전에 main 커밋으로 다시 빌드해 Task 정의의 digest를 바꿨습니다(아래 `c22b304` 결과 표). 이후 배포는 CD가 main 커밋으로만 합니다.
 
 2026-11-12 PR2 때 평문으로 보낸 DB 앱 계정 암호를 교체하고 mock-bank 계정 이름을 맞췄습니다.
 
 | 대상 | 확인한 결과 |
 |---|---|
 | 적용 전 검사 | Gradle 전체 3,425개, 본 root 구성 테스트 59개·bootstrap 3개, Python 103개(실제 PostgreSQL 18.6 시나리오 5개 포함) 통과, 독립 리뷰 지적 반영 |
-| 암호 교체 | `--rotate-database-passwords`로 DB 암호 6개 `rotated`, 나머지 11개 `preserved` |
+| 암호 교체 | `--rotate-database-passwords`로 비밀값 11개 모두 기존 값 확인(`preserved`) 뒤 DB 암호 6개 `rotated` |
 | 작업 창 열기 | 추가 5·변경 5·삭제 2. mock-bank Task 정의 리비전 3(`mock_bank_app`), 리비전 2는 롤백용으로 남음. 설정 묶음에서 초기화 스크립트·`runtime.json` 두 파일만 바뀌어 컨테이너 재생성 없음 |
 | 초기화 | 계정 6개가 새 SSM 암호로 로그인해 자기 스키마 확인, `bank_app` 삭제와 스키마 소유자 이전, 쿼리 통계 비우기 성공 |
 | 작업 창 닫기 | 변경 4·삭제 3. Data → RDS 5432 차단, Data 역할의 DB 암호·관리자 Secret 조회 `AccessDeniedException`, Redis 암호 조회는 정상 |
@@ -658,5 +742,62 @@ ECS의 애플리케이션 Task는 아직 상시 실행하지 않습니다. 앱�
 | 적용 후 재검사 | 본 root plan `No changes` |
 
 처음 작업 창에서는 초기화가 실행되지 않은 채 창이 닫혀(SSM 세션·명령 기록 없음) 다시 열어 실행했습니다. 그 사이 앱 Task가 없어 영향은 없었습니다.
+
+2026-11-12 main 머지 커밋 `c22b304`(PR #290)으로 이미지를 다시 만들어 Task 정의를 바꿨습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 이미지 게시 | 8개를 태그 `c22b3046ee28`로 게시. `53e270f` 이후 실행 코드가 바뀌지 않은 Eureka·Exchange·Ledger·mock-bank·Wallet은 digest가 이전과 같고, Gateway·Payment·User만 새 digest. 새 이미지 jar에서 Gateway의 `Origin-Auth` 제거·연결 실패 503 처리·전달 연결 대기 2000, User의 커넥션 대기 2000·검증 1000, Payment의 송금 외부 호출 시간 제한(#284) 확인 |
+| 적용 | 저장한 plan 적용: 추가 3·삭제 3, Gateway·Payment·User Task 정의 새 리비전(3)이고 이미지 외 변경 없음. 삭제는 Terraform 상태에서만 빠진 것이고 이전 리비전(2)은 롤백용으로 ACTIVE 유지 |
+| Task 정의 | 8개 모두 이미지 목록 파일의 digest와 같음. Gateway·Payment·User·mock-bank는 리비전 3, 나머지는 2 |
+| 시험 실행 | Gateway·User·Payment·mock-bank 시험 Task 종료 코드 0. uid 10001, `/tmp` 쓰기, 비밀값 주입, Redis·RDS 연결 |
+| 적용 후 재검사 | 본 root plan `No changes`, 실행 중 Task 0개 |
+
+2026-11-12 ECS Service 첫 기동(4-2)은 다음과 같이 확인했습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 65개·bootstrap 3개 통과(Git에서 제외한 입력 파일이 없는 사본에서도 65개 통과). 사본에 결함 21개를 하나씩 넣어 모두 테스트 실패로 잡힘. 독립 리뷰 지적 7건을 근거로 확인해 반영(설명 오류 4건, 테스트 2건, 4-4 위험 1건) |
+| plan | Service 8개 추가만, 변경·삭제 0. 서브넷·SG·Cloud Map·Target Group·Task 정의 리비전을 실제 ID와 대조. 지적 반영 뒤 다시 만든 plan이 검토한 plan과 같음 |
+| 적용 | 추가 8, 오류 없음. Service별 1분 47초~2분 48초에 안정 상태 |
+| 기동 | Task 8개 HEALTHY(2a 5개·2c 3개), 앱 기동 18~62초, ERROR 로그 0건 |
+| Flyway | DB 서비스 6개가 RDS에 마이그레이션 적용: user v3, wallet v5, payment v20261109.1, exchange v8, ledger v7, mock-bank v3 |
+| 서비스 찾기 | Eureka에 6개 서비스 UP, Cloud Map의 eureka·mock-bank HEALTHY, Gateway ALB Target healthy |
+| 업무 경로 | ALB SG를 단 시험 Task에서 Gateway로 `GET /api/v1/terms` 200(약관 응답), `GET /api/v1/wallets` 401(로그인 필요). 공개 경로(Cloudflare → ALB)는 4-3에서 확인 |
+| Kafka | Wallet이 `wallet.charge.requested`(파티션 3) 생성 |
+| 모니터링 | Prometheus 수집 대상 8개 up, Loki에 8개 서비스 로그, Grafana "서비스 지표 수집 중단" 해소, 나머지 규칙 정상 |
+| 자원 | RDS 연결 13개, 앱 호스트 메모리 사용 최대 34%, 남은 예약 메모리 871MiB·4199MiB, CloudWatch 경보 ALARM 0건 |
+| 실행 중인 것 | Data 컨테이너 7개의 시작 시각·재시작 0회가 적용 전과 같음 |
+| 적용 후 재검사 | 본 root plan `No changes`(Capacity Provider·배포 설정의 반복 차이 없음) |
+
+2026-11-12 공개 진입점(4-3)은 다음과 같이 확인했습니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 70개·bootstrap 3개·Python 104개 통과(Git에서 제외한 입력 파일이 없는 사본에서도 70개 통과). 사본에 결함 21개를 하나씩 넣어 모두 테스트 실패로 잡힘. 독립 리뷰 지적 4건 반영 |
+| 1차 적용 | 추가 1(Grafana 인증서). 검증 레코드 추가 뒤 발급(ISSUED). 비밀값 준비 도구가 `ORIGIN_AUTH`만 새로 만들고 나머지 11개는 그대로 |
+| 2차 적용 | 추가 8·변경 4·교체 1(Data 설정 묶음 association, 33초에 성공). 묶음에서 바뀐 파일은 운영 대시보드와 Grafana 실행 정의 두 개 |
+| ALB | API·Grafana 규칙 모두 Host와 `Origin-Auth`(SSM 값과 일치)가 맞을 때만 전달하고 나머지는 404. 기본 인증서는 API, Grafana 인증서는 추가 인증서. Grafana Target(Data 사설 IP:3000) healthy |
+| Data 호스트 | Grafana만 다시 시작(나머지 6개는 시작 시각·재시작 0회 그대로). 루프백·사설 IP 바인딩, 공개 주소·보안 쿠키 설정, 익명 401. 운영 대시보드 환경 선택 숨김, local·로컬·부하 문구 0건 |
+| 공개 경로 | Cloudflare를 거친 `GET /api/v1/terms` 200, 로그인이 필요한 API 401. `grafana`는 Access 로그인으로 302, 허용한 이메일의 일회용 코드를 거쳐 Grafana `admin` 로그인 성공(운영자 확인). Cloudflare를 거치지 않고 ALB에 직접 접속하면 연결 시간 초과 |
+| 원본 인증 | Transform Rule을 잠시 끄자 `api`가 3번 모두 ALB 기본 응답(404, `text/plain`, `Not Found`)이었고, 다시 켜자 3번 모두 200으로 돌아옴 |
+| CORS | `https://travelpay.store` 허용(인증 정보 포함), 다른 출처 403 |
+| 비밀값 | 적용 출력, 작업용 파일, 최근 30분 앱 로그(8개 서비스)에서 0건. 저장한 plan 파일은 적용 직후 삭제 |
+| 적용 후 재검사 | 본 root plan `No changes` |
+
+Transform Rule은 DNS 전환 전에 이미 켜져 있었습니다. 그동안 `api`는 임시 원본에 TCP 연결이 되지 않아 522였으므로, HTTP 요청이 원본으로 전달되지는 않은 것으로 봅니다. Gateway가 실제 접속자 IP(`CF-Connecting-IP`)를 쓰는지는 Gateway가 요청마다 로그를 남기지 않아 확인하지 못했으며, 4-5의 로그인 시도 제한 시험에서 확인합니다.
+
+2026-11-12 자동 배포(CD) 연결(4-4)은 다음과 같이 확인했습니다. 첫 실제 배포 결과는 main 머지 뒤 기록합니다.
+
+| 대상 | 확인한 결과 |
+|---|---|
+| 적용 전 검사 | 본 root 구성 테스트 72개·bootstrap 3개·Python 152개 통과(Git에서 제외한 입력 파일이 없는 사본), actionlint 1.7.12로 워크플로 3개 통과. 사본에 결함 48개를 하나씩 넣어 모두 테스트 실패로 잡힘. 독립 리뷰 2회(지적 13건·4건) 반영: 다시 실행 때 같은 배포 반복 방지, 지정 서비스 강제 재배포, 배포 ID로 완료 판단, 끝나지 않은 배포를 다음 실행이 다시 대상으로 잡고 진행 중인 배포가 끝난 뒤 바꿈. 실제 Task 정의 8개로 만든 등록 입력이 AWS CLI 입력 검증을 통과(요청은 닫힌 로컬 주소로 보내 등록하지 않음) |
+| 배포 대상 선택 | main 커밋(`4f3ac30`)으로 실제 AWS·Git을 조회해 `ledger`·`payment`만 선택(실행 중 이미지 `c22b3046ee28` 이후 이미지 변경). 이전 커밋(`53e270f`)으로 실행하면 더 새 커밋의 이미지가 실행 중이라며 멈춤 |
+| plan | 추가 1·변경 4·삭제 0(배포 역할 신뢰 조건·권한 정책, 경보 2개). Service 변경 없음. 리뷰 반영 뒤 다시 만든 plan이 검토한 plan과 같음 |
+| 적용 | 추가 1·변경 4, 오류 없음. 저장한 plan 파일은 적용 직후 삭제 |
+| 배포 역할 | 신뢰 조건 `repo:dont-worrys@348131411/travelpay@1433947730:environment:production`, STS audience. 정책 1개(관리형 정책 0개). IAM 정책 시뮬레이터로 배포에 쓰는 호출 8가지 허용, 다른 저장소·다른 Service·호스트 역할 전달·privileged 등록·SSM 비밀값·Service 생성은 거부 |
+| GitHub 환경 | `production`의 배포 브랜치 규칙이 `main`(Branch) 하나(공개 API로 확인). 환경 비밀값 `AWS_DEPLOY_ROLE_ARN`은 운영자가 등록 |
+| 경보 | `gateway-5xx`가 Gateway Target Group 차원으로 바뀌어 Grafana Target의 5xx를 세지 않음. ALB가 이 차원의 지표를 발행함을 확인 |
+| 적용 후 재검사 | 본 root plan `No changes` |
 
 근거: [Terraform S3 Backend](https://developer.hashicorp.com/terraform/language/backend/s3), [Provider mocking](https://developer.hashicorp.com/terraform/language/tests/mocking), [Terraform 파일 구성](https://developer.hashicorp.com/terraform/language/files).

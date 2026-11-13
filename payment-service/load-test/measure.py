@@ -10,6 +10,7 @@
   python measure.py <LABEL> <VUS> --mode hot --lock-holders                        # 원장 잠금 보유 시간 분해
   python measure.py <LABEL> <VUS> --duration 1800 --recon db                       # 대사를 DB 읽기 전용 SQL로(대량)
   python measure.py <LABEL> <VUS> --recon both                                     # API·DB 대사를 둘 다 하고 결과 비교
+  python measure.py <LABEL> <최대 동시 요청> --mode hot --load spike --base-rate 20 --peak-rate 150   # 급증(초당 요청 수)
 결과: results/<LABEL>-vus<VUS>.json(k6) + results/<LABEL>-vus<VUS>-metrics.json(서비스·DB 지표, 대사)
 
 대사 방식(--recon): api(기본)는 관리자 송금 목록·원장 기간 목록 API를 끝까지 읽습니다. 관리자 목록이 페이지 번호
@@ -619,8 +620,26 @@ def main():
     parser.add_argument("--lock-holder-interval", type=float, default=0.05, help="holder 표본 간격(초)")
     parser.add_argument("--recon", default="api", choices=["api", "db", "both"],
                         help="대사 방식: api(기본, 소량), db(읽기 전용 SQL, 대량), both(둘 다 하고 비교)")
+    parser.add_argument("--load", default="constant", choices=["constant", "spike"],
+                        help="constant(기본, 가상 사용자 VUS명 고정) | spike(초당 요청 수 급증, VUS는 동시 요청 상한)")
+    parser.add_argument("--base-rate", type=int, default=20, help="spike: 평상시 초당 요청 수")
+    parser.add_argument("--peak-rate", type=int, default=150, help="spike: 급증 때 초당 요청 수")
+    parser.add_argument("--spike-before", type=int, default=30, help="spike: 급증 전 평상시 구간(초)")
+    parser.add_argument("--spike-rise", type=int, default=5, help="spike: 상승 시간(초)")
+    parser.add_argument("--spike-hold", type=int, default=30, help="spike: 급증 유지(초)")
+    parser.add_argument("--spike-fall", type=int, default=5, help="spike: 하강 시간(초)")
+    parser.add_argument("--spike-after", type=int, default=60, help="spike: 급증 뒤 평상시 구간(초)")
     args = parser.parse_args()
     is_request = args.script == "transfer-request.js"
+    spike = args.load == "spike"
+    if spike:
+        if not is_request or args.mode == "mixed":
+            parser.error("--load spike는 송금 요청(transfer-request.js)의 mixed 외 모드에서만 씁니다")
+        # 측정 구간 = before + spike(상승·유지·하강) + after. --duration은 쓰지 않는다
+        spike_stages = [("before", args.spike_before),
+                        ("spike", args.spike_rise + args.spike_hold + args.spike_fall),
+                        ("after", args.spike_after)]
+        args.duration = sum(seconds for _, seconds in spike_stages)
 
     data = load_data()
     RESULTS.mkdir(exist_ok=True)
@@ -657,6 +676,11 @@ def main():
            "GATEWAY": "1" if args.gateway else "0", "HOT_VUS": "" if args.hot_vus is None else str(args.hot_vus)}
     if args.gateway:
         env["BASE_URL"] = "http://host.docker.internal:8080"
+    if spike:
+        env.update({"LOAD": "spike", "BASE_RATE": str(args.base_rate), "PEAK_RATE": str(args.peak_rate),
+                    "SPIKE_BEFORE": f"{args.spike_before}s", "SPIKE_RISE": f"{args.spike_rise}s",
+                    "SPIKE_HOLD": f"{args.spike_hold}s", "SPIKE_FALL": f"{args.spike_fall}s",
+                    "SPIKE_AFTER": f"{args.spike_after}s"})
     command = ["docker", "compose", "run", "--rm"]
     for key, value in env.items():
         command += ["-e", f"{key}={value}"]
@@ -690,6 +714,15 @@ def main():
     if ledger_calls and lock_waits is not None:
         # 리틀 법칙 L = λW → 거래 한 건이 잠금을 기다린 평균 시간 W = 평균 대기 세션 수 / 초당 거래 수
         metrics["db"]["ledgerLockWaitPerTxMsEstimate"] = round(lock_waits / (ledger_calls / args.duration) * 1000, 1)
+    if spike:
+        # 급증 전·중·후 원장 잠금 대기 세션 수: after가 before 수준으로 돌아오는지 본다
+        stages, stage_from = {}, measure_from
+        for name, seconds in spike_stages:
+            stages[name] = db_metrics(db_sampler, stage_from, stage_from + seconds)
+            stage_from += seconds
+        metrics["db"]["stages"] = stages
+        metrics["load"] = {"type": "spike", "baseRate": args.base_rate, "peakRate": args.peak_rate,
+                           "stages": dict(spike_stages)}
     if holder_sampler:
         holder_sampler.join(timeout=args.warmup + args.duration + 120)
         per_tx_hold_ms = round(args.duration * 1000 / ledger_calls, 2) if ledger_calls else None

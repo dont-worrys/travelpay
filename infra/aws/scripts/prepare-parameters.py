@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """검토한 plan의 앱 비밀값을 SSM에 준비합니다. 기존 값은 덮어쓰지 않습니다.
 
-DB·Redis·Grafana 관리자 암호는 새로 만듭니다. Wallet 계좌번호 키는 --create-wallet-key를 줄 때만 만들고,
+DB·Redis·Grafana 관리자 암호와 원본 인증 값은 새로 만듭니다. Wallet 계좌번호 키는 --create-wallet-key를 줄 때만 만들고,
 외부에서 발급받은 키는 --external을 줄 때만 화면에 표시하지 않고 입력받습니다. 기존 값을 덮어쓰는 경우는 두 가지뿐입니다.
 Grafana 관리자 암호는 --set-grafana-password를 줄 때 운영자가 정한 값으로, DB 앱 계정 암호 6개는
 --rotate-database-passwords를 줄 때 새 임의 값으로 바꿉니다.
@@ -28,10 +28,14 @@ WALLET_KEY_NAME = "WALLET_ACCOUNT_NUMBER_KEY"
 # Data 호스트의 Grafana 관리자 암호입니다(monitoring.tf).
 GRAFANA_PASSWORD_NAME = "GRAFANA_ADMIN_PASSWORD"
 MONITORING_NAMES = {GRAFANA_PASSWORD_NAME}
+# Cloudflare Transform Rule이 붙이고 ALB 규칙이 확인하는 헤더 값입니다(public-ingress.tf). ALB 헤더 조건은 대소문자를 구분하지 않고
+# *·?를 와일드카드로 보며 128자까지라, 생성 값(소문자 16진수 64자)을 그대로 씁니다.
+ORIGIN_AUTH_NAME = "ORIGIN_AUTH"
 # 브라우저에 입력하는 암호라 앞뒤 공백 없이 출력 가능한 ASCII 10~128자(공백 포함)만 받습니다. 한글은 암호 칸에서 입력기가
 # 꺼지는 환경이 있어 받지 않습니다. Data 호스트의 prepare-monitoring.py와 같은 규칙입니다.
 GRAFANA_PASSWORD_PATTERN = r"[!-~][ -~]{8,126}[!-~]"
-REQUIRED_NAMES = {"REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD", WALLET_KEY_NAME} | MONITORING_NAMES | EXTERNAL_NAMES
+REQUIRED_NAMES = ({"REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD", WALLET_KEY_NAME, ORIGIN_AUTH_NAME} | MONITORING_NAMES
+                  | EXTERNAL_NAMES)
 DATABASE_PASSWORD_COUNT = 6
 
 
@@ -41,7 +45,7 @@ class ParameterPreparationError(ValueError):
 
 def is_generated(name):
     return (name.endswith("_DB_PASSWORD") or name in ("REDIS_SESSION_PASSWORD", "REDIS_CACHE_PASSWORD", WALLET_KEY_NAME)
-            or name in MONITORING_NAMES)
+            or name in MONITORING_NAMES or name == ORIGIN_AUTH_NAME)
 
 
 def generate(name):
@@ -105,7 +109,7 @@ def parameter_names(contract, account):
         names.append(PARAMETER_PREFIX + name)
     database_names = [name for name in contract if name.endswith("_DB_PASSWORD")]
     if len(database_names) != DATABASE_PASSWORD_COUNT or not REQUIRED_NAMES <= set(contract):
-        raise ParameterPreparationError("DB 6개·Redis 2개·Grafana·Wallet 키·외부 키의 계약을 확인하세요.")
+        raise ParameterPreparationError("DB 6개·Redis 2개·Grafana·Wallet 키·원본 인증 값·외부 키의 계약을 확인하세요.")
     # 외부 키 입력을 잘못해 중단돼도 만들 수 있는 값은 먼저 준비되도록 외부 키를 마지막에 둡니다.
     return sorted(names, key=lambda name: (name.rsplit("/", 1)[-1] in EXTERNAL_NAMES, name))
 

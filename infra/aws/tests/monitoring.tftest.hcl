@@ -79,6 +79,8 @@ variables {
   enable_app_foundation            = true
   enable_data_foundation           = true
   enable_app_runtime               = true
+  enable_app_services              = false
+  enable_public_entry              = false
   app_host_count                   = 2
   ecs_ami_id                       = "ami-0123456789abcdef0"
   data_ami_id                      = "ami-0123456789abcdef1"
@@ -256,11 +258,19 @@ run "production_dashboard_and_rules_come_from_the_local_files" {
   # 원본에서 바꿀 곳의 수입니다. 원본이 바뀌어 수가 달라지면 운영용 변환을 다시 검토해야 합니다.
   assert {
     condition = {
-      for token in ["prometheus-local", "loki-local", "travelpay-local-perf", "TRAVELPAY | Local Performance", "local|load-test", "docker-local|spring-local"] :
+      for token in [
+        "prometheus-local", "loki-local", "travelpay-local-perf", "TRAVELPAY | Local Performance", "local|load-test", "docker-local|spring-local", "\"local\"",
+        "local=로컬 개발 앱, load-test=전용 부하 시험 앱. 한 환경씩 선택합니다. 이 필터는 메트릭에만 적용되며 로그에는 적용하지 않습니다.",
+        "수집된 로컬 앱·개발 인프라 로그입니다.", "Trace ID는 로그 원문을 검색하며 메트릭 환경 필터는 로그에 적용되지 않습니다.",
+        "메트릭 환경(local/load-test)을 한 번에 하나씩 선택해 서비스 상태",
+      ] :
       token => length(split(token, file("${path.module}/../monitoring/grafana/dashboards/travelpay-local.json"))) - 1
       } == {
-      "prometheus-local"              = 23, "loki-local" = 1, "travelpay-local-perf" = 1,
-      "TRAVELPAY | Local Performance" = 1, "local|load-test" = 2, "docker-local|spring-local" = 1,
+      "prometheus-local"                                                                   = 23, "loki-local" = 1, "travelpay-local-perf" = 1,
+      "TRAVELPAY | Local Performance"                                                      = 1, "local|load-test" = 2, "docker-local|spring-local" = 1, "\"local\"" = 3,
+      "local=로컬 개발 앱, load-test=전용 부하 시험 앱. 한 환경씩 선택합니다. 이 필터는 메트릭에만 적용되며 로그에는 적용하지 않습니다." = 1,
+      "수집된 로컬 앱·개발 인프라 로그입니다."                                                             = 1, "Trace ID는 로그 원문을 검색하며 메트릭 환경 필터는 로그에 적용되지 않습니다." = 1,
+      "메트릭 환경(local/load-test)을 한 번에 하나씩 선택해 서비스 상태"                                       = 1,
     }
     error_message = "로컬 대시보드의 로컬 전용 값 위치가 바뀌었습니다. 운영용 변환(monitoring.tf)을 다시 검토하세요."
   }
@@ -273,6 +283,16 @@ run "production_dashboard_and_rules_come_from_the_local_files" {
       alltrue([for token in ["prometheus-local", "loki-local", "travelpay-local-perf", "local|load-test", "docker-local"] : !strcontains(jsondecode(local.data_bundle_json)["dashboard-production.json"], token)])
     )
     error_message = "운영 대시보드에 로컬 데이터소스·환경·로그 job이 남으면 빈 화면이 됩니다."
+  }
+
+  # 운영에는 환경이 하나뿐이라 환경 선택을 숨기고, 로컬·부하 시험을 설명하는 문구를 남기지 않습니다.
+  assert {
+    condition = (
+      one([for variable in jsondecode(jsondecode(local.data_bundle_json)["dashboard-production.json"]).templating.list : variable.hide if variable.name == "environment"]) == 2 &&
+      jsondecode(jsondecode(local.data_bundle_json)["dashboard-production.json"]).tags == ["travelpay", "production", "monitoring"] &&
+      length(regexall("local|load-test|로컬|부하", jsondecode(local.data_bundle_json)["dashboard-production.json"])) == 0
+    )
+    error_message = "운영 대시보드는 환경 선택을 숨기고 local·load-test·로컬·부하 문구가 없어야 합니다."
   }
 
   assert {

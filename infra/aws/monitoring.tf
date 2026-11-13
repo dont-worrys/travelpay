@@ -18,21 +18,27 @@ locals {
 
   # 로컬 대시보드와 송금 알림 규칙을 원본으로 두고 로컬 전용 값만 바꿉니다. 원본이 바뀌어 바꿀 곳의 수가 달라지면 테스트가 알립니다.
   local_grafana_root = "${path.module}/../monitoring/grafana"
-  production_dashboard_text = replace(replace(replace(replace(replace(replace(
+  # 운영에는 환경이 production 하나뿐이라 로컬·부하 시험을 설명하는 문구도 운영 문구로 바꿉니다("local" 태그·저장된 선택값 포함).
+  production_dashboard_text = replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(
     file("${local.local_grafana_root}/dashboards/travelpay-local.json"),
     "prometheus-local", "prometheus"),
     "loki-local", "loki"),
     "travelpay-local-perf", "travelpay-production"),
     "TRAVELPAY | Local Performance", "TRAVELPAY | Production"),
     "local|load-test", "production"),
-  "docker-local|spring-local", "ecs-tasks|docker-data")
+    "docker-local|spring-local", "ecs-tasks|docker-data"),
+    "\"local\"", "\"production\""),
+    "local=로컬 개발 앱, load-test=전용 부하 시험 앱. 한 환경씩 선택합니다. 이 필터는 메트릭에만 적용되며 로그에는 적용하지 않습니다.", "운영 지표의 환경은 production 하나입니다."),
+    "수집된 로컬 앱·개발 인프라 로그입니다.", "운영 앱(ECS Task)과 Data 호스트 컨테이너의 로그입니다."),
+    "Trace ID는 로그 원문을 검색하며 메트릭 환경 필터는 로그에 적용되지 않습니다.", "Trace ID는 로그 원문을 검색합니다."),
+  "메트릭 환경(local/load-test)을 한 번에 하나씩 선택해 서비스 상태", "운영 서비스 상태")
   production_dashboard_document = jsondecode(local.production_dashboard_text)
-  # 저장된 환경 선택값(local)도 운영 값으로 바꿔 처음 열 때 빈 그래프가 나오지 않게 합니다.
+  # 고를 환경이 없으므로 환경 선택 칸을 숨깁니다(hide 2). 선택값은 위에서 production으로 바뀌어 처음 열 때도 빈 그래프가 아닙니다.
   production_dashboard = jsonencode(merge(local.production_dashboard_document, {
     templating = merge(local.production_dashboard_document.templating, {
       list = [
         for variable in local.production_dashboard_document.templating.list :
-        variable.name == "environment" ? merge(variable, { current = { text = "production", value = "production" } }) : variable
+        variable.name == "environment" ? merge(variable, { hide = 2 }) : variable
       ]
     })
   }))
@@ -85,6 +91,12 @@ locals {
       grafana_image            = local.monitoring_images.grafana, alloy_image = local.monitoring_images.alloy,
       prometheus_config_sha256 = local.monitoring_config_sha256.prometheus, loki_config_sha256 = local.monitoring_config_sha256.loki,
       grafana_config_sha256    = local.monitoring_config_sha256.grafana, alloy_config_sha256 = local.monitoring_config_sha256.alloy,
+      grafana_public_url       = var.enable_public_entry ? "https://${local.grafana_domain_name}" : ""
+      # 상태 확인(apply-data-bundle.py)은 루프백을 보므로 공개 때도 루프백을 남기고 ALB용 사설 IP를 더합니다.
+      grafana_ports = jsonencode(concat(
+        ["127.0.0.1:3000:3000"],
+        var.enable_public_entry ? ["$${DATA_PRIVATE_IP:?}:${local.tcp_connections.alb_grafana.port}:3000"] : [],
+      ))
     })
     "travelpay-monitoring.service" = file("${path.module}/templates/travelpay-monitoring.service")
     "prepare-monitoring.py"        = file("${path.module}/scripts/prepare-monitoring.py")
