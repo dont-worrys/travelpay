@@ -5,7 +5,6 @@ import com.travelpay.wallet.domain.charge.ChargeRequestRepository;
 import com.travelpay.wallet.domain.charge.ChargeStatus;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
@@ -22,23 +21,21 @@ public class ChargeRecoverySteps {
 
     private final ChargeRequestRepository chargeRequestRepository;
 
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED,
-            timeout = ChargeSagaSteps.TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = ChargeSagaSteps.TX_TIMEOUT_SECONDS)
     public List<ChargeRecoveryTarget> findTargets(Collection<ChargeStatus> statuses,
                                                   Collection<String> excludedBankCodes, int limit) {
         return chargeRequestRepository.findRecoveryTargets(statuses, excludedBankCodes, limit);
     }
 
     /** 처리 중 상태이면서 createdBefore보다 먼저 생성된 충전 수 */
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED,
-            timeout = ChargeSagaSteps.TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = ChargeSagaSteps.TX_TIMEOUT_SECONDS)
     public long countStuck(Instant createdBefore) {
         return chargeRequestRepository.countByStatusInAndCreatedBefore(ChargeRecoveryGroup.allStatuses(),
                 createdBefore);
     }
 
     /** 조회 이후 아무도 바꾸지 않았으면 선점하고 true, 다른 실행기·스케줄러가 먼저 바꿨으면 false */
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = ChargeSagaSteps.TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = ChargeSagaSteps.TX_TIMEOUT_SECONDS)
     public boolean claim(ChargeRecoveryTarget target) {
         return chargeRequestRepository.claimForRecovery(target.id(), target.status(), target.updatedAt()) == 1;
     }

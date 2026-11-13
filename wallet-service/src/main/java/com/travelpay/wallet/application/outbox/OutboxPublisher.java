@@ -6,7 +6,6 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.NestedExceptionUtils;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
@@ -39,7 +38,7 @@ public class OutboxPublisher {
     private final OutboxMessageSender messageSender;
 
     /** @return 발행에 성공한 건수 */
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public int publishPending(int batchSize) {
         Instant startedAt = Instant.now();
         List<OutboxEvent> events = outboxEventRepository.findPendingForUpdate(batchSize);
