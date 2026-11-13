@@ -19,6 +19,14 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        # 계정 잠금 뒤 항목 INSERT·계정 UPDATE를 문장마다 보내지 않고 묶어서 보내 잠금 보유 시간을 줄임 (#294, 원장 담당 합의)
+        # 거래 한 건 항목은 최대 20건이라 20 이상이면 같음
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
 
 travelpay:
   auth:
