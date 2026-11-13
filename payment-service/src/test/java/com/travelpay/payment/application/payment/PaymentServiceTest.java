@@ -1639,7 +1639,7 @@ class PaymentServiceTest {
         givenClaimable();
         Payment first = savedPayment(PAYMENT_ID, CREATED_AT);
         Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(first, second));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(first, second));
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
 
         paymentService.recoverPayments(NOW, 100);
@@ -1652,7 +1652,7 @@ class PaymentServiceTest {
     @Test
     void skipsPaymentWhenClaimFails() {
         Payment payment = savedPayment(PAYMENT_ID, CREATED_AT);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(payment));
         when(paymentRepository.claimForRecovery(any(), any(), any())).thenReturn(0);
 
         paymentService.recoverPayments(NOW, 100);
@@ -1667,7 +1667,7 @@ class PaymentServiceTest {
         givenClaimable();
         Payment first = savedPayment(PAYMENT_ID, CREATED_AT);
         Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(first, second));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(first, second));
         when(ledgerClient.createTransaction(any()))
                 .thenThrow(new IllegalStateException("원장 연결 실패"))
                 .thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
@@ -1684,7 +1684,7 @@ class PaymentServiceTest {
         List<Payment> pendings = List.of(
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT),
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT));
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(pendings);
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(pendings);
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
         RecoveryBatchResult result = paymentService.recoverPayments(NOW, 100);
@@ -1702,7 +1702,7 @@ class PaymentServiceTest {
         List<Payment> pendings = List.of(
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT),
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT));
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(pendings);
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(pendings);
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.notSent());
 
         RecoveryBatchResult result = paymentService.recoverPayments(NOW, 100);
@@ -1722,7 +1722,7 @@ class PaymentServiceTest {
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT),
                 savedPayment(notAcceptedId, CREATED_AT),
                 savedPayment(UUID.randomUUID(), CREATED_AT), savedPayment(UUID.randomUUID(), CREATED_AT));
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(pendings);
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(pendings);
         when(ledgerClient.createTransaction(any()))
                 .thenReturn(PaymentLedgerResult.unknown(), PaymentLedgerResult.unknown(), PaymentLedgerResult.notAccepted(),
                         PaymentLedgerResult.unknown(), PaymentLedgerResult.unknown());
@@ -1743,7 +1743,7 @@ class PaymentServiceTest {
     void recordsUnknownAttemptAndKeepsPendingBeforeLimit() {
         givenClaimable();
         Payment payment = pendingWithAttempts(PAYMENT_ID, 3);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(payment));
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(paymentRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(1);
 
@@ -1757,7 +1757,7 @@ class PaymentServiceTest {
     void marksManualReviewWithHistoryOnFifthUnknown() {
         givenClaimable();
         Payment payment = pendingWithAttempts(PAYMENT_ID, 4);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(payment));
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(paymentRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(1);
 
@@ -1776,7 +1776,7 @@ class PaymentServiceTest {
     void doesNotSaveHistoryWhenFifthUnknownUpdateMissed() {
         givenClaimable();
         Payment payment = pendingWithAttempts(PAYMENT_ID, 4);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(payment));
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(paymentRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(0);
 
@@ -1791,7 +1791,7 @@ class PaymentServiceTest {
         givenClaimable();
         Payment first = savedPayment(PAYMENT_ID, CREATED_AT);
         Payment second = savedPayment(OTHER_PAYMENT_ID, CREATED_AT);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(first, second));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(first, second));
         when(ledgerClient.createTransaction(any()))
                 .thenReturn(PaymentLedgerResult.unknown())
                 .thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
@@ -1808,7 +1808,7 @@ class PaymentServiceTest {
     void readsSettledPaymentWhenAnotherRequestSettledItFirst() {
         givenClaimable();
         Payment payment = savedPayment(PAYMENT_ID, CREATED_AT);
-        when(paymentRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(payment));
+        when(paymentRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(payment));
         when(ledgerClient.createTransaction(any())).thenReturn(PaymentLedgerResult.approved(LEDGER_TRANSACTION_ID));
         when(paymentRepository.save(any(Payment.class)))
                 .thenThrow(new ObjectOptimisticLockingFailureException(Payment.class, PAYMENT_ID));
@@ -1825,7 +1825,7 @@ class PaymentServiceTest {
         givenClaimable();
         Refund refund = existingRefund();
         Payment payment = refundPendingPayment();
-        when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
+        when(refundRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.approved(REFUND_TRANSACTION_ID));
 
@@ -1840,7 +1840,7 @@ class PaymentServiceTest {
         givenClaimable();
         Refund refund = existingRefund();
         Payment payment = refundPendingPayment();
-        when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
+        when(refundRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(payment));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.declined("원거래를 찾을 수 없습니다."));
 
@@ -1853,7 +1853,7 @@ class PaymentServiceTest {
     @Test
     void skipsRefundWhenClaimFails() {
         Refund refund = existingRefund();
-        when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
+        when(refundRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(refund));
         when(refundRepository.claimForRecovery(any(), any(), any())).thenReturn(0);
 
         paymentService.recoverRefunds(NOW, 100);
@@ -1866,7 +1866,7 @@ class PaymentServiceTest {
     void stopsRefundRecoveryWhenLedgerKeepsReturningUnknown() {
         givenClaimable();
         List<Refund> requested = List.of(existingRefund(), existingRefund(), existingRefund(), existingRefund());
-        when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(requested);
+        when(refundRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(requested);
         when(paymentRepository.findById(PAYMENT_ID)).thenAnswer(invocation -> Optional.of(refundPendingPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
 
@@ -1881,7 +1881,7 @@ class PaymentServiceTest {
     void marksRefundManualReviewWithoutHistoryOnFifthUnknown() {
         givenClaimable();
         Refund refund = requestedWithAttempts(4);
-        when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
+        when(refundRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.of(refundPendingPayment()));
         when(ledgerClient.refundTransaction(any())).thenReturn(PaymentLedgerResult.unknown());
         when(refundRepository.recordUnknownAttempt(any(), anyInt(), any(), any(), any())).thenReturn(1);
@@ -1899,7 +1899,7 @@ class PaymentServiceTest {
     void continuesRefundRecoveryWhenPaymentIsMissing() {
         givenClaimable();
         Refund refund = existingRefund();
-        when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
+        when(refundRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID)).thenReturn(Optional.empty());
 
         paymentService.recoverRefunds(NOW, 100);
@@ -1916,7 +1916,7 @@ class PaymentServiceTest {
         completedByOther.complete(REFUND_TRANSACTION_ID);
         Payment refundedByOther = refundPendingPayment();
         refundedByOther.refundCompletedHistory(10_000L, 0L);
-        when(refundRepository.findRecoveryTargets(NOW, 100)).thenReturn(List.of(refund));
+        when(refundRepository.claimRecoveryTargets(eq(NOW), any(), eq(100))).thenReturn(List.of(refund));
         when(paymentRepository.findById(PAYMENT_ID))
                 .thenReturn(Optional.of(refundPendingPayment()), Optional.of(refundedByOther));
         when(refundRepository.findByUserIdAndIdempotencyKey(OWNER_ID, REFUND_KEY))

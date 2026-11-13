@@ -27,16 +27,29 @@ public interface SettlementJpaRepository extends JpaRepository<Settlement, UUID>
 
     Page<Settlement> findByOwnerUserIdAndStatus(UUID ownerUserId, SettlementStatus status, Pageable pageable);
 
+    // 복구 대상 일괄 선점: 다른 서버가 잠근 행은 건너뛰고(SKIP LOCKED), 고른 행의 수정 시각을 선점 시각으로 바꿔 반환
+    @Transactional
     @Query(nativeQuery = true, value = """
-            select * from settlements
-            where status = 'REQUESTED'
-              and updated_at < cast(:now as timestamptz) - interval '30 seconds'
-              and updated_at < cast(:now as timestamptz)
-                  - interval '30 seconds' * power(2, greatest(attempt_count - 1, 0))
-            order by updated_at, id
-            limit :limit
+            with picked as (
+                select id, updated_at from settlements
+                where status = 'REQUESTED'
+                  and updated_at < cast(:now as timestamptz) - interval '30 seconds'
+                  and updated_at < cast(:now as timestamptz)
+                      - interval '30 seconds' * power(2, greatest(attempt_count - 1, 0))
+                order by updated_at, id
+                limit :limit
+                for update skip locked
+            ), claimed as (
+                update settlements t set updated_at = cast(:claimedAt as timestamptz)
+                from picked p
+                where t.id = p.id
+                returning t.*
+            )
+            select c.* from claimed c join picked p on p.id = c.id
+            order by p.updated_at, p.id
             """)
-    List<Settlement> findRecoveryTargets(@Param("now") Instant now, @Param("limit") int limit);
+    List<Settlement> claimRecoveryTargets(@Param("now") Instant now, @Param("claimedAt") Instant claimedAt,
+                                          @Param("limit") int limit);
 
     // 자동 처리 대상. 생성 시각은 바뀌지 않아 커서가 흔들리지 않음(ix_settlements_manual_review_created_at_id)
     @Query(nativeQuery = true, value = """

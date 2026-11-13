@@ -300,15 +300,15 @@ public class PaymentService {
         }
     }
 
-    // 재시도 대기 시간이 지난 PENDING 결제를 선점해 원장에 다시 요청 (배치)
+    // 재시도 대기 시간이 지난 PENDING 결제를 일괄 선점해 원장에 다시 요청 (배치, 서버끼리 서로 다른 건)
     public RecoveryBatchResult recoverPayments(Instant now, int limit) {
         int consecutiveUnknown = 0;
-        List<Payment> targets = paymentRepository.findRecoveryTargets(now, limit);
+        List<Payment> targets = paymentRepository.claimRecoveryTargets(now, Instant.now(), limit);
         for (Payment target : targets) {
             boolean unknown;
             try {
                 if (paymentRepository.claimForRecovery(target.getId(), target.getUpdatedAt(), Instant.now()) == 0) {
-                    // 다른 인스턴스가 먼저 선점했거나 그 사이 결과가 반영됨
+                    // 원장 호출 직전 선점 확인: 일괄 선점 뒤 대기 시간이 지나 다른 서버가 다시 가져갔거나 그 사이 결과가 반영됨
                     continue;
                 }
                 unknown = isResultUnknown(settlePayment(target, findMerchantWalletId(target.getMerchantId())));
@@ -325,15 +325,15 @@ public class PaymentService {
         return new RecoveryBatchResult(targets.size(), false);
     }
 
-    // 재시도 대기 시간이 지난 REQUESTED 환불을 선점해 원장에 다시 요청 (배치)
+    // 재시도 대기 시간이 지난 REQUESTED 환불을 일괄 선점해 원장에 다시 요청 (배치, 서버끼리 서로 다른 건)
     public RecoveryBatchResult recoverRefunds(Instant now, int limit) {
         int consecutiveUnknown = 0;
-        List<Refund> targets = refundRepository.findRecoveryTargets(now, limit);
+        List<Refund> targets = refundRepository.claimRecoveryTargets(now, Instant.now(), limit);
         for (Refund target : targets) {
             boolean unknown;
             try {
                 if (refundRepository.claimForRecovery(target.getId(), target.getUpdatedAt(), Instant.now()) == 0) {
-                    // 다른 인스턴스가 먼저 선점했거나 그 사이 결과가 반영됨
+                    // 원장 호출 직전 선점 확인: 일괄 선점 뒤 대기 시간이 지나 다른 서버가 다시 가져갔거나 그 사이 결과가 반영됨
                     continue;
                 }
                 Payment payment = paymentRepository.findById(target.getPaymentId())

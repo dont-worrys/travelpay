@@ -15,7 +15,9 @@ public interface SettlementRepository {
     Optional<Settlement> findByRequestedByAndIdempotencyKey(UUID requestedBy, String idempotencyKey);
     Page<Settlement> findPageByMerchantId(UUID merchantId, SettlementStatus status, Pageable pageable);
     Page<Settlement> findPageByOwnerUserId(UUID ownerUserId, SettlementStatus status, Pageable pageable);
-    List<Settlement> findRecoveryTargets(Instant now, int limit);
+    // 복구 대상 일괄 선점: 대기 시간이 지난 건을 최대 limit건 골라 수정 시각을 claimedAt으로 바꿔 반환(자체 트랜잭션으로 커밋).
+    // 다른 서버가 잠근 행은 건너뛰고, 커밋 뒤엔 대기 시간이 다시 시작돼 서버마다 서로 다른 건을 가져감
+    List<Settlement> claimRecoveryTargets(Instant now, Instant claimedAt, int limit);
     int claimForRecovery(UUID settlementId, Instant seenUpdatedAt, Instant now);
     // 결과 모름 횟수를 1 올리며 상태를 정함(한도면 MANUAL_REVIEW). REQUESTED이고 횟수가 그대로일 때만 바뀜
     int recordUnknownAttempt(UUID settlementId, int expectedAttempts, SettlementStatus status,

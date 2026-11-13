@@ -366,13 +366,23 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         jdbcTemplate.update("update settlements set status = 'PAID', ledger_transaction_id = ?, paid_at = now() "
                 + "where id = ?", UUID.randomUUID(), paid.getId());
 
-        List<UUID> ids = settlementRepository.findRecoveryTargets(now, 100).stream()
-                .map(Settlement::getId).toList();
+        // 운영의 복구는 트랜잭션 밖에서 새로 읽음. 테스트 트랜잭션에 남은 엔티티 대신 선점 결과를 받도록 비움
+        entityManager.flush();
+        entityManager.clear();
+        Instant claimedAt = Instant.parse("2026-11-07T00:10:01Z");
+        List<Settlement> claimed = settlementRepository.claimRecoveryTargets(now, claimedAt, 100);
+        List<UUID> ids = claimed.stream().map(Settlement::getId).toList();
 
         assertTrue(ids.contains(firstRetry.getId()));
         assertTrue(ids.contains(backedOff.getId()));
         assertFalse(ids.contains(waiting.getId()));
         assertFalse(ids.contains(paid.getId()));
+        // 선점한 건은 수정 시각이 선점 시각으로 바뀌어 반환되고, 같은 시각 기준으로 다시 선점해도 나오지 않음
+        assertTrue(claimed.stream().allMatch(s -> s.getUpdatedAt().equals(claimedAt)));
+        assertEquals(Timestamp.from(claimedAt), jdbcTemplate.queryForObject(
+                "select updated_at from settlements where id = ?", Timestamp.class, firstRetry.getId()));
+        assertFalse(settlementRepository.claimRecoveryTargets(now, claimedAt, 100).stream()
+                .anyMatch(s -> ids.contains(s.getId())));
     }
 
     @Test
@@ -410,7 +420,7 @@ class SettlementRepositoryIntegrationTest extends PostgresContainerSupport {
         assertEquals("MANUAL_REVIEW", row.get("status"));
         assertEquals("RETRY_EXHAUSTED", row.get("review_reason"));
         assertEquals(5, row.get("attempt_count"));
-        assertFalse(settlementRepository.findRecoveryTargets(now.plus(Duration.ofDays(1)), 1000).stream()
+        assertFalse(settlementRepository.claimRecoveryTargets(now.plus(Duration.ofDays(1)), now, 1000).stream()
                 .anyMatch(target -> target.getId().equals(settlement.getId())));
     }
 

@@ -761,7 +761,10 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | 원장 장애 판단 | 한 배치에서 결과 모름이 연달아 3번이면 그 종류는 이번 주기에 더 처리하지 않고 다음 주기로(장애 중인 원장에 계속 보내지 않음) |
 | 끄기 | `payment.settlement-recovery.enabled=false` (테스트·수동 확인용) |
 
-- 선점: 조회한 건의 상태·수정 시각이 그대로일 때만 조건부 UPDATE로 가져갑니다. 여러 인스턴스가 함께 돌아도 같은 건을 동시에 처리하지 않습니다. 결과 반영은 결제·정산 `@Version`과 상태 조건으로 한 번만 됩니다. 분산 락은 쓰지 않습니다.
+- 선점(서버 여러 대): 배치마다 대상을 **SKIP LOCKED로 일괄 선점**합니다(`claimRecoveryTargets`, 송금 복구와 같은 방식). 한 문장으로 대기 시간이 지난 건을 최대 10건 잠그고 수정 시각을 선점 시각으로 바꾼 뒤 바로 커밋합니다.
+  - 다른 서버가 선점 중인 행은 기다리지 않고 건너뛰고, 커밋 뒤에는 수정 시각이 바뀌어 재시도 대기 시간이 다시 시작되므로 서버마다 **서로 다른 건**을 가져갑니다. 밀린 건이 많으면 서버 수만큼 나눠 처리합니다.
+  - 원장 호출 직전에 수정 시각이 선점 시각 그대로일 때만 지금으로 갱신합니다(`claimForRecovery`). 배치 앞쪽 처리가 길어져 그사이 다른 서버가 같은 건을 다시 선점했으면 건너뜁니다.
+  - 결과 반영은 결제·정산 `@Version`과 상태 조건으로 한 번만 됩니다. 선점한 서버가 원장 호출 뒤 멈춰도 대기 시간 뒤 다른 서버가 같은 reference로 다시 보내고, 원장 reference 멱등으로 잔액은 한 번만 바뀝니다.
 - 정산 요청 응답 처리와 복구가 같은 정산의 결과를 동시에 반영하면 늦은 쪽은 먼저 반영된 정산을 다시 읽어 응답합니다.
 - 한 건의 오류는 로그만 남기고 다음 건을 계속 처리합니다. 결제 복구가 실패해도 환불·정산 복구는 돕니다.
 - payment-service의 스케줄러 스레드는 2개입니다(`spring.task.scheduling.pool.size`). 송금 복구와 서로의 원장 호출을 기다리지 않게 하기 위함입니다.
@@ -879,7 +882,7 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 
 | 항목 | 값 |
 |---|---|
-| 실행 | [복구 스케줄러](#복구-스케줄러) 6주기(약 1분)마다, 복구 뒤·지표 갱신 앞 |
+| 실행 | [복구 스케줄러](#복구-스케줄러) 6주기(약 1분)마다, 복구 뒤·지표 갱신 앞. 서버가 여러 대면 잠금을 잡은 **한 서버만** 그 차례를 처리 |
 | 대상 | `MANUAL_REVIEW`로 바뀐 지(`updated_at`) **1분** 지난 건만(마지막 원장 요청이 원장에서 끝날 시간) |
 | 처리량 | 결제·환불·정산 종류마다 생성 순으로 **10건** |
 | 시간 한도 | 한 번에 **5초**. 넘으면 남은 건은 다음 차례로(원장 조회는 서킷 밖이라 느리면 건마다 최대 응답 시간까지 기다림) |
@@ -887,6 +890,10 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 
 - 종류마다 `(created_at, id)` 커서로 이어서 봅니다. 건너뛴 건이 앞쪽에 쌓여도 뒤의 건을 처리하고, 끝까지 보면 처음부터 다시 봅니다. 커서는 메모리에만 있어 재기동하면 처음부터 봅니다. 원장이 느릴 때 뒤 종류가 계속 밀리지 않도록 시작하는 종류를 매번 바꿉니다.
 - 처리 기록은 `actor_type = SYSTEM`, `actor_id`·`memo` 없이 남고 `description` 앞에 "자동 처리: "가 붙습니다(예: "자동 처리: 재시도 한도 초과, 원장 반영 확인 → 결제 승인"). 결제 이력은 `SYSTEM`으로 남습니다.
+- **서버 여러 대**: 차례마다 PostgreSQL advisory lock(`pg_try_advisory_lock`, `PostgresManualReviewLock`)을 시도해 잡은 서버만 처리하고 끝나면 풉니다. 다른 서버가 처리 중이면 그 차례는 건너뛰어, 같은 건을 두 서버가 동시에 원장에 조회하지 않습니다.
+  - 대상 단위로 나누지 않고 실행을 하나로 묶는 이유: `MANUAL_REVIEW` 행의 `updated_at`은 "`MANUAL_REVIEW`가 된 시각"(1분 대기 판단)이라 선점 표시로 바꿀 수 없습니다.
+  - 잠금은 처리하는 동안 DB 연결 하나에 걸립니다. 서버가 처리 중에 죽으면 연결이 끊기며 잠금도 풀려 만료 시간이 필요 없습니다.
+  - 차례마다 처리하는 서버가 바뀔 수 있어 커서는 서버마다 따로 이어집니다. 끝까지 보면 처음부터 다시 보므로 빠지는 건은 없습니다.
 - 운영자 처리와 겹치면 결제·정산 `@Version`, 환불 조건부 UPDATE로 먼저 반영한 쪽만 성공합니다. 자동 처리가 지면 기록 없이 넘어가고, 운영자가 지면 409 `PAYMENT_NOT_MANUAL_REVIEW`입니다.
 - 끄려면 복구 스케줄러를 끕니다(`payment.settlement-recovery.enabled=false`).
 
@@ -1055,21 +1062,22 @@ PENDING ──원장 반영──▶ APPROVED ──고객 신청──▶ REFUN
 | `PaymentHistoryRepositoryImplTest` | 결제별 가장 최근 환불 신청 사유 조회 |
 | `ManualReviewRulesTest` | 운영자 처리 규칙(멈춘 사유 × 원장 결과), 원장 항목 비교 |
 | `PaymentReviewServiceTest` | 운영자 처리·단건 조회·목록·처리 기록 목록, 예상 결과와 실제 처리 일치, 항목 불일치·동시 처리·원장 조회 실패, 재시도 소진 결제의 원장 취소(취소 기록·늦은 커밋·취소 실패·요청 거부는 취소 안 함), 자동 처리(확정·기록 없음과 불일치는 건너뜀·취소 안 함·운영자와 겹침) |
-| `PaymentReviewRepositoryIntegrationTest` | 실제 PostgreSQL에서 목록 쿼리, 환불 조건부 UPDATE, 처리 기록 제약·조건별 조회(처리 주체 제약 포함), 자동 처리 대상 커서 조회, 승인 시각 조회, 목록 인덱스 |
+| `PaymentReviewRepositoryIntegrationTest` | 실제 PostgreSQL에서 목록 쿼리, 결제·환불 복구 일괄 선점, 환불 조건부 UPDATE, 처리 기록 제약·조건별 조회(처리 주체 제약 포함), 자동 처리 대상 커서 조회, 승인 시각 조회, 목록 인덱스 |
 | `ManualReviewReconcilerTest` | 자동 처리 실행: 1분 기준, 커서 이어 보기·처음부터, 연속 3번 원장 조회 실패면 멈춤, 시간 한도, 시작 종류 순환, 처리 건수 지표 |
 | `PaymentTest` | 결제 상태 전이(환불 신청·취소·거절 포함)와 역할별 환불 가능 여부 |
 | `MerchantServiceTest` | 가맹점 생성(주인 확인, 원장 실패 시 `PENDING`), 재시도, 잔액 권한 |
 | `PaymentLedgerFeignClientTest` | 원장 응답별 반영·거절·받아들이지 않음·결과 모름 분류, 거래 조회 결과 변환(코드 없는 404는 결론 내지 않음), 원장 취소 응답 변환(취소 기록은 기록 없음, 실패는 503, 서킷 안 거침) |
 | `MerchantLedgerFeignClientTest`, `PaymentWalletFeignClientTest`, `MerchantUserFeignClientTest` | 다른 서비스 응답·실패 변환 |
 | `PaymentExceptionHandlerTest` | 거절 사유를 `details`에 담는지 |
-| `PendingSettlementSchedulerTest` | 스케줄러 주기 처리와 지표, 자동 처리 실행 주기·순서 |
+| `PendingSettlementSchedulerTest` | 스케줄러 주기 처리와 지표, 자동 처리 실행 주기·순서, 다른 서버가 잠금을 쥐면 자동 처리만 건너뜀 |
+| `PaymentSchedulerMultiServerIntegrationTest` | 실제 PostgreSQL에서 서버 두 대 상황: 선점 중인 행을 건너뛰어 서로 다른 정산을 가져감·커밋 뒤 다시 가져가지 않음, 자동 처리 잠금은 한 곳만·끝나면(예외 포함) 풀림 |
 | `SettlementServiceTest` | 정산 요청(대상 기간·완료 환불 차감·주인 지갑), 멱등성·동시 요청, 거절 시 항목 삭제, 결과 모름·5회째 `MANUAL_REVIEW`·받아들이지 않음(`MANUAL_REVIEW`, 항목 유지), 복구, 목록·상세, 미리보기 |
 | `SettlementTest` | 정산 생성·상태 전이(결과는 한 번만 반영), 금액 검증, 같은 요청 판정 |
-| `SettlementRepositoryIntegrationTest` | 실제 PostgreSQL에서 정산 대상·미리보기 조회 조건(승인 시각 기준, 정산된·신청 중 결제 제외), 항목 유일성, 복구 조건부 UPDATE, `MANUAL_REVIEW` 전환·목록·제약, 처리 기록 조회·처리 주체 제약, 자동 처리 대상 커서 조회 |
+| `SettlementRepositoryIntegrationTest` | 실제 PostgreSQL에서 정산 대상·미리보기 조회 조건(승인 시각 기준, 정산된·신청 중 결제 제외), 항목 유일성, 복구 일괄 선점·조건부 UPDATE, `MANUAL_REVIEW` 전환·목록·제약, 처리 기록 조회·처리 주체 제약, 자동 처리 대상 커서 조회 |
 | `SettlementReviewServiceTest` | 정산 운영자 처리 규칙(멈춘 사유 × 원장 결과), 예상 결과와 실제 처리 일치, 항목 삭제·유지, 원장 보정 필요·조회 실패·동시 처리, 재시도 소진 정산의 원장 취소, 자동 처리 |
 | `SettlementRefundLockIntegrationTest` | 정산과 `MASTER` 직접 환불을 커밋하는 두 트랜잭션으로 동시에 실행해 이중 지급이 없는지 |
 
-`PaymentReviewRepositoryIntegrationTest`·`Settlement*IntegrationTest`는 송금 통합 테스트처럼 Testcontainers로 PostgreSQL을 띄우고 Flyway를 처음부터 적용합니다. Docker가 없으면 건너뜁니다. 나머지는 DB 없이 실행되는 단위 테스트입니다.
+`PaymentReviewRepositoryIntegrationTest`·`Settlement*IntegrationTest`·`PaymentSchedulerMultiServerIntegrationTest`는 송금 통합 테스트처럼 Testcontainers로 PostgreSQL을 띄우고 Flyway를 처음부터 적용합니다. Docker가 없으면 건너뜁니다. 나머지는 DB 없이 실행되는 단위 테스트입니다.
 
 로컬에서 `MANUAL_REVIEW` 건을 만들 때는 ledger-service를 끈 채로 결제·환불을 요청합니다. 결과 모름 5회(약 8분) 뒤 `RETRY_EXHAUSTED`가 됩니다. 원장 상태(`POSTED`·`REJECTED`)는 ledger-service의 `POST /internal/v1/ledger/transactions`로 같은 reference의 거래를 직접 등록해 만듭니다(잔액보다 큰 금액이면 `REJECTED`).
 
