@@ -12,7 +12,6 @@ import com.travelpay.wallet.domain.wallet.WalletRepository;
 import com.travelpay.wallet.domain.wallet.WalletStatus;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Comparator;
@@ -38,9 +37,9 @@ public class WalletTransactionSteps {
     /**
      * 1단계: 지갑을 PENDING으로 추가(이미 있으면 그대로)하고 재조회한다.
      * ACTIVE면 통화 목록까지 채워 돌려주고, PENDING이면 통화 목록은 비어 있다.
-     * 다른 트랜잭션이 커밋한 행을 재조회에서 봐야 하므로 READ COMMITTED 전제.
+     * 다른 트랜잭션이 커밋한 행을 재조회에서 봐야 하므로 READ COMMITTED 전제 (spring.datasource.hikari.transaction-isolation).
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public OpenWalletResult prepareOpen(UUID userId) {
         walletRepository.addIfAbsent(userId);
         Wallet wallet = walletRepository.findByUserId(userId)
@@ -56,9 +55,9 @@ public class WalletTransactionSteps {
     /**
      * 3단계: 원장 계정으로 통화별 지갑을 추가(이미 있으면 그대로)하고, 모든 통화가 원장 계정과 맞을 때만 활성화한다.
      * 지갑 행을 잠가 같은 지갑의 동시 완료를 순서대로 처리한다 (한 요청만 활성화, 나머지는 이미 ACTIVE로 봄).
-     * 다른 트랜잭션이 커밋한 행을 재조회에서 봐야 하므로 READ COMMITTED 전제.
+     * 다른 트랜잭션이 커밋한 행을 재조회에서 봐야 하므로 READ COMMITTED 전제 (spring.datasource.hikari.transaction-isolation).
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public OpenWalletResult completeOpen(UUID userId, List<LedgerAccount> ledgerAccounts) {
         Wallet wallet = walletRepository.findByUserIdForUpdate(userId)
                 .orElseThrow(() -> new IllegalStateException("개설 중인 지갑을 찾지 못했습니다."));

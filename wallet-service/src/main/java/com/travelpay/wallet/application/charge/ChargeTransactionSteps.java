@@ -10,7 +10,6 @@ import com.travelpay.wallet.domain.outbox.OutboxEvent;
 import com.travelpay.wallet.domain.outbox.OutboxEventRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -35,8 +34,8 @@ public class ChargeTransactionSteps {
     private final OutboxEventRepository outboxEventRepository;
     private final JsonMapper jsonMapper;
 
-    /** 동시 요청 재조회에서 다른 트랜잭션이 커밋한 행을 봐야 하므로 READ COMMITTED 전제 */
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    /** 동시 요청 재조회에서 다른 트랜잭션이 커밋한 행을 봐야 하므로 READ COMMITTED 전제 (spring.datasource.hikari.transaction-isolation) */
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public Optional<ChargeRequest> findByIdempotencyKey(UUID userId, UUID idempotencyKey) {
         return chargeRequestRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey);
     }
@@ -50,7 +49,7 @@ public class ChargeTransactionSteps {
      * 충전(REQUESTED) + 상태 이력(null → REQUESTED) + Outbox를 한 트랜잭션으로 저장한다.
      * 같은 멱등 키가 먼저 저장됐으면 DuplicateChargeRequestException으로 롤백된다.
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public ChargeRequest accept(ChargeRequest chargeRequest) {
         ChargeRequest saved = chargeRequestRepository.save(chargeRequest);
         historyRepository.save(ChargeStatusHistory.record(saved.getId(), null, saved.getStatus(),

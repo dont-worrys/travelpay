@@ -12,7 +12,6 @@ import com.travelpay.wallet.domain.resolution.ChargeResolution;
 import com.travelpay.wallet.domain.resolution.ChargeResolutionRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Optional;
@@ -34,18 +33,18 @@ public class ChargeResolutionTransactionSteps {
     private final ReconciliationResultRepository reconciliationResultRepository;
     private final ChargeStatusTransitioner transitioner;
 
-    /** 동시 요청 재조회에서 다른 트랜잭션이 커밋한 행을 봐야 하므로 READ COMMITTED 전제 */
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    /** 동시 요청 재조회에서 다른 트랜잭션이 커밋한 행을 봐야 하므로 READ COMMITTED 전제 (spring.datasource.hikari.transaction-isolation) */
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public Optional<ChargeResolution> findByIdempotencyKey(UUID idempotencyKey) {
         return resolutionRepository.findByIdempotencyKey(idempotencyKey);
     }
 
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public Optional<ChargeRequest> findCharge(UUID chargeId) {
         return chargeRequestRepository.findById(chargeId);
     }
 
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public Optional<ReconciliationResult> findReconciliationResult(UUID resultId) {
         return reconciliationResultRepository.findById(resultId);
     }
@@ -58,7 +57,7 @@ public class ChargeResolutionTransactionSteps {
      * - 대사 결과가 이미 처리됨: 409
      * 어느 경우든 전부 롤백된다
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public ChargeResolution apply(ChargeResolution resolution, ChargeFailureCode failureCode,
                                   UUID bankTxId, UUID ledgerRef, UUID refundBankTxId) {
         // 충전 행을 먼저 잠가 동시 보정의 순서를 정한다 (뒤 요청은 앞 요청 커밋 후 MANUAL_REVIEW가 아니면 여기서 끝남)
