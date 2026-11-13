@@ -1,0 +1,12 @@
+# 원장 장애 캡처용(#282): k6가 잰 사용자 쪽 응답 시간을 Prometheus가 받게 합니다(remote write 수신).
+# 서버 지표는 스레드를 기다린 시간을 재지 않아, 요청 스레드가 꽉 차면 원장을 부르지 않는 API도 빠르게 보입니다.
+# 공용 모니터링 설정(compose.monitoring.yaml)의 Prometheus 실행 옵션에 수신 옵션 하나만 더합니다. command는 통째로 바뀌므로
+# 공용 파일의 옵션이 바뀌면 여기도 맞춥니다. 저장소 루트에서 부하 시험 연결 파일과 함께 씁니다(README "원장 장애 측정").
+services:
+  prometheus:
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=72h
+      - --storage.tsdb.retention.size=2GB
+      - --web.enable-remote-write-receiver

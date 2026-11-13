@@ -4,7 +4,7 @@
 # (그동안 요청 스레드·커넥션 풀 지표를 1초마다 기록) → 주문 상태 집계 → 결과 정리.
 # 기존 환율·견적 측정(measure.sh)과 따로 두어 그 측정 조건을 바꾸지 않습니다.
 #
-# 사용법: [ORDER_RATE=60] [RATE_RATE=100] [TIMEOUT=10s] ./measure-ledger.sh <LABEL> <원장 지연 ms>
+# 사용법: [ORDER_RATE=60] [RATE_RATE=100] [TIMEOUT=10s] [K6_PROMETHEUS_RW=1] ./measure-ledger.sh <LABEL> <원장 지연 ms>
 #   예: APP_JAR=../../../travelpay-ledger-pre282/$J ./measure-ledger.sh ledger-pre-normal 0
 #       APP_JAR=../../../travelpay-ledger-pre282/$J ./measure-ledger.sh ledger-pre-timeout 6000
 #   결과: results/<LABEL>.json(k6: 신청·환율 조회 응답) + results/<LABEL>-server.json(서버 지표·주문 상태·측정 조건)
@@ -121,9 +121,17 @@ sampler_pid=$!
 k6_started=$(date +%s)
 # k6 결과를 쓴 뒤 어디서든 실패하면 반쪽 결과가 남지 않게 지운다(measure.sh와 같음). 다 만든 뒤에 푼다
 trap 'rm -f "$k6_result" "$summary.tmp"' EXIT
+# 캡처용(K6_PROMETHEUS_RW=1): k6가 잰 사용자 쪽 응답 시간을 Prometheus로도 보낸다(remote write, 네이티브 히스토그램).
+# 서버 지표(http_server_requests)는 스레드를 기다린 시간을 재지 않아, 요청 스레드가 꽉 차면 환율 조회·견적이 빠르게 보인다.
+# Prometheus가 측정 네트워크에 붙어 있고 remote write 수신을 켠 경우에만 쓴다(README "원장 장애 측정"). 기본은 꺼짐
+k6_output=()
+if [ "${K6_PROMETHEUS_RW:-0}" = 1 ]; then
+    k6_output=(-e K6_PROMETHEUS_RW_SERVER_URL=http://prometheus:9090/api/v1/write
+        -e K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=true -e K6_PROMETHEUS_RW_PUSH_INTERVAL=5s)
+fi
 docker compose run --rm -e LABEL="${LABEL}" -e WARMUP="${WARMUP_SECONDS}s" -e DURATION="${MEASURE_SECONDS}s" \
     -e ORDER_RATE="${ORDER_RATE}" -e RATE_RATE="${RATE_RATE}" -e QUOTE_RATE="${QUOTE_RATE}" -e TIMEOUT="${TIMEOUT}" \
-    k6 run --quiet "/scripts/${K6_SCRIPT}" &
+    "${k6_output[@]}" k6 run --quiet ${k6_output:+-o experimental-prometheus-rw} "/scripts/${K6_SCRIPT}" &
 k6_pid=$!
 
 # 예약 체결 영향: k6가 실제로 요청을 보내기 시작한 뒤에 바로 체결될 대기 예약을 넣는다. 다음 수집(최대 5초 뒤)이 모두 매칭해
