@@ -8,13 +8,26 @@ PR이 `dev`·`main`을 대상으로 열리거나 갱신될 때와 `dev`에 반�
 
 | 워크플로 | 작업 | 검사 내용 |
 |---|---|---|
-| `ci.yml` | Gradle build | `./gradlew build`로 모든 서비스의 컴파일·테스트. 서비스 통합 테스트는 Testcontainers로 Docker를 씁니다 |
+| `ci.yml` | Gradle build | `./gradlew build --parallel --build-cache`로 모든 서비스의 컴파일·테스트. 서비스 통합 테스트는 Testcontainers로 Docker를 씁니다 |
 | `ci.yml` | Terraform | `infra/aws` 형식(`fmt -check`), 본 root와 State bootstrap root의 `validate`·`test`. State·AWS 자격 증명 없이 모의 provider로 검사합니다 |
 | `ci.yml` | Python 3.9 | 인프라 스크립트 테스트. 3.9는 Data·앱 호스트(AL2023)의 `python3` 버전이며, DB 초기화 SQL을 실제 PostgreSQL로 검사합니다 |
 | `ci.yml` | Python 3.15 | 같은 테스트를 인프라 담당자 PC 도구(비밀값 준비·이미지 게시)용 최신 버전으로 |
 | `ci-container.yml` | Image and monitoring | 실행 이미지를 실제로 빌드해 실행 사용자·권한·시작 스크립트를 확인하고, 운영 Alloy·Loki 설정으로 로그 레이블을 확인합니다. 오래 걸리므로 Dockerfile·시작 스크립트·`.dockerignore`·Gradle 빌드 설정·모니터링 설정이 바뀐 경우에만 돕니다 |
 
 실패하면 Actions 화면의 해당 작업 로그를 봅니다. Gradle 테스트가 실패하면 테스트 보고서(`gradle-test-reports`)를 7일 동안 내려받을 수 있습니다. 로컬에서 같은 검사를 돌리는 명령은 각 작업의 `run` 줄과 같습니다.
+
+### 실행 시간
+
+CI 시간은 대부분 Gradle 작업입니다(2026-11-13 이전 최근 10회 중간값 575초, 그중 `./gradlew build`가 559초). 두 옵션으로 줄이며, CI 명령에만 붙여 로컬 빌드에는 영향이 없습니다.
+
+- **병렬 실행(`--parallel`):** 서로 다른 서비스의 작업을 동시에 돌립니다. 같은 커밋으로 3번 재니 Gradle 작업이 349·464·409초(중간값 409초, 약 29% 단축)였고 모두 통과했습니다. 서비스끼리 같은 파일이나 고정 포트를 함께 쓰는 테스트는 동시에 돌 때 깨질 수 있으니 만들지 않습니다.
+- **빌드 캐시(`--build-cache`):** 입력(소스·의존성·설정)이 같은 작업은 다시 실행하지 않고 저장된 결과를 씁니다. `dev` 실행이 결과를 캐시에 저장하고 PR과 main 실행은 읽기만 하므로, 바뀌지 않은 서비스의 컴파일·테스트는 건너뜁니다. 문서만 바뀐 PR은 거의 전부 캐시에서 복원되고, `common/`처럼 여러 서비스가 쓰는 코드가 바뀌면 영향받는 서비스만 다시 돕니다.
+
+빌드 캐시를 쓰면 테스트 결과도 입력이 바뀌기 전까지 다시 쓰입니다. 그래서 다음을 지킵니다.
+
+- 테스트 결과가 입력에 없는 것(현재 시각, 외부 서비스, 환경 변수)에 따라 달라지지 않게 씁니다. 그런 테스트는 잘못된 결과가 캐시에 남을 수 있습니다(Gradle 문서).
+- Testcontainers 이미지는 `postgres:18.6-bookworm`처럼 버전을 고정합니다. `latest` 같은 태그는 이미지가 바뀌어도 캐시된 결과가 그대로 쓰입니다.
+- 캐시된 결과가 의심되면 Actions → Management → **Caches**에서 해당 캐시를 지우고(쓰기 권한 필요) 다시 실행합니다. 그러면 처음부터 다시 돕니다.
 
 ### 실행 환경과 보안
 
