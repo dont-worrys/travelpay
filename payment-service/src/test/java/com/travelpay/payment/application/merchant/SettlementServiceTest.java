@@ -716,7 +716,7 @@ class SettlementServiceTest {
     }
 
     private void givenRecoveryTargets(Settlement... targets) {
-        when(settlementRepository.findRecoveryTargets(any(), anyInt())).thenReturn(List.of(targets));
+        when(settlementRepository.claimRecoveryTargets(any(), any(), anyInt())).thenReturn(List.of(targets));
         when(settlementRepository.claimForRecovery(any(), any(), any())).thenReturn(1);
         for (Settlement target : targets) {
             when(settlementRepository.findById(target.getId())).thenReturn(Optional.of(target));

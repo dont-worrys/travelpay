@@ -72,8 +72,8 @@ public class RefundRepositoryImpl implements RefundRepository {
     }
 
     @Override
-    public List<Refund> findRecoveryTargets(Instant now, int limit) {
-        return refundJpaRepository.findRecoveryTargets(now, limit);
+    public List<Refund> claimRecoveryTargets(Instant now, Instant claimedAt, int limit) {
+        return refundJpaRepository.claimRecoveryTargets(now, claimedAt, limit);
     }
 
     @Override

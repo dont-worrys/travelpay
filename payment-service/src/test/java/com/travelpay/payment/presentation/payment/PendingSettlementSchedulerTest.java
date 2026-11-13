@@ -1,5 +1,6 @@
 package com.travelpay.payment.presentation.payment;
 
+import com.travelpay.payment.application.payment.ManualReviewLock;
 import com.travelpay.payment.application.payment.ManualReviewReconciler;
 import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
@@ -22,6 +23,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -35,13 +37,21 @@ class PendingSettlementSchedulerTest {
     private SimpleMeterRegistry meterRegistry;
     private PendingSettlementScheduler scheduler;
 
+    // 잠금을 잡은 경우(이 서버가 처리)와 다른 서버가 쥐고 있는 경우
+    private static final ManualReviewLock RUNS = task -> {
+        task.run();
+        return true;
+    };
+    private static final ManualReviewLock HELD_ELSEWHERE = task -> false;
+
     @BeforeEach
     void setUp() {
         paymentService = mock(PaymentService.class);
         settlementService = mock(SettlementService.class);
         reconciler = mock(ManualReviewReconciler.class);
         meterRegistry = new SimpleMeterRegistry();
-        scheduler = new PendingSettlementScheduler(paymentService, settlementService, reconciler, meterRegistry);
+        scheduler = new PendingSettlementScheduler(paymentService, settlementService, reconciler, RUNS,
+                meterRegistry);
         when(paymentService.findStuckSettlements(any(), anyInt()))
                 .thenReturn(new StuckSettlementResult(0, List.of(), 0, List.of()));
     }
@@ -98,7 +108,7 @@ class PendingSettlementSchedulerTest {
         // 시작 0초 → 첫 바퀴 뒤 5초(계속) → 둘째 바퀴 뒤 9초(한도 8초 초과, 멈춤)
         Deque<Long> clock = new ArrayDeque<>(List.of(0L, 5_000_000_000L, 9_000_000_000L));
         PendingSettlementScheduler timed = new PendingSettlementScheduler(paymentService, settlementService,
-                reconciler, new SimpleMeterRegistry(), () -> clock.size() > 1 ? clock.poll() : clock.peek());
+                reconciler, RUNS, new SimpleMeterRegistry(), () -> clock.size() > 1 ? clock.poll() : clock.peek());
         when(paymentService.recoverPayments(any(), anyInt())).thenReturn(FULL);
 
         timed.recover();
@@ -240,6 +250,21 @@ class PendingSettlementSchedulerTest {
         order.verify(settlementService).recoverSettlements(any(), anyInt());
         order.verify(reconciler).reconcile(any());
         order.verify(paymentService).countManualReviewPayments();
+    }
+
+    @Test
+    void skipsReconcileWhenAnotherServerHoldsTheLock() {
+        SimpleMeterRegistry otherRegistry = new SimpleMeterRegistry();
+        PendingSettlementScheduler other = new PendingSettlementScheduler(paymentService, settlementService,
+                reconciler, HELD_ELSEWHERE, otherRegistry);
+        when(paymentService.countManualReviewPayments()).thenReturn(2L);
+
+        other.recover();
+
+        // 자동 처리는 건너뛰고 복구·지표 갱신은 그대로
+        verify(reconciler, never()).reconcile(any());
+        verify(paymentService).recoverPayments(any(), eq(10));
+        assertEquals(2.0, otherRegistry.get("payment.settlement.manual_review").tag("type", "payment").gauge().value());
     }
 
     @Test
