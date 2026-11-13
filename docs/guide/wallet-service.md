@@ -186,7 +186,7 @@ Content-Type: application/json
 | 컨슈머 | 그룹 `wallet-charge-saga`, 동시성 3, 레코드 단위 커밋, `auto-offset-reset: earliest`. `chargeId`로 SAGA 실행기를 부릅니다 |
 | 컨슈머 오류 | DB 장애 같은 인프라 예외만 1초 간격 2회 다시 실행하고, 그래도 실패하면 ERROR 후 넘깁니다(멈춘 건은 복구 스케줄러가 처리). 메시지 형식 이상·허용되지 않은 전이는 바로 넘깁니다 |
 
-같은 이벤트를 다시 받아도 실행기가 충전 상태를 보고 판단하므로(종료 상태면 아무것도 안 함) 이벤트 중복 제거는 하지 않습니다. `eventId`는 상태 이력 `trace_id`에 남깁니다.
+- 발행 결과(`PUBLISHED`·`retry_count`)는 엔티티 변경으로 커밋 때 한꺼번에 flush됩니다. JDBC batch(`spring.jpa.properties.hibernate.jdbc.batch_size: 50`, `application.yml`·`application-prod.yml`)로 50건씩 묶어 보내므로 batch 500이면 UPDATE가 10번에 나갑니다. Outbox 트랜잭션 제한 10초 중 응답 대기가 최대 8초라, 남은 시간 안에 UPDATE와 커밋을 끝내기 위해서입니다. `order_inserts`·`order_updates`는 켜지 않습니다(엔티티에 연관관계가 없어 정렬로 얻는 것이 없음). 같은 이벤트를 다시 받아도 실행기가 충전 상태를 보고 판단하므로(종료 상태면 아무것도 안 함) 이벤트 중복 제거는 하지 않습니다. `eventId`는 상태 이력 `trace_id`에 남깁니다.
 
 ### SAGA 단계
 
@@ -622,10 +622,11 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 | `ChargeSagaFeignIntegrationTest` | Feign 실패가 실제 어댑터를 거쳐 환불·`MANUAL_REVIEW`·결과 모름으로 이어지는지(대역은 Feign 클라이언트) |
 | `ChargeStatusTransitionerIntegrationTest` | 조건부 상태 전이(접수 단계로 만든 `REQUESTED`부터) |
 | `ChargeRecoverySchedulerIntegrationTest` | 복구 대상 대기 시간·선점·재실행·단계 묶음별 조회·한 주기 이어서 처리·결과 모름 3연속 중단·멈춘 충전 지표(은행·원장은 대역, `recover()` 직접 호출) |
-| `OutboxPublisherIntegrationTest` | 실제 Kafka로 발행, Outbox 상태, Kafka 중단 시 동작 |
+| `OutboxPublisherIntegrationTest` | 실제 Kafka로 발행, Outbox 상태, Kafka 중단 시 동작, 상태 변경이 JDBC batch로 묶이는지(120건 → batch 3번) |
 | `OutboxPublishOrderIntegrationTest` | `PENDING` 조회 순서(재시도 적은 순 → 오래된 순) |
 | `ChargeQueryIntegrationTest` | 충전 내역 조회 API(회원·관리자) |
 | `ConnectionIsolationIntegrationTest` | 서버 기본 격리 수준을 serializable로 띄운 PostgreSQL에서도 쓰기·조회 트랜잭션이 READ COMMITTED인지(Hikari 설정 적용 확인) |
+| `ChargeIdempotencyRaceIntegrationTest` | 같은 멱등 키 경쟁에서 진 요청이 JDBC batch를 켠 상태에서도 UNIQUE 위반 후 기존 충전을 돌려주는지 |
 
 ## 고려 중
 
