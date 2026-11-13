@@ -74,12 +74,12 @@ travelpay:
       publisher:
         enabled: true
         fixed-delay: 1s
-        batch-size: 200
+        batch-size: 500
     charge:
       saga:
         consumer:
           enabled: true
-          concurrency: 1
+          concurrency: 3
       recovery:
         enabled: true
         fixed-delay: 10s
