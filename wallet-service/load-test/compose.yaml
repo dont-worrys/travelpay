@@ -235,7 +235,7 @@ services:
       - --travelpay.wallet.charge.reconciliation.grace=10s
       - --management.metrics.distribution.percentiles-histogram.http.server.requests=true
       - --travelpay.wallet.charge.saga.consumer.concurrency=${CHARGE_CONCURRENCY:-1}
-      - --travelpay.wallet.outbox.publisher.batch-size=${OUTBOX_BATCH_SIZE:-50}
+      - --travelpay.wallet.outbox.publisher.batch-size=${OUTBOX_BATCH_SIZE:-200}
     environment:
       JAVA_TOOL_OPTIONS: ${APP_JAVA_OPTS:--Xmx1g}
       WALLET_DB_URL: jdbc:postgresql://measure-postgres:5432/travelpay?currentSchema=wallet_service
