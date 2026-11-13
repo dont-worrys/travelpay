@@ -129,7 +129,7 @@ class OutboxPublisherIntegrationTest {
         }
 
         assertEquals("PUBLISHED", outboxRow(eventId).get("status"));
-        // 멈춘 동안 시간 초과로 실패 처리한 요청이 브로커 재개 후 기록될 수 있어 중복은 허용 (같은 eventId로 컨슈머가 제거)
+        // 멈춘 동안 시간 초과로 실패 처리한 요청이 브로커 재개 후 기록될 수 있어 중복은 허용 (같은 eventId로 다시 발행되며, 컨슈머는 중복을 제거하지 않고 실행기가 현재 상태로 흡수한다.)
         List<ConsumerRecord<String, String>> records = consume(Set.of(eventId), 1);
         assertTrue(records.size() >= 1);
         records.forEach(r -> assertEquals(eventId.toString(), eventIdOf(r)));

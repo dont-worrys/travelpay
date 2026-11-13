@@ -181,7 +181,7 @@ Content-Type: application/json
 
 | 단계 | 내용 |
 |---|---|
-| Outbox 발행기 | 1초 간격(이전 주기 종료 후), 한 번에 50건. `PENDING`을 `retry_count`·`created_at` 순으로 `FOR UPDATE SKIP LOCKED`로 잠그고 보냅니다. 성공하면 `PUBLISHED`, 실패하면 `retry_count + 1` |
+| Outbox 발행기 | 1초 간격(이전 주기 종료 후), 한 번에 200건. `PENDING`을 `retry_count`·`created_at` 순으로 `FOR UPDATE SKIP LOCKED`로 잠그고 보냅니다. 성공하면 `PUBLISHED`, 실패하면 `retry_count + 1` |
 | 토픽 | `wallet.charge.requested`(파티션 3). 키 `chargeId`, 헤더 `eventId`(Outbox ID). 값은 `chargeId`·`walletId`·`userId`·`amount`·`currency`·`bankCode`·`bankRequestId`(계좌번호 없음) |
 | 컨슈머 | 그룹 `wallet-charge-saga`, 동시성 1, 레코드 단위 커밋, `auto-offset-reset: earliest`. `chargeId`로 SAGA 실행기를 부릅니다 |
 | 컨슈머 오류 | DB 장애 같은 인프라 예외만 1초 간격 2회 다시 실행하고, 그래도 실패하면 ERROR 후 넘깁니다(멈춘 건은 복구 스케줄러가 처리). 메시지 형식 이상·허용되지 않은 전이는 바로 넘깁니다 |
