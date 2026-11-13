@@ -5,6 +5,7 @@ import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -175,6 +176,23 @@ class TransferReviewReconcilerIntegrationTest extends TransferApiIntegrationSupp
         assertThat(row(posted).get("status")).isEqualTo("COMPLETED");
         assertUnchanged(missing1);
         assertUnchanged(missing2);
+    }
+
+    /** 원장 기록 없음은 조회 실패가 아니므로, 연달아 있어도 주기를 멈추지 않고 뒤의 송금을 같은 주기에 확정합니다. */
+    @Test
+    void ledgerRecordMissingDoesNotCountAsConsecutiveFailure() {
+        List<UUID> missing = new ArrayList<>();
+        // 연속 실패 한도(3)보다 많게 둡니다.
+        for (int i = 0; i < 4; i++) {
+            missing.add(manualReview(RETRY_EXHAUSTED));
+        }
+        UUID posted = manualReview(RETRY_EXHAUSTED);
+        givenLedger(posted, "POSTED", null, transferEntries());
+
+        assertThat(reconciler.reconcile(now, 10)).isEqualTo(1);
+
+        assertThat(row(posted).get("status")).isEqualTo("COMPLETED");
+        missing.forEach(this::assertUnchanged);
     }
 
     /** 원장 조회가 연달아 실패하면 남은 송금은 다음 주기로 넘기고, 다음 주기는 같은 위치부터 다시 봅니다. */

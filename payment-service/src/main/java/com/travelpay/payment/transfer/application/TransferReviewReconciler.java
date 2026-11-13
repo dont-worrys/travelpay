@@ -37,7 +37,11 @@ public class TransferReviewReconciler {
 
     private static final Logger log = LoggerFactory.getLogger(TransferReviewReconciler.class);
 
-    /** MANUAL_REVIEW로 바뀐 직후의 송금은 건너뜁니다. 마지막 원장 요청이 원장 쪽에서 끝날 시간(원장 트랜잭션 상한 3초)을 넉넉히 둡니다. */
+    /**
+     * MANUAL_REVIEW로 바뀐 직후의 송금은 건너뜁니다. 마지막 원장 요청이 아직 처리 중일 수 있어 여유를 둡니다.
+     * 원장 서버의 요청 대기 시간에는 상한이 없지만(원장 트랜잭션 3초 상한은 커넥션 획득 이후 기준), 기록 없음은 바꾸지 않고
+     * 다음 주기에 다시 보므로 원장 반영이 늦어도 정합성에는 영향이 없습니다.
+     */
     static final Duration SETTLE_DELAY = Duration.ofMinutes(1);
     /** 원장 조회가 연달아 실패하면 원장 장애로 보고 남은 송금은 다음 주기로 넘깁니다. */
     static final int MAX_CONSECUTIVE_FAILURES = 3;
