@@ -196,7 +196,7 @@ class TransferLedgerClientAdapterTest {
                 UUID.fromString("4c6a0178-266b-4f1e-b811-a2767026be70"),
                 SOURCE_WALLET_ID,
                 TARGET_WALLET_ID,
-                3_000L, "KRW", null, "key", "hash");
+                3_000L, "KRW", null, "key");
         ReflectionTestUtils.setField(transfer, "id", TRANSFER_ID);
         return transfer;
     }

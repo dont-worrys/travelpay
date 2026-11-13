@@ -569,9 +569,9 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
         jdbcTemplate.update("""
                         insert into transfer (id, sender_id, receiver_id, source_wallet_id, target_wallet_id, amount,
                             currency, status, failure_reason, attempt_count, review_reason, memo, idempotency_key,
-                            request_hash, created_at, updated_at)
-                        values (?, ?, ?, ?, ?, 1000, 'KRW', 'MANUAL_REVIEW', null, 5, 'RETRY_EXHAUSTED', null, ?, ?, ?, ?)""",
-                id, sender, receiver, walletOf.get(sender), walletOf.get(receiver), "review-" + id, "0".repeat(64),
+                            created_at, updated_at)
+                        values (?, ?, ?, ?, ?, 1000, 'KRW', 'MANUAL_REVIEW', null, 5, 'RETRY_EXHAUSTED', null, ?, ?, ?)""",
+                id, sender, receiver, walletOf.get(sender), walletOf.get(receiver), "review-" + id,
                 created.atOffset(ZoneOffset.UTC), created.atOffset(ZoneOffset.UTC));
         return id;
     }
@@ -582,9 +582,9 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
         jdbcTemplate.update("""
                         insert into transfer (id, sender_id, receiver_id, source_wallet_id, target_wallet_id, amount,
                             currency, status, failure_reason, attempt_count, review_reason, memo, idempotency_key,
-                            request_hash, created_at, updated_at)
-                        values (?, ?, ?, ?, ?, 1000, 'KRW', 'PROCESSING', null, 1, null, null, ?, ?, ?, ?)""",
-                id, sender, receiver, walletOf.get(sender), walletOf.get(receiver), key, "0".repeat(64),
+                            created_at, updated_at)
+                        values (?, ?, ?, ?, ?, 1000, 'KRW', 'PROCESSING', null, 1, null, null, ?, ?, ?)""",
+                id, sender, receiver, walletOf.get(sender), walletOf.get(receiver), key,
                 at.atOffset(ZoneOffset.UTC), at.atOffset(ZoneOffset.UTC));
         return id;
     }
