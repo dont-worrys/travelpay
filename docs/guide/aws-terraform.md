@@ -393,7 +393,7 @@ ALB는 Public A/B에 두고 기존 SG가 Cloudflare 주소의 443만 허용합�
 
 이 단계에서 확인한 앱 설정 사실과 남은 일입니다.
 
-- Ledger의 Hikari `connection-timeout`·`validation-timeout`은 `application.yml`에만 있어 운영에서는 기본값(30초·5초)이 적용됩니다. 의도인지 서비스 담당자에게 확인합니다.
+- Ledger의 Hikari `connection-timeout`·`validation-timeout`은 `application.yml`에만 있어 운영에서는 기본값(30초·5초)이 적용됐습니다. 이후 운영 파일에도 같은 값을 넣어 개발 설정과 맞췄습니다(아래 "운영 실행 설정(application-prod.yml) 점검").
 - Exchange는 환율 API 키(`KOREAEXIM_API_KEY`)가 없으면 시작하지 않습니다. 배포 전 비밀값 준비 도구의 `--external`로 저장합니다.
 - ALB 접근 로그는 켜지 않았습니다. Cloudflare만 접근할 수 있고 요청 기록은 Gateway 로그와 ALB 지표로 확인합니다.
 - SG의 Cloudflare 주소 허용은 원본을 인증하지 않습니다. 다른 Cloudflare 사용자 영역을 거친 요청도 ALB에 닿을 수 있어 이 영역의 WAF·속도 제한을 우회할 수 있습니다. Host 규칙이 다른 이름을 404로 막지만 Host를 바꾼 요청까지 막지는 못합니다. PR4의 4-3에서 Cloudflare가 붙이는 비밀 헤더(`Origin-Auth`)를 ALB 규칙이 확인하도록 해 막습니다.
