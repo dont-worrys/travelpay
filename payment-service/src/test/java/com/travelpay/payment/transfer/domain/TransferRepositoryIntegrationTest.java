@@ -211,9 +211,12 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
         assertEquals(TransferFailureReason.INSUFFICIENT_BALANCE, found.getFailureReason());
     }
 
-    /** 기존 로컬 데이터와 섞이지 않도록 2000년 시각을 쓰고, 대기 시간(30초 × 2^max(attempt_count - 1, 0))과 순서를 확인합니다. */
+    /**
+     * 기존 로컬 데이터와 섞이지 않도록 2000년 시각을 쓰고, 대기 시간(30초 × 2^max(attempt_count - 1, 0))이 지난 처리 중 송금만
+     * 선점하는지, 선점한 송금은 수정 시각이 선점 시각으로 바뀌어 다시 선점되지 않는지 확인합니다.
+     */
     @Test
-    void findRecoveryTargetsReturnsOnlyDueProcessingTransfersInOldestOrder() {
+    void claimRecoveryTargetsClaimsOnlyDueProcessingTransfersOnce() {
         Instant base = Instant.parse("2000-01-01T00:00:00Z");
         Transfer firstTry = saveWithTimes(processing(UUID.randomUUID(), "due-first"), base, base.plusSeconds(1));
         Transfer fourthTry = saveWithTimes(processing(UUID.randomUUID(), "due-fourth"), base, base);
@@ -221,28 +224,98 @@ class TransferRepositoryIntegrationTest extends PostgresContainerSupport {
         Transfer requested = saveWithTimes(transfer(UUID.randomUUID(), UUID.randomUUID(), "due-requested", 1_000L),
                 base, base);
         Set<UUID> created = Set.of(firstTry.getId(), fourthTry.getId(), requested.getId());
+        Instant claimedAt = Instant.parse("2026-11-02T00:00:00Z");
+        entityManager.clear();
 
-        List<UUID> afterThirtySeconds = ids(transferRepository.findRecoveryTargets(base.plusSeconds(32), 100), created);
-        List<UUID> afterTwoMinutes = ids(transferRepository.findRecoveryTargets(base.plusSeconds(121), 100), created);
-        List<Transfer> limited = transferRepository.findRecoveryTargets(base.plusSeconds(121), 1);
+        // 30초 뒤: 첫 시도만 대기 시간이 지났습니다(3회 시도한 송금은 2분 대기).
+        List<UUID> afterThirtySeconds = ids(transferRepository.claimRecoveryTargets(base.plusSeconds(32), claimedAt, 100),
+                created);
+        // 2분 뒤: 이미 선점한 첫 시도는 대기 시간이 다시 시작돼 빠지고, 3회 시도한 송금만 선점합니다.
+        List<UUID> afterTwoMinutes = ids(transferRepository.claimRecoveryTargets(base.plusSeconds(121), claimedAt, 100),
+                created);
+        entityManager.clear();
 
         assertEquals(List.of(firstTry.getId()), afterThirtySeconds);
-        assertEquals(List.of(fourthTry.getId(), firstTry.getId()), afterTwoMinutes);
-        assertEquals(1, limited.size());
+        assertEquals(List.of(fourthTry.getId()), afterTwoMinutes);
+        assertEquals(claimedAt, transferRepository.findById(firstTry.getId()).orElseThrow().getUpdatedAt());
+        assertEquals(claimedAt, transferRepository.findById(fourthTry.getId()).orElseThrow().getUpdatedAt());
+        assertEquals(base, transferRepository.findById(requested.getId()).orElseThrow().getUpdatedAt());
     }
 
+    /** 선점 결과는 원래 수정 시각이 오래된 순이고 limit건까지이며, 반환한 송금은 선점 시각을 담고 있습니다. */
     @Test
-    void claimForRecoveryUpdatesOnlyUnchangedProcessingTransfer() {
+    void claimRecoveryTargetsReturnsOldestFirstUpToLimit() {
         Instant base = Instant.parse("2000-01-01T00:00:00Z");
-        Transfer processing = saveWithTimes(processing(UUID.randomUUID(), "claim"), base, base);
+        Transfer newer = saveWithTimes(processing(UUID.randomUUID(), "order-newer"), base, base.plusSeconds(1));
+        Transfer older = saveWithTimes(processing(UUID.randomUUID(), "order-older"), base, base);
+        Set<UUID> created = Set.of(newer.getId(), older.getId());
         Instant claimedAt = Instant.parse("2026-11-02T00:00:00Z");
+        entityManager.clear();
 
-        int first = transferRepository.claimForRecovery(processing.getId(), base, claimedAt);
-        int second = transferRepository.claimForRecovery(processing.getId(), base, claimedAt.plusSeconds(1));
+        List<Transfer> first = transferRepository.claimRecoveryTargets(base.plusSeconds(60), claimedAt, 1);
+        List<Transfer> rest = transferRepository.claimRecoveryTargets(base.plusSeconds(60), claimedAt, 100);
 
-        assertEquals(1, first);
-        assertEquals(0, second);
-        assertEquals(claimedAt, transferRepository.findById(processing.getId()).orElseThrow().getUpdatedAt());
+        assertEquals(1, first.size());
+        assertEquals(older.getId(), first.get(0).getId());
+        assertEquals(claimedAt, first.get(0).getUpdatedAt());
+        assertEquals(List.of(newer.getId()), ids(rest, created));
+    }
+
+    /**
+     * 여러 건을 선점하면 반환 순서는 선점 전 (수정 시각, ID) 순입니다. 저장(물리) 순서를 수정 시각과 반대로 만들고,
+     * 같은 수정 시각 두 건은 ID 순인지도 봅니다. 반환 목록 전체를 기대 순서와 그대로 비교하므로 UPDATE ... RETURNING이
+     * 어떤 순서로 행을 내놓든 최종 정렬(order by p.updated_at, p.id)이 없으면 실패합니다.
+     */
+    @Test
+    void claimRecoveryTargetsReturnsMultipleClaimsInUpdatedAtThenIdOrder() {
+        Instant base = Instant.parse("2000-01-01T00:00:00Z");
+        List<Transfer> saved = new ArrayList<>();
+        // 수정 시각이 늦은 것부터 저장합니다: +3, +2, +1(두 건), +0
+        saved.add(saveWithTimes(processing(UUID.randomUUID(), "multi-3"), base, base.plusSeconds(3)));
+        saved.add(saveWithTimes(processing(UUID.randomUUID(), "multi-2"), base, base.plusSeconds(2)));
+        saved.add(saveWithTimes(processing(UUID.randomUUID(), "multi-1a"), base, base.plusSeconds(1)));
+        saved.add(saveWithTimes(processing(UUID.randomUUID(), "multi-1b"), base, base.plusSeconds(1)));
+        saved.add(saveWithTimes(processing(UUID.randomUUID(), "multi-0"), base, base));
+        Set<UUID> created = Set.copyOf(saved.stream().map(Transfer::getId).toList());
+        List<UUID> expected = saved.stream()
+                // PostgreSQL uuid는 바이트 순으로 비교하므로 문자열 비교와 같습니다(UUID.compareTo는 부호 있는 비교라 다름).
+                .sorted(Comparator.comparing(Transfer::getUpdatedAt)
+                        .thenComparing(transfer -> transfer.getId().toString()))
+                .map(Transfer::getId)
+                .toList();
+        // 저장 순서가 기대 순서와 달라야 검증이 의미 있습니다.
+        assertTrue(!expected.equals(saved.stream().map(Transfer::getId).toList()));
+        Instant claimedAt = Instant.parse("2026-11-02T00:00:00Z");
+        entityManager.clear();
+
+        List<Transfer> claimed = transferRepository.claimRecoveryTargets(base.plusSeconds(60), claimedAt, 100);
+
+        assertEquals(expected, ids(claimed, created));
+        claimed.stream().filter(transfer -> created.contains(transfer.getId()))
+                .forEach(transfer -> assertEquals(claimedAt, transfer.getUpdatedAt()));
+    }
+
+    /** 선점 확인: 상태가 처리 중이고 수정 시각이 선점 때 값과 같을 때만 갱신합니다. 다른 서버가 다시 선점하면(수정 시각이 바뀜) 0행입니다. */
+    @Test
+    void renewRecoveryClaimUpdatesOnlyWhenClaimIsUnchanged() {
+        Instant base = Instant.parse("2000-01-01T00:00:00Z");
+        Transfer processing = saveWithTimes(processing(UUID.randomUUID(), "renew"), base, base);
+        Instant claimedAt = Instant.parse("2026-11-02T00:00:00.123456Z");
+        Instant reclaimedAt = claimedAt.plusSeconds(31);
+        jdbcTemplate.update("update transfer set updated_at = ? where id = ?",
+                claimedAt.atOffset(ZoneOffset.UTC), processing.getId());
+
+        int mine = transferRepository.renewRecoveryClaim(processing.getId(), claimedAt, claimedAt.plusMillis(1));
+        // 다른 서버가 다시 선점한 뒤에는 처음 선점 시각으로 확인해도 0행입니다.
+        jdbcTemplate.update("update transfer set updated_at = ? where id = ?",
+                reclaimedAt.atOffset(ZoneOffset.UTC), processing.getId());
+        int stale = transferRepository.renewRecoveryClaim(processing.getId(), claimedAt, reclaimedAt.plusMillis(1));
+        // 1마이크로초만 달라도 다른 선점으로 봅니다.
+        int offByMicro = transferRepository.renewRecoveryClaim(processing.getId(), reclaimedAt.plusNanos(1_000),
+                reclaimedAt.plusMillis(1));
+
+        assertEquals(List.of(1, 0, 0), List.of(mine, stale, offByMicro));
+        assertEquals(reclaimedAt, transferRepository.findById(processing.getId()).orElseThrow().getUpdatedAt());
     }
 
     @Test

@@ -207,9 +207,14 @@ public class TransferService {
 
     /**
      * 재시도 대기 시간이 지난 처리 중 송금을 오래된 순으로 최대 limit건 선점해 원장에 다시 요청하고, 결과가 확정된 건수를 반환합니다.
-     * 저장된 값으로 같은 reference를 재전송하고 결과는 조건부 UPDATE로 반영하므로, 다른 인스턴스와 겹쳐도 잔액과 상태는 한 번만 바뀝니다.
+     * 선점은 SKIP LOCKED로 한 번에 하므로 서버가 여러 대면 서로 다른 송금을 나눠 가져갑니다({@link TransferRepository#claimRecoveryTargets}).
+     * 원장 호출 직전에는 건마다 선점이 그대로인지 조건부 UPDATE로 확인하고 갱신해({@link TransferRepository#renewRecoveryClaim}),
+     * 다른 서버가 다시 선점한 송금은 보내지 않습니다.
+     * 저장된 값으로 같은 reference를 재전송하고 결과는 조건부 UPDATE로 반영하므로, 선점한 서버가 중간에 멈춰 다른 서버가 다시 가져가도
+     * 잔액과 상태는 한 번만 바뀝니다.
      * 결과를 모르면 시도 횟수를 늘려 다음 대기 시간 뒤로 미루고, 한도에 이르거나 원장이 요청을 받아들이지 않으면 MANUAL_REVIEW로 둡니다.
-     * 원장이 연달아 응답하지 못하면 원장 장애로 보고 남은 송금은 다음 주기로 넘깁니다.
+     * 원장이 연달아 응답하지 못하면 원장 장애로 보고 남은 송금은 미룹니다. 선점으로 대기 시간이 다시 시작돼 시도 횟수는 그대로 두고
+     * 대기 시간 뒤에 다시 시도합니다.
      */
     public int recoverDue(Instant now, int limit) {
         if (ledgerClient.isEmpty()) {
@@ -217,11 +222,15 @@ public class TransferService {
         }
         int settled = 0;
         int consecutiveUnknown = 0;
-        for (Transfer target : transferRepository.findRecoveryTargets(now, limit)) {
+        // 일괄 선점 때 수정 시각에 기록하는 값입니다. 엔티티의 수정 시각은 호출하는 쪽 영속성 컨텍스트에 따라 선점 전 값일 수 있어
+        // 직접 기록한 이 값으로 비교합니다(DB와 같은 마이크로초 정밀도).
+        Instant claimedAt = now();
+        for (Transfer target : transferRepository.claimRecoveryTargets(now, claimedAt, limit)) {
             Outcome outcome;
             try {
-                if (transferRepository.claimForRecovery(target.getId(), target.getUpdatedAt(), now()) == 0) {
-                    // 다른 인스턴스가 먼저 선점했거나 그 사이 결과가 반영됐습니다.
+                // 앞 송금의 원장 호출이 길어져 대기 시간이 지나면 다른 서버가 다시 선점할 수 있어, 호출 직전에 선점이 그대로인지 확인합니다.
+                if (transferRepository.renewRecoveryClaim(target.getId(), claimedAt, now()) == 0) {
+                    // 다른 서버가 다시 선점했거나 그 사이 결과가 반영됐습니다.
                     continue;
                 }
                 outcome = attempt(target).outcome();
