@@ -1,5 +1,6 @@
 package com.travelpay.payment.presentation.payment;
 
+import com.travelpay.payment.application.payment.ManualReviewReconciler;
 import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
@@ -27,6 +28,8 @@ import java.util.function.Supplier;
  * 원장 장애로 밀린 건이 회복 시점에 한꺼번에 몰리지 않도록 건마다 대기 시간을 늘린다.
  * 재시도할 건이 많이 쌓이면 한 주기 안에서 결제·환불·정산을 배치 단위로 돌아가며 이어서 처리하고(ROUND_BUDGET까지),
  * 결과 모름이 연달아 나온 종류는 원장 장애로 보고 그 주기에서 더 처리하지 않는다.
+ * 6주기(약 1분)마다 복구 뒤에 MANUAL_REVIEW를 원장 결과로 자동 처리한다({@link ManualReviewReconciler}).
+ * 스케줄러 풀(2개)을 송금 복구와 나눠 쓰므로 새 스케줄 작업을 만들지 않고 같은 스레드에서 실행한다.
  */
 @Slf4j
 @Configuration(proxyBeanMethods = false)
@@ -40,10 +43,14 @@ public class PendingSettlementScheduler {
     private static final Duration STUCK_AFTER = Duration.ofMinutes(30);
     // 로그에 남길 ID 개수. 로그 한 줄이 너무 길어지지 않게 오래된 순 10개만.
     private static final int STUCK_SAMPLE_SIZE = 10;
+    // MANUAL_REVIEW 자동 처리는 6주기(약 1분)마다
+    static final int RECONCILE_EVERY_CYCLES = 6;
 
     private final PaymentService paymentService;
     private final SettlementService settlementService;
+    private final ManualReviewReconciler manualReviewReconciler;
     private final LongSupplier nanoClock;
+    private long cycle;
 
     private final AtomicLong stuckPayments = new AtomicLong();
     private final AtomicLong stuckRefunds = new AtomicLong();
@@ -56,15 +63,17 @@ public class PendingSettlementScheduler {
     // 생성자가 둘이라 스프링이 쓸 생성자를 지정
     @Autowired
     public PendingSettlementScheduler(PaymentService paymentService, SettlementService settlementService,
-                                      MeterRegistry meterRegistry) {
-        this(paymentService, settlementService, meterRegistry, System::nanoTime);
+                                      ManualReviewReconciler manualReviewReconciler, MeterRegistry meterRegistry) {
+        this(paymentService, settlementService, manualReviewReconciler, meterRegistry, System::nanoTime);
     }
 
     // 테스트에서 시간 한도를 확인하려고 시각 공급자를 받음
     PendingSettlementScheduler(PaymentService paymentService, SettlementService settlementService,
-                               MeterRegistry meterRegistry, LongSupplier nanoClock) {
+                               ManualReviewReconciler manualReviewReconciler, MeterRegistry meterRegistry,
+                               LongSupplier nanoClock) {
         this.paymentService = paymentService;
         this.settlementService = settlementService;
+        this.manualReviewReconciler = manualReviewReconciler;
         this.nanoClock = nanoClock;
         Gauge.builder("payment.settlement.stuck", stuckPayments, AtomicLong::get)
                 .description("요청 후 30분이 지나도 확정되지 않은 건수")
@@ -79,15 +88,15 @@ public class PendingSettlementScheduler {
                 .tag("type", "settlement")
                 .register(meterRegistry);
         Gauge.builder("payment.settlement.manual_review", manualReviewPayments, AtomicLong::get)
-                .description("자동 처리를 멈추고 운영자 확인을 기다리는 건수")
+                .description("자동 재시도를 멈추고 운영자 확인을 기다리는 건수")
                 .tag("type", "payment")
                 .register(meterRegistry);
         Gauge.builder("payment.settlement.manual_review", manualReviewRefunds, AtomicLong::get)
-                .description("자동 처리를 멈추고 운영자 확인을 기다리는 건수")
+                .description("자동 재시도를 멈추고 운영자 확인을 기다리는 건수")
                 .tag("type", "refund")
                 .register(meterRegistry);
         Gauge.builder("payment.settlement.manual_review", manualReviewSettlements, AtomicLong::get)
-                .description("자동 처리를 멈추고 운영자 확인을 기다리는 건수")
+                .description("자동 재시도를 멈추고 운영자 확인을 기다리는 건수")
                 .tag("type", "settlement")
                 .register(meterRegistry);
         Gauge.builder("payment.refund_request.overdue", overdueRefundRequests, AtomicLong::get)
@@ -100,6 +109,14 @@ public class PendingSettlementScheduler {
     public void recover() {
         Instant now = Instant.now();
         drain();
+        // 복구를 먼저 끝내고, 지표 갱신 전에 실행해 처리 결과가 같은 주기의 MANUAL_REVIEW 수에 반영되게 함
+        if (cycle++ % RECONCILE_EVERY_CYCLES == 0) {
+            try {
+                manualReviewReconciler.reconcile(Instant.now());
+            } catch (RuntimeException e) {
+                log.error("MANUAL_REVIEW 자동 처리 주기가 실패했습니다.", e);
+            }
+        }
         try {
             reportStuck(now.minus(STUCK_AFTER));
             manualReviewPayments.set(paymentService.countManualReviewPayments());

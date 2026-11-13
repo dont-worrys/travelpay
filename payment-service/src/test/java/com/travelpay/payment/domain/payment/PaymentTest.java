@@ -315,7 +315,7 @@ class PaymentTest {
     void resolveApprovedMovesManualReviewToApprovedByMaster() {
         Payment payment = manualReviewPayment();
 
-        PaymentHistory history = payment.resolveApprovedHistory(LEDGER_ID);
+        PaymentHistory history = payment.resolveApprovedHistory(LEDGER_ID, PaymentActor.MASTER);
 
         assertEquals(PaymentStatus.APPROVED, payment.getStatus());
         assertEquals(LEDGER_ID, payment.getLedgerId());
@@ -330,7 +330,8 @@ class PaymentTest {
     void resolveDeclinedMovesManualReviewToDeclinedByMaster() {
         Payment payment = manualReviewPayment();
 
-        PaymentHistory history = payment.resolveDeclinedHistory("결제 처리 시간이 초과되어 취소되었습니다.");
+        PaymentHistory history = payment.resolveDeclinedHistory("결제 처리 시간이 초과되어 취소되었습니다.",
+                PaymentActor.MASTER);
 
         assertEquals(PaymentStatus.DECLINED, payment.getStatus());
         assertEquals("결제 처리 시간이 초과되어 취소되었습니다.", payment.getDeclineReason());
@@ -346,8 +347,10 @@ class PaymentTest {
         Payment pending = payment(10_000L);
         Payment approved = approvedPayment();
 
-        BusinessException approve = assertThrows(BusinessException.class, () -> pending.resolveApprovedHistory(LEDGER_ID));
-        BusinessException decline = assertThrows(BusinessException.class, () -> approved.resolveDeclinedHistory("x"));
+        BusinessException approve = assertThrows(BusinessException.class,
+                () -> pending.resolveApprovedHistory(LEDGER_ID, PaymentActor.MASTER));
+        BusinessException decline = assertThrows(BusinessException.class,
+                () -> approved.resolveDeclinedHistory("x", PaymentActor.MASTER));
 
         assertEquals(PaymentErrorCode.INVALID_STATUS_TRANSITION, approve.getErrorCode());
         assertEquals(PaymentErrorCode.INVALID_STATUS_TRANSITION, decline.getErrorCode());

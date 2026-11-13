@@ -9,6 +9,9 @@ spring:
       # 트랜잭션 타임아웃은 커넥션을 얻은 뒤부터 적용되므로 획득 대기도 따로 제한
       connection-timeout: 2000
       validation-timeout: 1000
+      # 트랜잭션마다 격리 수준을 지정하지 않고 커넥션을 만들 때 한 번 정한다 (@Transactional(isolation)은 트랜잭션마다 SHOW 조회가 생김).
+      # 재조회에서 다른 트랜잭션이 커밋한 행을 봐야 하는 단계들이 이 값을 전제로 한다
+      transaction-isolation: TRANSACTION_READ_COMMITTED
   flyway:
     default-schema: wallet_service
   jpa:

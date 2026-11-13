@@ -3,6 +3,7 @@ package com.travelpay.payment.application.merchant;
 import com.travelpay.common.error.BusinessException;
 import com.travelpay.payment.application.merchant.dto.SettlementResolveResult;
 import com.travelpay.payment.application.merchant.dto.SettlementReviewDetailResult;
+import com.travelpay.payment.application.payment.AutoResolveOutcome;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerClient;
 import com.travelpay.payment.application.payment.client.ledger.PaymentLedgerLookup;
 import com.travelpay.payment.domain.merchant.Merchant;
@@ -15,6 +16,7 @@ import com.travelpay.payment.domain.merchant.SettlementReviewResolutionRepositor
 import com.travelpay.payment.domain.merchant.SettlementStatus;
 import com.travelpay.payment.domain.payment.CurrencyCode;
 import com.travelpay.payment.domain.payment.PaymentErrorCode;
+import com.travelpay.payment.domain.payment.ReviewActorType;
 import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.dao.OptimisticLockingFailureException;
@@ -266,6 +269,86 @@ class SettlementReviewServiceTest {
 
         assertError(PaymentErrorCode.NOT_MANUAL_REVIEW, () -> service.resolve(MASTER_ID, SETTLEMENT_ID, null));
         verify(resolutionRepository, never()).save(any());
+    }
+
+    // 자동 처리(스케줄러)
+
+    @Test
+    void autoPaysPostedSettlementBySystem() {
+        Settlement settlement = givenManualReview(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID))
+                .thenReturn(PaymentLedgerLookup.posted(LEDGER_TRANSACTION_ID, EXPECTED_ENTRIES));
+
+        assertEquals(AutoResolveOutcome.RESOLVED, service.autoResolve(settlement));
+
+        assertEquals(SettlementStatus.PAID, settlement.getStatus());
+        verify(settlementItemRepository, never()).deleteAllBySettlementId(any());
+        SettlementReviewResolution resolution = savedResolution();
+        assertEquals(ReviewActorType.SYSTEM, resolution.getActorType());
+        assertNull(resolution.getActorId());
+        assertNull(resolution.getMemo());
+        assertEquals("자동 처리: 재시도 한도 초과, 원장 반영 확인 → 정산 지급", resolution.getDescription());
+    }
+
+    @Test
+    void autoFailsRejectedSettlementAndReleasesPayments() {
+        Settlement settlement = givenManualReview(SettlementReviewReason.LEDGER_REQUEST_NOT_ACCEPTED);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID))
+                .thenReturn(PaymentLedgerLookup.rejected(LEDGER_TRANSACTION_ID, "가맹점 잔액이 부족합니다."));
+
+        assertEquals(AutoResolveOutcome.RESOLVED, service.autoResolve(settlement));
+
+        assertEquals(SettlementStatus.FAILED, settlement.getStatus());
+        assertEquals(SettlementReviewRules.ERROR_REASON, settlement.getFailureReason());
+        verify(settlementItemRepository).deleteAllBySettlementId(SETTLEMENT_ID);
+        assertEquals(ReviewActorType.SYSTEM, savedResolution().getActorType());
+    }
+
+    // 원장 기록이 없으면 원장 취소(원장에 쓰기)가 필요해 운영자에게 남김
+    @ParameterizedTest
+    @EnumSource(SettlementReviewReason.class)
+    void autoSkipsSettlementMissingFromLedgerWithoutCancelling(SettlementReviewReason reason) {
+        Settlement settlement = givenManualReview(reason);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID)).thenReturn(PaymentLedgerLookup.notFound());
+
+        assertEquals(AutoResolveOutcome.SKIPPED, service.autoResolve(settlement));
+
+        assertEquals(SettlementStatus.MANUAL_REVIEW, settlement.getStatus());
+        verify(ledgerClient, never()).cancelSettlementTransaction(any(), any());
+        verify(settlementRepository, never()).save(any());
+        verify(resolutionRepository, never()).save(any());
+    }
+
+    @Test
+    void autoSkipsSettlementWhenLedgerEntriesDiffer() {
+        Settlement settlement = givenManualReview(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID)).thenReturn(PaymentLedgerLookup.posted(
+                LEDGER_TRANSACTION_ID, List.of(
+                        new PaymentLedgerLookup.Entry(MERCHANT_ID, "KRW", "DEBIT", 1L, "SETTLEMENT_OUT"),
+                        new PaymentLedgerLookup.Entry(OWNER_WALLET_ID, "KRW", "CREDIT", 1L, "SETTLEMENT_IN"))));
+
+        assertEquals(AutoResolveOutcome.SKIPPED, service.autoResolve(settlement));
+
+        assertEquals(SettlementStatus.MANUAL_REVIEW, settlement.getStatus());
+        verify(resolutionRepository, never()).save(any());
+    }
+
+    @Test
+    void autoReportsAlreadyResolvedWhenOperatorWonTheRace() {
+        Settlement settlement = givenManualReview(SettlementReviewReason.RETRY_EXHAUSTED);
+        when(ledgerClient.findSettlementTransaction(SETTLEMENT_ID))
+                .thenReturn(PaymentLedgerLookup.posted(LEDGER_TRANSACTION_ID, EXPECTED_ENTRIES));
+        when(settlementRepository.save(any(Settlement.class)))
+                .thenThrow(new OptimisticLockingFailureException("다른 처리가 먼저 끝남"));
+
+        assertEquals(AutoResolveOutcome.ALREADY_RESOLVED, service.autoResolve(settlement));
+        verify(resolutionRepository, never()).save(any());
+    }
+
+    private SettlementReviewResolution savedResolution() {
+        ArgumentCaptor<SettlementReviewResolution> captor = ArgumentCaptor.forClass(SettlementReviewResolution.class);
+        verify(resolutionRepository).save(captor.capture());
+        return captor.getValue();
     }
 
     private Settlement givenManualReview(SettlementReviewReason reason) {

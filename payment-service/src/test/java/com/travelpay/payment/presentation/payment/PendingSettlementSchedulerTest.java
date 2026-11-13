@@ -1,5 +1,6 @@
 package com.travelpay.payment.presentation.payment;
 
+import com.travelpay.payment.application.payment.ManualReviewReconciler;
 import com.travelpay.payment.application.payment.PaymentService;
 import com.travelpay.payment.application.payment.dto.RecoveryBatchResult;
 import com.travelpay.payment.application.payment.dto.StuckSettlementResult;
@@ -30,6 +31,7 @@ class PendingSettlementSchedulerTest {
 
     private PaymentService paymentService;
     private SettlementService settlementService;
+    private ManualReviewReconciler reconciler;
     private SimpleMeterRegistry meterRegistry;
     private PendingSettlementScheduler scheduler;
 
@@ -37,8 +39,9 @@ class PendingSettlementSchedulerTest {
     void setUp() {
         paymentService = mock(PaymentService.class);
         settlementService = mock(SettlementService.class);
+        reconciler = mock(ManualReviewReconciler.class);
         meterRegistry = new SimpleMeterRegistry();
-        scheduler = new PendingSettlementScheduler(paymentService, settlementService, meterRegistry);
+        scheduler = new PendingSettlementScheduler(paymentService, settlementService, reconciler, meterRegistry);
         when(paymentService.findStuckSettlements(any(), anyInt()))
                 .thenReturn(new StuckSettlementResult(0, List.of(), 0, List.of()));
     }
@@ -95,7 +98,7 @@ class PendingSettlementSchedulerTest {
         // 시작 0초 → 첫 바퀴 뒤 5초(계속) → 둘째 바퀴 뒤 9초(한도 8초 초과, 멈춤)
         Deque<Long> clock = new ArrayDeque<>(List.of(0L, 5_000_000_000L, 9_000_000_000L));
         PendingSettlementScheduler timed = new PendingSettlementScheduler(paymentService, settlementService,
-                new SimpleMeterRegistry(), () -> clock.size() > 1 ? clock.poll() : clock.peek());
+                reconciler, new SimpleMeterRegistry(), () -> clock.size() > 1 ? clock.poll() : clock.peek());
         when(paymentService.recoverPayments(any(), anyInt())).thenReturn(FULL);
 
         timed.recover();
@@ -215,6 +218,38 @@ class PendingSettlementSchedulerTest {
 
         assertEquals(1.0, gauge("payment.settlement.stuck", "settlement"));
         verify(settlementService).findStuckSettlementIds(any(), eq(10));
+    }
+
+    // MANUAL_REVIEW 자동 처리
+
+    @Test
+    void reconcilesManualReviewsEverySixCycles() {
+        for (int i = 0; i < 7; i++) {
+            scheduler.recover();
+        }
+
+        // 첫 주기와 일곱 번째 주기(6주기 뒤)에만
+        verify(reconciler, times(2)).reconcile(any());
+    }
+
+    @Test
+    void reconcilesAfterRecoveryAndBeforeRefreshingGauges() {
+        scheduler.recover();
+
+        InOrder order = inOrder(paymentService, settlementService, reconciler);
+        order.verify(settlementService).recoverSettlements(any(), anyInt());
+        order.verify(reconciler).reconcile(any());
+        order.verify(paymentService).countManualReviewPayments();
+    }
+
+    @Test
+    void refreshesGaugesWhenReconcilerThrows() {
+        doThrow(new IllegalStateException("DB 연결 실패")).when(reconciler).reconcile(any());
+        when(paymentService.countManualReviewPayments()).thenReturn(2L);
+
+        scheduler.recover();
+
+        assertEquals(2.0, gauge("payment.settlement.manual_review", "payment"));
     }
 
     private double gauge(String name, String type) {

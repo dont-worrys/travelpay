@@ -11,8 +11,9 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * MANUAL_REVIEW 결제·환불을 운영자(MASTER)가 처리한 기록입니다. 상태가 바뀐 처리만 남깁니다.
+ * MANUAL_REVIEW 결제·환불을 처리한 기록입니다. 상태가 바뀐 처리만 남깁니다.
  * refundId가 없으면 결제 처리, 있으면 환불 처리입니다.
+ * 운영자(OPERATOR) 처리는 actorId가 있고, 스케줄러 자동 처리(SYSTEM)는 actorId·memo가 없습니다.
  */
 @Entity
 @Table(name = "payment_review_resolutions")
@@ -38,6 +39,9 @@ public class PaymentReviewResolution {
     // 결제(PaymentStatus)와 환불(RefundStatus)의 상태가 달라 이름으로 저장합니다
     private String toStatus;
 
+    @Enumerated(EnumType.STRING)
+    private ReviewActorType actorType;
+
     private UUID actorId;
 
     // 시스템이 남기는 처리 설명
@@ -55,7 +59,7 @@ public class PaymentReviewResolution {
                                                     PaymentStatus toStatus, UUID actorId,
                                                     String description, String memo) {
         return create(paymentId, null, reviewReason, ledgerStatus, ledgerTransactionId,
-                toStatus.name(), actorId, description, memo);
+                toStatus.name(), ReviewActorType.OPERATOR, Objects.requireNonNull(actorId), description, memo);
     }
 
     public static PaymentReviewResolution ofRefund(UUID paymentId, UUID refundId, SettlementReviewReason reviewReason,
@@ -63,13 +67,31 @@ public class PaymentReviewResolution {
                                                    RefundStatus toStatus, UUID actorId,
                                                    String description, String memo) {
         return create(paymentId, Objects.requireNonNull(refundId), reviewReason, ledgerStatus, ledgerTransactionId,
-                toStatus.name(), actorId, description, memo);
+                toStatus.name(), ReviewActorType.OPERATOR, Objects.requireNonNull(actorId), description, memo);
     }
 
-    // DB 제약과 같은 규칙: 원장 기록이 없을 때만 거래 ID가 비어 있음
+    /** 스케줄러 자동 처리 기록(결제). 처리한 회원·메모 없음 */
+    public static PaymentReviewResolution ofSystemPayment(UUID paymentId, SettlementReviewReason reviewReason,
+                                                          ReviewLedgerStatus ledgerStatus, UUID ledgerTransactionId,
+                                                          PaymentStatus toStatus, String description) {
+        return create(paymentId, null, reviewReason, ledgerStatus, ledgerTransactionId,
+                toStatus.name(), ReviewActorType.SYSTEM, null, description, null);
+    }
+
+    /** 스케줄러 자동 처리 기록(환불). 처리한 회원·메모 없음 */
+    public static PaymentReviewResolution ofSystemRefund(UUID paymentId, UUID refundId,
+                                                         SettlementReviewReason reviewReason,
+                                                         ReviewLedgerStatus ledgerStatus, UUID ledgerTransactionId,
+                                                         RefundStatus toStatus, String description) {
+        return create(paymentId, Objects.requireNonNull(refundId), reviewReason, ledgerStatus, ledgerTransactionId,
+                toStatus.name(), ReviewActorType.SYSTEM, null, description, null);
+    }
+
+    // DB 제약과 같은 규칙: 원장 기록이 없을 때만 거래 ID가 비어 있음, 운영자 처리만 처리한 회원이 있음
     private static PaymentReviewResolution create(UUID paymentId, UUID refundId, SettlementReviewReason reviewReason,
                                                   ReviewLedgerStatus ledgerStatus, UUID ledgerTransactionId,
-                                                  String toStatus, UUID actorId, String description, String memo) {
+                                                  String toStatus, ReviewActorType actorType, UUID actorId,
+                                                  String description, String memo) {
         if ((ledgerStatus == ReviewLedgerStatus.NOT_FOUND) != (ledgerTransactionId == null)) {
             throw new IllegalArgumentException("원장 기록이 있으면 거래 ID가 있어야 합니다. ledgerStatus=" + ledgerStatus);
         }
@@ -80,7 +102,8 @@ public class PaymentReviewResolution {
         resolution.ledgerStatus = ledgerStatus;
         resolution.ledgerTransactionId = ledgerTransactionId;
         resolution.toStatus = toStatus;
-        resolution.actorId = Objects.requireNonNull(actorId);
+        resolution.actorType = actorType;
+        resolution.actorId = actorId;
         resolution.description = Objects.requireNonNull(description);
         resolution.memo = memo;
         return resolution;

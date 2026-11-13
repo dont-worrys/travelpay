@@ -9,6 +9,8 @@ import java.util.UUID;
 import com.travelpay.payment.support.PostgresContainerSupport;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -264,6 +266,92 @@ class PaymentReviewRepositoryIntegrationTest extends PostgresContainerSupport {
                 ids(resolutionRepository.search(null, null, payment.getId(), newestFirst)));
     }
 
+    // ── 자동 처리 ──
+
+    @Test
+    void savesSystemResolutionWithoutActorAndOperatorResolutionWithActor() {
+        Payment payment = savePayment(PaymentStatus.REFUND_PENDING, null);
+        Refund refund = saveRefund(payment.getId(), RefundStatus.MANUAL_REVIEW, SettlementReviewReason.RETRY_EXHAUSTED);
+        UUID actorId = UUID.randomUUID();
+
+        resolutionRepository.save(PaymentReviewResolution.ofPayment(payment.getId(),
+                SettlementReviewReason.RETRY_EXHAUSTED, ReviewLedgerStatus.POSTED, UUID.randomUUID(),
+                PaymentStatus.APPROVED, actorId, "운영자 처리", null));
+        resolutionRepository.save(PaymentReviewResolution.ofSystemRefund(payment.getId(), refund.getId(),
+                SettlementReviewReason.RETRY_EXHAUSTED, ReviewLedgerStatus.REJECTED, UUID.randomUUID(),
+                RefundStatus.DECLINED, "자동 처리: 재시도 한도 초과, 원장 거절 확인 → 환불 거절·취소"));
+        entityManager.flush();
+
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "select actor_type, actor_id, memo from payment_review_resolutions"
+                        + " where payment_id = ? order by refund_id nulls first", payment.getId());
+        assertEquals("OPERATOR", rows.get(0).get("actor_type"));
+        assertEquals(actorId, rows.get(0).get("actor_id"));
+        assertEquals("SYSTEM", rows.get(1).get("actor_type"));
+        assertNull(rows.get(1).get("actor_id"));
+        assertNull(rows.get(1).get("memo"));
+    }
+
+    // 운영자 처리는 처리한 회원이 반드시 있고, 자동 처리는 없어야 함.
+    // 제약 위반 뒤에는 같은 트랜잭션에서 다른 SQL을 실행할 수 없어 경우별로 나눔
+    @ParameterizedTest
+    @CsvSource({"OPERATOR, false", "SYSTEM, true", "MASTER, true"})
+    void resolutionActorIdMustMatchActorType(String actorType, boolean withActorId) {
+        Payment payment = savePayment(PaymentStatus.APPROVED, null);
+
+        assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update("""
+                insert into payment_review_resolutions
+                    (id, payment_id, review_reason, ledger_status, ledger_transaction_id, to_status,
+                     actor_type, actor_id, description, created_at)
+                values (?, ?, 'RETRY_EXHAUSTED', 'NOT_FOUND', null, 'DECLINED', ?, ?, '테스트', now())
+                """, UUID.randomUUID(), payment.getId(), actorType, withActorId ? UUID.randomUUID() : null));
+    }
+
+    // 자동 처리 대상: MANUAL_REVIEW로 바뀐 지 기준 시각이 지난 결제만, (생성 시각, ID) 커서로 이어서.
+    // 생성 시각을 아주 이른 값으로 맞춰 다른 테스트 데이터보다 앞에 오게 함
+    @Test
+    void paymentManualReviewsAfterCursorSkipsRecentAndContinuesFromCursor() {
+        Instant now = Instant.now();
+        Payment first = savePaymentAt(PaymentStatus.MANUAL_REVIEW, "2001-01-01T00:00:01Z", "2001-01-01T00:00:01Z");
+        Payment second = savePaymentAt(PaymentStatus.MANUAL_REVIEW, "2001-01-01T00:00:02Z", "2001-01-01T00:00:02Z");
+        Payment third = savePaymentAt(PaymentStatus.MANUAL_REVIEW, "2001-01-01T00:00:03Z", "2001-01-01T00:00:03Z");
+        // 방금 MANUAL_REVIEW로 바뀐 결제, MANUAL_REVIEW가 아닌 결제는 빠짐
+        Payment recent = savePaymentAt(PaymentStatus.MANUAL_REVIEW, "2001-01-01T00:00:01.5Z", now.toString());
+        Payment approved = savePaymentAt(PaymentStatus.APPROVED, "2001-01-01T00:00:02.5Z", "2001-01-01T00:00:02Z");
+        Instant updatedBefore = now.minusSeconds(60);
+
+        List<Payment> page1 = paymentRepository.findManualReviewsAfter(updatedBefore, Instant.EPOCH,
+                new UUID(0L, 0L), 2);
+        assertEquals(List.of(first.getId(), second.getId()), page1.stream().map(Payment::getId).toList());
+
+        // 조회한 엔티티의 생성 시각을 그대로 커서로 넘겨도 같은 건이 다시 나오지 않음(시간대 변환 왕복 확인)
+        Payment last = page1.get(1);
+        List<Payment> page2 = paymentRepository.findManualReviewsAfter(updatedBefore, last.getCreatedAt(),
+                last.getId(), 1);
+        assertEquals(List.of(third.getId()), page2.stream().map(Payment::getId).toList());
+        assertFalse(page2.stream().map(Payment::getId).toList().contains(recent.getId()));
+        assertFalse(page2.stream().map(Payment::getId).toList().contains(approved.getId()));
+    }
+
+    @Test
+    void refundManualReviewsAfterCursorSkipsRecentAndContinuesFromCursor() {
+        Instant now = Instant.now();
+        UUID paymentId = savePayment(PaymentStatus.REFUND_PENDING, null).getId();
+        Refund first = saveRefundAt(paymentId, "2001-01-01T00:00:01Z", "2001-01-01T00:00:01Z");
+        Refund recent = saveRefundAt(paymentId, "2001-01-01T00:00:01.5Z", now.toString());
+        Refund second = saveRefundAt(paymentId, "2001-01-01T00:00:02Z", "2001-01-01T00:00:02Z");
+        Instant updatedBefore = now.minusSeconds(60);
+
+        List<Refund> page1 = refundRepository.findManualReviewsAfter(updatedBefore, Instant.EPOCH,
+                new UUID(0L, 0L), 1);
+        assertEquals(List.of(first.getId()), page1.stream().map(Refund::getId).toList());
+
+        List<Refund> page2 = refundRepository.findManualReviewsAfter(updatedBefore, page1.get(0).getCreatedAt(),
+                page1.get(0).getId(), 1);
+        assertEquals(List.of(second.getId()), page2.stream().map(Refund::getId).toList());
+        assertFalse(page2.stream().map(Refund::getId).toList().contains(recent.getId()));
+    }
+
     @Test
     void paymentListIndexesExist() {
         List<String> indexes = jdbcTemplate.queryForList(
@@ -294,6 +382,24 @@ class PaymentReviewRepositoryIntegrationTest extends PostgresContainerSupport {
         entityManager.flush();
         jdbcTemplate.update("update refunds set status = ?, review_reason = ?, attempt_count = 5 where id = ?",
                 status.name(), reviewReason == null ? null : reviewReason.name(), refund.getId());
+        entityManager.clear();
+        return refundRepository.findById(refund.getId()).orElseThrow();
+    }
+
+    // 생성·수정 시각을 지정한 값으로 맞춘 결제(MANUAL_REVIEW면 사유는 재시도 한도 초과)
+    private Payment savePaymentAt(PaymentStatus status, String createdAt, String updatedAt) {
+        Payment payment = savePayment(status,
+                status == PaymentStatus.MANUAL_REVIEW ? SettlementReviewReason.RETRY_EXHAUSTED : null);
+        jdbcTemplate.update("update payments set created_at = cast(? as timestamptz), "
+                + "updated_at = cast(? as timestamptz) where id = ?", createdAt, updatedAt, payment.getId());
+        entityManager.clear();
+        return paymentRepository.findById(payment.getId()).orElseThrow();
+    }
+
+    private Refund saveRefundAt(UUID paymentId, String createdAt, String updatedAt) {
+        Refund refund = saveRefund(paymentId, RefundStatus.MANUAL_REVIEW, SettlementReviewReason.RETRY_EXHAUSTED);
+        jdbcTemplate.update("update refunds set created_at = cast(? as timestamptz), "
+                + "updated_at = cast(? as timestamptz) where id = ?", createdAt, updatedAt, refund.getId());
         entityManager.clear();
         return refundRepository.findById(refund.getId()).orElseThrow();
     }

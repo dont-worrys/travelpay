@@ -34,6 +34,20 @@ public interface RefundJpaRepository extends JpaRepository<Refund, UUID> {
             """)
     List<Refund> findRecoveryTargets(@Param("now") Instant now, @Param("limit") int limit);
 
+    // 자동 처리 대상. 생성 시각은 바뀌지 않아 커서가 흔들리지 않음(ix_refunds_manual_review_created_at_id)
+    @Query(nativeQuery = true, value = """
+            select * from refunds
+            where status = 'MANUAL_REVIEW'
+              and updated_at < cast(:updatedBefore as timestamptz)
+              and (created_at, id) > (cast(:afterCreatedAt as timestamptz), cast(:afterId as uuid))
+            order by created_at, id
+            limit :limit
+            """)
+    List<Refund> findManualReviewsAfter(@Param("updatedBefore") Instant updatedBefore,
+                                        @Param("afterCreatedAt") Instant afterCreatedAt,
+                                        @Param("afterId") UUID afterId,
+                                        @Param("limit") int limit);
+
     // 복구 선점: 조회 이후 아무도 바꾸지 않았을 때만 수정 시각 갱신
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
@@ -65,7 +79,7 @@ public interface RefundJpaRepository extends JpaRepository<Refund, UUID> {
                              @Param("reviewReason") SettlementReviewReason reviewReason,
                              @Param("now") Instant now);
 
-    // 자동 처리 중단. 그 사이 결과가 반영된 환불은 바꾸지 않음
+    // 자동 재시도 중단. 그 사이 결과가 반영된 환불은 바꾸지 않음
     @Transactional
     @Modifying(flushAutomatically = true, clearAutomatically = true)
     @Query("""

@@ -1,8 +1,10 @@
 package com.travelpay.payment.transfer.integration;
 
 import java.net.SocketTimeoutException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -29,9 +31,13 @@ import com.travelpay.payment.infra.client.user.UserFeignApi;
 import com.travelpay.payment.infra.client.wallet.WalletFeignApi;
 import com.travelpay.payment.support.PostgresContainerSupport;
 import com.travelpay.payment.transfer.application.TransferAdminService;
+import com.travelpay.payment.transfer.application.TransferReviewReconciler;
 import com.travelpay.payment.transfer.application.TransferService;
+import com.travelpay.payment.transfer.client.TransferLedgerReader;
 import com.travelpay.payment.transfer.domain.TransferErrorCode;
+import com.travelpay.payment.transfer.domain.TransferRepository;
 import com.travelpay.payment.transfer.domain.TransferStatus;
+import com.travelpay.payment.transfer.domain.TransferStatusHistoryRepository;
 import com.travelpay.payment.transfer.dto.AdminTransferResolveRequest;
 import com.travelpay.payment.transfer.dto.AdminTransferResponse;
 import com.travelpay.payment.transfer.dto.TransferCreateRequest;
@@ -40,6 +46,7 @@ import feign.FeignException;
 import feign.Request;
 import feign.Response;
 import feign.RetryableException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -49,16 +56,22 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -92,6 +105,18 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private TransferRepository transferRepository;
+
+    @Autowired
+    private TransferStatusHistoryRepository historyRepository;
+
+    @Autowired
+    private TransferLedgerReader ledgerReader;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     @MockitoBean
     private LedgerFeignApi ledgerFeignApi;
@@ -211,6 +236,166 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
         assertEquals("COMPLETED", statusOf(transferId));
         assertEquals(1, attemptCountOf(transferId));
         assertInvariants(Map.of(sender, 10_000L, receiver, 0L));
+    }
+
+    /**
+     * 서버 2대가 같은 주기에 복구를 돌리면 서로 다른 송금을 나눠 가져갑니다(SKIP LOCKED 선점).
+     * 처리 중 송금 20건이 한 주기(서버마다 10건)에 모두 확정되고, 송금마다 원장 재전송은 1번입니다.
+     */
+    @Test
+    void twoRecoveryInstancesSplitDueTransfersInOneCycle() throws Exception {
+        assumeTrue(processingCount() == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
+        UUID sender = member(20_000L);
+        UUID receiver = member(0L);
+        Instant base = Instant.now().minusSeconds(3_600);
+        List<UUID> ids = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            ids.add(dueProcessingTransfer(sender, receiver, "split-" + i, base.plusSeconds(i)));
+        }
+        ledger.delayMillis = 100;
+
+        List<Object> results = runConcurrently(2, i -> transferService.recoverDue(Instant.now(), 10));
+
+        assertEquals(List.of(10, 10), results);
+        assertEquals(20, ledger.registerCalls.get());
+        ids.forEach(id -> assertEquals("COMPLETED", statusOf(id), "status " + id));
+        assertInvariants(Map.of(sender, 20_000L, receiver, 0L));
+    }
+
+    /**
+     * 서버 A가 3건을 일괄 선점하고 첫 송금의 원장 호출이 길어지는 동안, 서버 B가 선점 시각 +31초 시점에 복구를 돌려
+     * 대기 시간이 지난 나머지 2건을 다시 선점해 처리합니다. A는 호출 직전 선점 확인이 0행이라 그 2건을 보내지 않으므로
+     * 송금마다 원장 호출은 1번입니다. 첫 송금은 3회 시도(대기 2분)라 B가 가져가지 않습니다.
+     */
+    @Test
+    void reclaimedTransfersAreNotSentAgainByFirstInstance() throws Exception {
+        assumeTrue(processingCount() == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
+        UUID sender = member(10_000L);
+        UUID receiver = member(0L);
+        Instant base = Instant.now().minusSeconds(3_600);
+        UUID slow = dueProcessingTransfer(sender, receiver, "slow", base);
+        jdbcTemplate.update("update transfer set attempt_count = 3 where id = ?", slow);
+        UUID second = dueProcessingTransfer(sender, receiver, "second", base.plusSeconds(1));
+        UUID third = dueProcessingTransfer(sender, receiver, "third", base.plusSeconds(2));
+        ledger.blockOn = slow;
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> serverA = executor.submit(() -> transferService.recoverDue(Instant.now(), 10));
+            assertTrue(ledger.blocked.await(10, TimeUnit.SECONDS), "서버 A가 첫 송금 원장 호출에 들어가지 않았습니다.");
+
+            int settledByB = transferService.recoverDue(Instant.now().plusSeconds(31), 10);
+            ledger.release.countDown();
+            int settledByA = serverA.get(10, TimeUnit.SECONDS);
+
+            assertEquals(2, settledByB);
+            assertEquals(1, settledByA);
+        } finally {
+            ledger.release.countDown();
+            executor.shutdownNow();
+        }
+        assertEquals(3, ledger.registerCalls.get());
+        assertEquals(Map.of(slow, 1, second, 1, third, 1), ledger.registerCallsByReference());
+        for (UUID id : List.of(slow, second, third)) {
+            assertEquals("COMPLETED", statusOf(id), "status " + id);
+        }
+        assertEquals(3, attemptCountOf(slow));
+        assertEquals(1, attemptCountOf(second));
+        assertEquals(1, attemptCountOf(third));
+        assertInvariants(Map.of(sender, 10_000L, receiver, 0L));
+    }
+
+    /** 다른 서버가 잠근 송금은 기다리지 않고 건너뛰어 나머지만 복구하고, 잠금이 풀린 뒤 다음 주기에 복구합니다. */
+    @Test
+    void recoverySkipsTransferLockedElsewhereWithoutWaiting() throws Exception {
+        assumeTrue(processingCount() == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
+        UUID sender = member(10_000L);
+        UUID receiver = member(0L);
+        Instant base = Instant.now().minusSeconds(3_600);
+        UUID locked = dueProcessingTransfer(sender, receiver, "locked", base);
+        UUID free = dueProcessingTransfer(sender, receiver, "free", base.plusSeconds(1));
+        CountDownLatch lockHeld = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        Future<?> holder = executor.submit(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            jdbcTemplate.queryForObject("select id from transfer where id = ? for update", UUID.class, locked);
+            lockHeld.countDown();
+            try {
+                release.await(30, TimeUnit.SECONDS);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        }));
+        try {
+            assertTrue(lockHeld.await(10, TimeUnit.SECONDS), "잠금 준비 시간 초과");
+
+            int settled = assertTimeoutPreemptively(Duration.ofSeconds(10),
+                    () -> transferService.recoverDue(Instant.now(), 10), "잠긴 행을 기다리면 안 됩니다.");
+
+            assertEquals(1, settled);
+            assertEquals("COMPLETED", statusOf(free));
+            assertEquals("PROCESSING", statusOf(locked));
+        } finally {
+            release.countDown();
+            holder.get(10, TimeUnit.SECONDS);
+            executor.shutdownNow();
+        }
+
+        assertEquals(1, transferService.recoverDue(Instant.now(), 10));
+        assertEquals("COMPLETED", statusOf(locked));
+        assertEquals(2, ledger.registerCalls.get());
+        assertInvariants(Map.of(sender, 10_000L, receiver, 0L));
+    }
+
+    /**
+     * 선점한 서버가 원장 호출 전에 멈추면 다른 서버는 대기 시간(30초)이 지날 때까지 가져가지 않고,
+     * 지난 뒤에는 같은 reference로 한 번만 반영합니다(시도 횟수는 그대로).
+     */
+    @Test
+    void transferClaimedByStoppedInstanceIsRecoveredOnceAfterWait() {
+        assumeTrue(processingCount() == 0, "DB에 다른 PROCESSING 송금이 없어야 합니다.");
+        UUID sender = member(10_000L);
+        UUID receiver = member(0L);
+        UUID transferId = dueProcessingTransfer(sender, receiver, "stopped", Instant.now().minusSeconds(3_600));
+
+        // 서버가 선점만 커밋하고 원장 호출 전에 멈춘 상황입니다.
+        Instant claimedAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
+        assertEquals(1, transferRepository.claimRecoveryTargets(Instant.now(), claimedAt, 10).size());
+
+        assertEquals(0, transferService.recoverDue(Instant.now(), 10));
+        assertEquals(0, ledger.registerCalls.get());
+
+        assertEquals(1, transferService.recoverDue(claimedAt.plusSeconds(31), 10));
+        assertEquals("COMPLETED", statusOf(transferId));
+        assertEquals(1, attemptCountOf(transferId));
+        assertEquals(1, ledger.registerCalls.get());
+        assertInvariants(Map.of(sender, 10_000L, receiver, 0L));
+    }
+
+    /**
+     * 서버 2대의 자동 대사가 같은 MANUAL_REVIEW 송금을 동시에 원장과 대조해도(원장 조회는 각자 함) 확정은 한 번이고
+     * SYSTEM 이력도 1건입니다.
+     */
+    @Test
+    void concurrentAutoReconciliationsResolveOnce() throws Exception {
+        assumeTrue(manualReviewCount() == 0, "DB에 다른 MANUAL_REVIEW 송금이 없어야 합니다.");
+        UUID transferId = manualReviewTransfer();
+        Instant past = Instant.now().minusSeconds(300);
+        jdbcTemplate.update("update transfer set created_at = ?, updated_at = ? where id = ?",
+                past.atOffset(ZoneOffset.UTC), past.atOffset(ZoneOffset.UTC), transferId);
+        // 두 서버가 모두 대상을 읽은 뒤 확정하도록 원장 조회를 늦춥니다.
+        givenPostedLedgerFor(transferId, 200);
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
+        List<Object> results = runConcurrently(2, i -> new TransferReviewReconciler(transferRepository,
+                historyRepository, ledgerReader, transactionManager, meterRegistry).reconcile(Instant.now(), 10));
+
+        assertEquals(1, results.stream().mapToInt(Integer.class::cast).sum());
+        verify(ledgerFeignApi, times(2)).getTransaction("TRANSFER", transferId);
+        assertEquals("COMPLETED", statusOf(transferId));
+        assertEquals(1, historyCount(transferId));
+        assertEquals("SYSTEM", jdbcTemplate.queryForObject(
+                "select actor_type from transfer_status_history where transfer_id = ?", String.class, transferId));
+        assertEquals(1.0, meterRegistry.get("transfer.manual_review.auto_resolved").counter().count());
     }
 
     /** 같은 운영자·같은 내용의 확정 요청이 동시에 와도 상태 변경·이력은 1번이고, 늦은 요청은 같은 결과(200)를 받습니다. */
@@ -384,15 +569,40 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
         jdbcTemplate.update("""
                         insert into transfer (id, sender_id, receiver_id, source_wallet_id, target_wallet_id, amount,
                             currency, status, failure_reason, attempt_count, review_reason, memo, idempotency_key,
-                            request_hash, created_at, updated_at)
-                        values (?, ?, ?, ?, ?, 1000, 'KRW', 'MANUAL_REVIEW', null, 5, 'RETRY_EXHAUSTED', null, ?, ?, ?, ?)""",
-                id, sender, receiver, walletOf.get(sender), walletOf.get(receiver), "review-" + id, "0".repeat(64),
+                            created_at, updated_at)
+                        values (?, ?, ?, ?, ?, 1000, 'KRW', 'MANUAL_REVIEW', null, 5, 'RETRY_EXHAUSTED', null, ?, ?, ?)""",
+                id, sender, receiver, walletOf.get(sender), walletOf.get(receiver), "review-" + id,
                 created.atOffset(ZoneOffset.UTC), created.atOffset(ZoneOffset.UTC));
         return id;
     }
 
-    /** 원장 조회가 이 송금과 같은 항목의 POSTED 거래를 돌려주게 하고 그 거래 ID를 반환합니다. */
+    /** 결과 모름 1회로 처리 중이고 재시도 대기 시간이 지난 송금(KRW 1,000)을 커밋해 둡니다. */
+    private UUID dueProcessingTransfer(UUID sender, UUID receiver, String key, Instant at) {
+        UUID id = UUID.randomUUID();
+        jdbcTemplate.update("""
+                        insert into transfer (id, sender_id, receiver_id, source_wallet_id, target_wallet_id, amount,
+                            currency, status, failure_reason, attempt_count, review_reason, memo, idempotency_key,
+                            created_at, updated_at)
+                        values (?, ?, ?, ?, ?, 1000, 'KRW', 'PROCESSING', null, 1, null, null, ?, ?, ?)""",
+                id, sender, receiver, walletOf.get(sender), walletOf.get(receiver), key,
+                at.atOffset(ZoneOffset.UTC), at.atOffset(ZoneOffset.UTC));
+        return id;
+    }
+
+    private long processingCount() {
+        return jdbcTemplate.queryForObject("select count(*) from transfer where status = 'PROCESSING'", Long.class);
+    }
+
+    private long manualReviewCount() {
+        return jdbcTemplate.queryForObject("select count(*) from transfer where status = 'MANUAL_REVIEW'", Long.class);
+    }
+
     private UUID givenPostedLedgerFor(UUID transferId) {
+        return givenPostedLedgerFor(transferId, 0);
+    }
+
+    /** 원장 조회가 (delayMillis 뒤에) 이 송금과 같은 항목의 POSTED 거래를 돌려주게 하고 그 거래 ID를 반환합니다. */
+    private UUID givenPostedLedgerFor(UUID transferId, long delayMillis) {
         Map<String, Object> row = jdbcTemplate.queryForMap(
                 "select source_wallet_id, target_wallet_id from transfer where id = ?", transferId);
         UUID ledgerTransactionId = UUID.randomUUID();
@@ -401,8 +611,14 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
                         1000L, "TRANSFER_OUT"),
                 new LedgerFeignApi.EntryResult("USER", (UUID) row.get("target_wallet_id"), "WALLET", "KRW", "CREDIT",
                         1000L, "TRANSFER_IN"));
-        when(ledgerFeignApi.getTransaction(eq("TRANSFER"), eq(transferId))).thenReturn(ApiResponse.success(
-                new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "POSTED", null, entries)));
+        ApiResponse<LedgerFeignApi.TransactionResultResponse> posted = ApiResponse.success(
+                new LedgerFeignApi.TransactionResultResponse(ledgerTransactionId, "POSTED", null, entries));
+        doAnswer(invocation -> {
+            if (delayMillis > 0) {
+                Thread.sleep(delayMillis);
+            }
+            return posted;
+        }).when(ledgerFeignApi).getTransaction(eq("TRANSFER"), eq(transferId));
         return ledgerTransactionId;
     }
 
@@ -490,12 +706,26 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
         final AtomicInteger registerCalls = new AtomicInteger();
         private final Map<UUID, Object> results = new HashMap<>();
         private final Map<UUID, Integer> appliedCount = new HashMap<>();
+        private final Map<UUID, Integer> callsByReference = new HashMap<>();
         volatile int delayMillis;
         volatile boolean loseFirstResponse;
+        /** 이 reference의 등록 요청은 release가 열릴 때까지 멈춥니다(원장 호출이 길어지는 상황). 들어오면 blocked를 엽니다. */
+        volatile UUID blockOn;
+        final CountDownLatch blocked = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
 
         ApiResponse<LedgerFeignApi.TransactionResponse> register(LedgerFeignApi.RegisterRequest request)
                 throws InterruptedException {
             registerCalls.incrementAndGet();
+            synchronized (this) {
+                callsByReference.merge(request.referenceId(), 1, Integer::sum);
+            }
+            if (request.referenceId().equals(blockOn)) {
+                blocked.countDown();
+                if (!release.await(30, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("원장 호출 대기 시간 초과");
+                }
+            }
             if (delayMillis > 0) {
                 Thread.sleep(delayMillis);
             }
@@ -550,6 +780,10 @@ class TransferConsistencyIntegrationTest extends PostgresContainerSupport {
 
         synchronized int applied(UUID reference) {
             return appliedCount.getOrDefault(reference, 0);
+        }
+
+        synchronized Map<UUID, Integer> registerCallsByReference() {
+            return new HashMap<>(callsByReference);
         }
 
         synchronized Set<UUID> appliedReferences() {

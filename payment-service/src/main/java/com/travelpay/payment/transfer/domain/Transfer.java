@@ -74,10 +74,6 @@ public class Transfer {
     @Column(name = "idempotency_key", length = 100, nullable = false, updatable = false)
     private String idempotencyKey;
 
-    @JdbcTypeCode(SqlTypes.CHAR)
-    @Column(name = "request_hash", length = 64, nullable = false, updatable = false)
-    private String requestHash;
-
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -96,7 +92,6 @@ public class Transfer {
             String currency,
             String memo,
             String idempotencyKey,
-            String requestHash,
             TransferStatus status
     ) {
         this.senderId = Objects.requireNonNull(senderId, "senderId");
@@ -107,7 +102,6 @@ public class Transfer {
         this.currency = Objects.requireNonNull(currency, "currency");
         this.memo = memo;
         this.idempotencyKey = Objects.requireNonNull(idempotencyKey, "idempotencyKey");
-        this.requestHash = Objects.requireNonNull(requestHash, "requestHash");
         this.status = status;
     }
 
@@ -120,8 +114,7 @@ public class Transfer {
             long amount,
             String currency,
             String memo,
-            String idempotencyKey,
-            String requestHash
+            String idempotencyKey
     ) {
         return new Transfer(
                 senderId,
@@ -132,7 +125,6 @@ public class Transfer {
                 currency,
                 memo,
                 idempotencyKey,
-                requestHash,
                 TransferStatus.REQUESTED
         );
     }
@@ -146,8 +138,7 @@ public class Transfer {
             long amount,
             String currency,
             String memo,
-            String idempotencyKey,
-            String requestHash
+            String idempotencyKey
     ) {
         return new Transfer(
                 senderId,
@@ -158,7 +149,6 @@ public class Transfer {
                 currency,
                 memo,
                 idempotencyKey,
-                requestHash,
                 TransferStatus.PROCESSING
         );
     }
@@ -231,10 +221,6 @@ public class Transfer {
 
     public String getIdempotencyKey() {
         return idempotencyKey;
-    }
-
-    public String getRequestHash() {
-        return requestHash;
     }
 
     public Instant getCreatedAt() {

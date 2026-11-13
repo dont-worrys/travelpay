@@ -77,6 +77,12 @@ public class RefundRepositoryImpl implements RefundRepository {
     }
 
     @Override
+    public List<Refund> findManualReviewsAfter(Instant updatedBefore, Instant afterCreatedAt, UUID afterId,
+                                               int limit) {
+        return refundJpaRepository.findManualReviewsAfter(updatedBefore, afterCreatedAt, afterId, limit);
+    }
+
+    @Override
     public int claimForRecovery(UUID refundId, Instant seenUpdatedAt, Instant now) {
         return refundJpaRepository.claimForRecovery(refundId, seenUpdatedAt, now);
     }

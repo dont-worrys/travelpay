@@ -1,5 +1,6 @@
 package com.travelpay.payment.domain.merchant;
 
+import com.travelpay.payment.domain.payment.ReviewActorType;
 import com.travelpay.payment.domain.payment.ReviewLedgerStatus;
 import com.travelpay.payment.domain.payment.SettlementReviewReason;
 import jakarta.persistence.*;
@@ -12,7 +13,10 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
-/** MANUAL_REVIEW 정산을 운영자(MASTER)가 처리한 기록입니다. 상태가 바뀐 처리만 남깁니다. */
+/**
+ * MANUAL_REVIEW 정산을 처리한 기록입니다. 상태가 바뀐 처리만 남깁니다.
+ * 운영자(OPERATOR) 처리는 actorId가 있고, 스케줄러 자동 처리(SYSTEM)는 actorId·memo가 없습니다.
+ */
 @Entity
 @Table(name = "settlement_review_resolutions")
 @Getter
@@ -35,6 +39,9 @@ public class SettlementReviewResolution {
     @Enumerated(EnumType.STRING)
     private SettlementStatus toStatus;
 
+    @Enumerated(EnumType.STRING)
+    private ReviewActorType actorType;
+
     private UUID actorId;
 
     // 시스템이 남기는 처리 설명
@@ -47,11 +54,27 @@ public class SettlementReviewResolution {
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
-    // DB 제약과 같은 규칙: 원장 기록이 없을 때만 거래 ID가 비어 있음
     public static SettlementReviewResolution of(UUID settlementId, SettlementReviewReason reviewReason,
                                                 ReviewLedgerStatus ledgerStatus, UUID ledgerTransactionId,
                                                 SettlementStatus toStatus, UUID actorId,
                                                 String description, String memo) {
+        return create(settlementId, reviewReason, ledgerStatus, ledgerTransactionId, toStatus,
+                ReviewActorType.OPERATOR, Objects.requireNonNull(actorId), description, memo);
+    }
+
+    /** 스케줄러 자동 처리 기록. 처리한 회원·메모 없음 */
+    public static SettlementReviewResolution ofSystem(UUID settlementId, SettlementReviewReason reviewReason,
+                                                      ReviewLedgerStatus ledgerStatus, UUID ledgerTransactionId,
+                                                      SettlementStatus toStatus, String description) {
+        return create(settlementId, reviewReason, ledgerStatus, ledgerTransactionId, toStatus,
+                ReviewActorType.SYSTEM, null, description, null);
+    }
+
+    // DB 제약과 같은 규칙: 원장 기록이 없을 때만 거래 ID가 비어 있음, 운영자 처리만 처리한 회원이 있음
+    private static SettlementReviewResolution create(UUID settlementId, SettlementReviewReason reviewReason,
+                                                     ReviewLedgerStatus ledgerStatus, UUID ledgerTransactionId,
+                                                     SettlementStatus toStatus, ReviewActorType actorType,
+                                                     UUID actorId, String description, String memo) {
         if ((ledgerStatus == ReviewLedgerStatus.NOT_FOUND) != (ledgerTransactionId == null)) {
             throw new IllegalArgumentException("원장 기록이 있으면 거래 ID가 있어야 합니다. ledgerStatus=" + ledgerStatus);
         }
@@ -64,7 +87,8 @@ public class SettlementReviewResolution {
         resolution.ledgerStatus = Objects.requireNonNull(ledgerStatus);
         resolution.ledgerTransactionId = ledgerTransactionId;
         resolution.toStatus = toStatus;
-        resolution.actorId = Objects.requireNonNull(actorId);
+        resolution.actorType = actorType;
+        resolution.actorId = actorId;
         resolution.description = Objects.requireNonNull(description);
         resolution.memo = memo;
         return resolution;

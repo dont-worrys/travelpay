@@ -124,10 +124,10 @@ public abstract class TransferApiIntegrationSupport extends PostgresContainerSup
         jdbcTemplate.update("""
                         insert into transfer (id, sender_id, receiver_id, source_wallet_id, target_wallet_id, amount,
                             currency, status, failure_reason, attempt_count, review_reason, memo, idempotency_key,
-                            request_hash, created_at, updated_at)
-                        values (?, ?, ?, ?, ?, 1000, ?, ?, ?, ?, ?, 'memo', ?, ?, ?, ?)""",
+                            created_at, updated_at)
+                        values (?, ?, ?, ?, ?, 1000, ?, ?, ?, ?, ?, 'memo', ?, ?, ?)""",
                 id, sender, receiver, sourceWalletId, targetWalletId, currency, status, failureReason, attemptCount,
-                reviewReason, "it-" + id, "0".repeat(64), createdAt.atOffset(ZoneOffset.UTC),
+                reviewReason, "it-" + id, createdAt.atOffset(ZoneOffset.UTC),
                 createdAt.atOffset(ZoneOffset.UTC));
         return id;
     }
