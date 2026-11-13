@@ -14,6 +14,8 @@ locals {
 
   # Eureka에 등록하고 목록을 조회하는 서비스입니다. eureka-server 자신과 Cloud Map으로 찾는 Mock Bank는 제외합니다.
   eureka_clients = toset(["gateway", "user", "wallet", "payment", "exchange", "ledger"])
+  # 새 Eureka가 등록을 잃었을 때 다음 heartbeat의 404 응답으로 재등록합니다. 서버의 갱신 기준도 같은 주기를 씁니다.
+  eureka_renewal_interval_seconds = 5
 
   # Redis·Kafka·Eureka·Mock Bank 주소는 사설 DNS 이름과 SG가 허용한 포트에서 만듭니다(포트를 SG 규칙에서 읽어 허용 범위와 맞춤).
   # DB는 인증서의 이름과 맞아야 verify-full이 통과하므로 RDS 엔드포인트 이름을 그대로 씁니다.
@@ -36,9 +38,10 @@ locals {
       contains(local.eureka_clients, key) ? {
         EUREKA_CLIENT_SERVICEURL_DEFAULTZONE = local.eureka_service_url
         EUREKA_INSTANCE_PREFER_IP_ADDRESS    = "true"
-        # 목록 조회·LoadBalancer 캐시를 5초로 줄여(기본 30초·35초) 종료 전 대기(20초) 안에 다른 서비스가 빠진 주소를 반영합니다.
-        EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS = "5"
-        SPRING_CLOUD_LOADBALANCER_CACHE_TTL           = "5s"
+        # 재등록·목록 조회는 5초 간격입니다. 목록은 Eureka 클라이언트가 캐시하므로 LoadBalancer에서는 다시 캐시하지 않습니다.
+        EUREKA_INSTANCE_LEASE_RENEWAL_INTERVAL_IN_SECONDS = tostring(local.eureka_renewal_interval_seconds)
+        EUREKA_CLIENT_REGISTRY_FETCH_INTERVAL_SECONDS     = "5"
+        SPRING_CLOUD_LOADBALANCER_CACHE_ENABLED           = "false"
         # 이미지 시작 스크립트가 종료 신호를 받으면 이 주소에 OUT_OF_SERVICE를 알리고 기다린 뒤 Java를 종료합니다.
         TRAVELPAY_EUREKA_URL    = local.eureka_service_url
         TRAVELPAY_EUREKA_APP    = upper(service.name)
@@ -60,8 +63,9 @@ locals {
         # (메모리 부족 종료 등) 기준 아래가 되어, 새 Task가 떠도 죽은 IP가 남아 요청을 받으므로 끕니다(2026-11-12 실험: 6개 중 1개·3개가
         # 멈춘 경우 모두 켜 둔 서버는 7~8분 넘게 그대로, 끈 서버는 4~6분 안에 제거).
         eureka = {
-          EUREKA_SERVER_RESPONSE_CACHE_UPDATE_INTERVAL_MS = "5000"
-          EUREKA_SERVER_ENABLE_SELF_PRESERVATION          = "false"
+          EUREKA_SERVER_EXPECTED_CLIENT_RENEWAL_INTERVAL_SECONDS = tostring(local.eureka_renewal_interval_seconds)
+          EUREKA_SERVER_RESPONSE_CACHE_UPDATE_INTERVAL_MS        = "5000"
+          EUREKA_SERVER_ENABLE_SELF_PRESERVATION                 = "false"
         }
         user     = { REDIS_SESSION_HOST = local.data_host_name, REDIS_SESSION_PORT = tostring(local.tcp_connections.user_session_redis.port) }
         exchange = { REDIS_CACHE_HOST = local.data_host_name, REDIS_CACHE_PORT = tostring(local.tcp_connections.exchange_cache_redis.port) }
