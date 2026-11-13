@@ -71,10 +71,10 @@ class TransferStatusTransitionIntegrationTest extends PostgresContainerSupport {
                         TransferFailureReason.ACCOUNT_UNAVAILABLE, NOW);
             }
         },
-        CLAIM_FOR_RECOVERY(TransferStatus.PROCESSING, TransferStatus.PROCESSING, null, null, START_ATTEMPTS) {
+        RENEW_RECOVERY_CLAIM(TransferStatus.PROCESSING, TransferStatus.PROCESSING, null, null, START_ATTEMPTS) {
             @Override
             int apply(TransferRepository repository, Transfer transfer) {
-                return repository.claimForRecovery(transfer.getId(), transfer.getUpdatedAt(), NOW);
+                return repository.renewRecoveryClaim(transfer.getId(), transfer.getUpdatedAt(), NOW);
             }
         },
         RECORD_UNKNOWN(TransferStatus.PROCESSING, TransferStatus.PROCESSING, null, null, START_ATTEMPTS + 1) {

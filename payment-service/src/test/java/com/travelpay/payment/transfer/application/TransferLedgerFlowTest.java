@@ -576,11 +576,12 @@ class TransferLedgerFlowTest {
         assertEquals(2, ledger.requests.size());
     }
 
-    /** 다른 인스턴스가 먼저 선점한 송금(선점 UPDATE 0행)은 원장에 보내지 않습니다. */
+    /** 일괄 선점 뒤 다른 서버가 다시 선점한 송금(호출 직전 선점 확인 0행)은 원장에 보내지 않고, 시도 횟수도 그대로입니다. */
     @Test
-    void recoverySkipsTransferClaimedElsewhere() {
+    void recoverySkipsTransferReclaimedElsewhere() {
         Transfer transfer = savedProcessingTransfer(KEY);
-        when(transferRepository.claimForRecovery(eq(transfer.getId()), any(Instant.class), any(Instant.class)))
+        int attempts = transfer.getAttemptCount();
+        when(transferRepository.renewRecoveryClaim(eq(transfer.getId()), any(Instant.class), any(Instant.class)))
                 .thenReturn(0);
 
         int settled = transferService.recoverDue(farFuture(), 10);
@@ -588,23 +589,29 @@ class TransferLedgerFlowTest {
         assertEquals(0, settled);
         assertTrue(ledger.requests.isEmpty());
         assertEquals(TransferStatus.PROCESSING, transfer.getStatus());
+        assertEquals(attempts, transfer.getAttemptCount());
     }
 
-    /** 한 건을 복구하다 예외가 나도(예: 선점 UPDATE 실패) 로그만 남기고 다음 송금을 계속 복구합니다. */
+    /** 한 건을 복구하다 예상하지 못한 예외가 나도 결과 모름으로 두고 다음 송금을 계속 복구합니다. */
     @Test
     void recoveryContinuesWithNextTransferWhenOneTransferFails() {
         Instant base = Instant.parse("2026-11-02T00:00:00Z");
         Transfer broken = staleProcessingTransfer("broken-key", base);
         Transfer next = staleProcessingTransfer("next-key", base.plusSeconds(10));
-        when(transferRepository.claimForRecovery(eq(broken.getId()), any(Instant.class), any(Instant.class)))
-                .thenThrow(new DataIntegrityViolationException("connection lost"));
+        ledger.onRegister = request -> {
+            if (request.referenceId().equals(broken.getId())) {
+                throw new IllegalStateException("unexpected");
+            }
+            return ledger.apply(request);
+        };
 
         int settled = transferService.recoverDue(farFuture(), 10);
 
         assertEquals(1, settled);
         assertEquals(TransferStatus.PROCESSING, broken.getStatus());
         assertEquals(TransferStatus.COMPLETED, next.getStatus());
-        assertEquals(List.of(next.getId()), ledger.requests.stream().map(LedgerTransactionRequest::referenceId).toList());
+        assertEquals(List.of(broken.getId(), next.getId()),
+                ledger.requests.stream().map(LedgerTransactionRequest::referenceId).toList());
     }
 
     /** 원장 결과에 상태가 없으면 해석할 수 없으므로 결과 모름으로 두고 기록하지 않습니다. */
@@ -710,7 +717,7 @@ class TransferLedgerFlowTest {
         int recovered = withoutLedger.recoverDue(farFuture(), 10);
 
         assertEquals(0, recovered);
-        verify(transferRepository, never()).findRecoveryTargets(any(), anyInt());
+        verify(transferRepository, never()).claimRecoveryTargets(any(), any(), anyInt());
     }
 
     /** 모든 재시도 대기 시간(최대 4분)이 지난 시각입니다. */
@@ -780,11 +787,13 @@ class TransferLedgerFlowTest {
                     return 1;
                 });
         // 대기 시간: 30초 × 2^max(attempt_count - 1, 0)
-        when(transferRepository.findRecoveryTargets(any(Instant.class), anyInt()))
+        // 선점: 대기 시간이 지난 송금을 오래된 순으로 고르고 수정 시각을 선점 시각으로 바꿉니다.
+        when(transferRepository.claimRecoveryTargets(any(Instant.class), any(Instant.class), anyInt()))
                 .thenAnswer(invocation -> {
                     Instant now = invocation.getArgument(0);
-                    int limit = invocation.getArgument(1);
-                    return store.values().stream()
+                    Instant claimedAt = invocation.getArgument(1);
+                    int limit = invocation.getArgument(2);
+                    List<Transfer> claimed = store.values().stream()
                             .filter(transfer -> transfer.getStatus() == TransferStatus.PROCESSING
                                     && transfer.getUpdatedAt().isBefore(now.minusSeconds(
                                             30L << Math.max(transfer.getAttemptCount() - 1, 0))))
@@ -792,8 +801,10 @@ class TransferLedgerFlowTest {
                                     .thenComparing(transfer -> transfer.getId().toString()))
                             .limit(limit)
                             .toList();
+                    claimed.forEach(transfer -> ReflectionTestUtils.setField(transfer, "updatedAt", claimedAt));
+                    return claimed;
                 });
-        when(transferRepository.claimForRecovery(any(UUID.class), any(Instant.class), any(Instant.class)))
+        when(transferRepository.renewRecoveryClaim(any(UUID.class), any(Instant.class), any(Instant.class)))
                 .thenAnswer(invocation -> {
                     Transfer transfer = processingOrNull(invocation.getArgument(0));
                     if (transfer == null || !transfer.getUpdatedAt().equals(invocation.getArgument(1))) {
