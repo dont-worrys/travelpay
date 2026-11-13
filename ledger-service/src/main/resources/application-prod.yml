@@ -9,6 +9,8 @@ spring:
       # 트랜잭션 타임아웃은 커넥션을 얻은 뒤부터 적용되므로 획득 대기도 따로 제한
       connection-timeout: 2000
       validation-timeout: 1000
+      # 격리 수준은 @Transactional에 적지 않고 여기서 정한다 (적으면 트랜잭션마다 격리 수준 조회가 나감)
+      transaction-isolation: TRANSACTION_READ_COMMITTED
   flyway:
     default-schema: ledger_service
     schemas: ledger_service

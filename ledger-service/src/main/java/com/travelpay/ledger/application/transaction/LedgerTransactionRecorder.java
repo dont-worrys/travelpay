@@ -19,7 +19,6 @@ import com.travelpay.ledger.domain.transaction.ReferenceType;
 import com.travelpay.ledger.domain.transaction.RejectReason;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
@@ -37,9 +36,9 @@ import java.util.stream.Collectors;
 /**
  * 거래 한 건을 한 트랜잭션으로 기록한다. 거래·항목·계정 잔액이 함께 커밋되거나 함께 롤백된다.
  *
- * READ_COMMITTED 전제: FOR UPDATE는 다른 트랜잭션이 커밋한 뒤의 최신 행을 잠그므로
- * 잠금 후에 읽은 상태·잔액으로 판단하면 정확하다. REPEATABLE READ로 올리면 그 사이 바뀐 행을 잠글 때
- * 직렬화 오류로 롤백된다.
+ * READ COMMITTED 전제 (spring.datasource.hikari.transaction-isolation): FOR UPDATE는 다른 트랜잭션이 커밋한 뒤의
+ * 최신 행을 잠그므로 잠금 후에 읽은 상태·잔액으로 판단하면 정확하다. REPEATABLE READ로 올리면 그 사이 바뀐 행을 잠글 때
+ * 직렬화 오류로 롤백된다. 격리 수준은 @Transactional에 적지 않는다(적으면 트랜잭션마다 격리 수준 조회가 나간다).
  *
  * 같은 reference 동시 요청은 여기서 처리하지 않는다. 거래 INSERT의 UNIQUE 위반(DuplicateReferenceException)으로
  * 이 트랜잭션은 롤백되고, LedgerTransactionService가 새 트랜잭션에서 기존 거래를 다시 읽는다.
@@ -54,7 +53,7 @@ class LedgerTransactionRecorder {
     private final LedgerTransactionRepository transactionRepository;
     private final LedgerAccountRepository accountRepository;
 
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public TransactionResult record(RegisterTransactionCommand command, String requestHash) {
         Optional<LedgerTransaction> existing =
                 transactionRepository.findByReference(command.referenceType(), command.referenceId());
@@ -116,7 +115,7 @@ class LedgerTransactionRecorder {
     }
 
     /** 동시 요청으로 먼저 저장된 거래를 새 트랜잭션에서 다시 읽어 같은 규칙으로 응답한다 */
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public TransactionResult resolveExisting(RegisterTransactionCommand command, String requestHash) {
         LedgerTransaction existing = transactionRepository
                 .findByReference(command.referenceType(), command.referenceId())
@@ -128,7 +127,7 @@ class LedgerTransactionRecorder {
      * 취소 기록. 같은 reference의 거래가 이미 있으면 내용과 상관없이 바꾸지 않고 그대로 돌려준다(요청 해시를 비교하지 않음).
      * 계정을 잠그지 않고 거래 행 하나만 저장한다. 등록과 동시에 저장되면 reference UNIQUE 위반(DuplicateReferenceException)으로 롤백된다.
      */
-    @Transactional(isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public CancelTransactionResult cancel(CancelTransactionCommand command, String requestHash) {
         Optional<LedgerTransaction> existing =
                 transactionRepository.findByReference(command.referenceType(), command.referenceId());
@@ -142,7 +141,7 @@ class LedgerTransactionRecorder {
     }
 
     /** 취소와 동시에 먼저 저장된 거래를 새 트랜잭션에서 다시 읽어 그대로 돌려준다 */
-    @Transactional(readOnly = true, isolation = Isolation.READ_COMMITTED, timeout = TX_TIMEOUT_SECONDS)
+    @Transactional(readOnly = true, timeout = TX_TIMEOUT_SECONDS)
     public CancelTransactionResult existingForCancel(ReferenceType referenceType, UUID referenceId) {
         LedgerTransaction existing = transactionRepository.findByReference(referenceType, referenceId)
                 .orElseThrow(() -> new IllegalStateException("중복으로 거절된 취소의 기존 거래를 다시 찾을 수 없습니다."));
