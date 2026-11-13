@@ -15,11 +15,17 @@ import org.springframework.scheduling.annotation.Scheduled;
         havingValue = "true", matchIfMissing = true)
 public class OutboxPublishScheduler {
 
+    private static final String BATCH_SIZE_KEY = "travelpay.wallet.outbox.publisher.batch-size";
+
     private final OutboxPublisher publisher;
     private final int batchSize;
 
+    /** 설정이 잘못되면 IllegalStateException으로 기동을 멈춘다 (@Scheduled 등록 전) */
     public OutboxPublishScheduler(OutboxPublisher publisher,
-                                  @Value("${travelpay.wallet.outbox.publisher.batch-size:50}") int batchSize) {
+                                  @Value("${" + BATCH_SIZE_KEY + ":200}") int batchSize) {
+        if (batchSize < 1) {
+            throw new IllegalStateException(BATCH_SIZE_KEY + "는 1 이상이어야 합니다: " + batchSize);
+        }
         this.publisher = publisher;
         this.batchSize = batchSize;
     }

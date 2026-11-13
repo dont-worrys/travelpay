@@ -2,7 +2,7 @@
 
 충전 접수(`POST /api/v1/charges`)부터 SAGA 종결(은행 출금 → 원장 적립)까지를 같은 조건에서 재고, 끝난 뒤 은행 출금 정합성과 운영 대사 API 결과를 확인합니다.
 
-- 충전은 접수 후 202로 응답하고 Outbox(1초·50건) → Kafka(`wallet.charge.requested`, 파티션 3) → SAGA로 처리됩니다. 그래서 **접수 응답 시간**과 **종결까지의 완료 처리량·지연**을 따로 봅니다.
+- 충전은 접수 후 202로 응답하고 Outbox(1초·200건) → Kafka(`wallet.charge.requested`, 파티션 3) → SAGA로 처리됩니다. 그래서 **접수 응답 시간**과 **종결까지의 완료 처리량·지연**을 따로 봅니다.
 - 목적은 **병목 위치와 정합성 확인**입니다. 노트북 한 대의 Docker 안에서 재므로 절대 처리량이 아니라 **같은 날 같은 조건의 비교**(예: SAGA 컨슈머 동시성 1 vs 3)와 대사 결과를 봅니다.
 - **앱까지 Docker 네트워크 안에서 실행합니다.** user·wallet·ledger·mock-bank, 측정 전용 Postgres·Kafka·Redis, k6를 같은 compose 프로젝트(`travelpay-charge-load-test`)에 띄웁니다. 앱을 PC에 띄우면 앱↔DB·Kafka 왕복이 Docker Desktop 포트 전달을 지나 느려지고(환전 측정: 0.05ms → 2.7ms, [환전 README "측정 환경을 Docker 안에 두는 이유"](../../exchange-service/load-test/README.md#측정-환경을-docker-안에-두는-이유)), 충전 한 건은 이 왕복을 약 25번 합니다.
 - **Gateway 제외 측정입니다.** k6가 같은 네트워크의 `wallet:8082`를 `User-Id`·`User-Role` 헤더로 직접 호출합니다. Eureka는 쓰지 않고 지갑이 다른 서비스를 직접 주소로 부릅니다.
@@ -89,7 +89,7 @@
 --travelpay.wallet.charge.reconciliation.grace=10s
 --management.metrics.distribution.percentiles-histogram.http.server.requests=true
 --travelpay.wallet.charge.saga.consumer.concurrency=${CHARGE_CONCURRENCY:-1}
---travelpay.wallet.outbox.publisher.batch-size=${OUTBOX_BATCH_SIZE:-50}
+--travelpay.wallet.outbox.publisher.batch-size=${OUTBOX_BATCH_SIZE:-200}
 ```
 
 - `reconciliation.enabled=false`: 10분 주기 대사 스케줄러가 측정 중에 돌지 않게 합니다(수동 실행은 그대로 됨).
@@ -100,7 +100,7 @@
   CHARGE_CONCURRENCY=3 OUTBOX_BATCH_SIZE=200 docker compose --profile app up -d --wait --force-recreate wallet
   ```
 
-  값을 바꾸지 않은 다른 서비스는 그대로 둡니다. 같은 셸에서 이어 잴 때는 `export`로 값을 유지합니다(값 없이 `up`하면 기본값 1·50으로 다시 만들어짐).
+  값을 바꾸지 않은 다른 서비스는 그대로 둡니다. 같은 셸에서 이어 잴 때는 `export`로 값을 유지합니다(값 없이 `up`하면 기본값 1·200으로 다시 만들어짐).
 
 ### Mock 은행 실행 조건
 
@@ -235,7 +235,7 @@ Mock 은행이 출금 2xx 응답을 비율만큼 처리·커밋한 뒤 500으로
 - 볼 값은 `fault.recoveredCharges`와 `fault.recoveredLatencyMs`입니다.
 - 꺼짐에서는 Mock 은행이 재시작되며 카운터가 0이 되므로 은행 호출 수(`fault.bankWithdrawalCalls`, `services.mock-bank`)는 쓰지 않습니다.
 
-**결과 (2026-11-11, 각 1회).** 기준선은 개선 전 지갑 jar, 개선 후는 복구 스케줄러가 쌓인 만큼 처리하고 장애 단계만 멈추는 지갑 jar입니다. 두 경우 모두 지갑은 기본값(동시성 1, Outbox batch-size 50), 초당 20건 2,400건, 접수 시작 30초 뒤 60초 장애입니다. 기준선의 꺼짐은 정리에 약 24분 걸려 `--drain-timeout 3600`이 필요합니다.
+**결과 (2026-11-11, 각 1회).** 기준선은 개선 전 지갑 jar, 개선 후는 복구 스케줄러가 쌓인 만큼 처리하고 장애 단계만 멈추는 지갑 jar입니다. 두 경우 모두 지갑은 동시성 1·Outbox batch-size 50(당시 기본값)이고, 초당 20건 2,400건, 접수 시작 30초 뒤 60초 장애입니다. 기준선의 꺼짐은 정리에 약 24분 걸려 `--drain-timeout 3600`이 필요합니다.
 
 | 장애 | 기준선 | 개선 후 |
 | --- | --- | --- |

@@ -75,7 +75,7 @@ travelpay:
         enabled: true
         # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
         fixed-delay: 1s
-        batch-size: 50
+        batch-size: 200
     charge:
       saga:
         consumer:
