@@ -18,10 +18,10 @@ class OutboxPublishSchedulerConfigTest {
             .withUserConfiguration(OutboxPublishScheduler.class);
 
     @Test
-    void 기본값이면_200건으로_기동된다() {
+    void 기본값이면_500건으로_기동된다() {
         contextRunner.run(context -> {
             assertThat(context).hasNotFailed().hasSingleBean(OutboxPublishScheduler.class);
-            assertPublishesWith(context.getBean(OutboxPublishScheduler.class), context.getBean(OutboxPublisher.class), 200);
+            assertPublishesWith(context.getBean(OutboxPublishScheduler.class), context.getBean(OutboxPublisher.class), 500);
         });
     }
 

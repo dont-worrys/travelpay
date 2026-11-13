@@ -18,6 +18,11 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          # 변경 감지 UPDATE·INSERT를 묶어 보낸다 (Outbox 발행 최대 500건의 상태 변경이 커밋 직전에 행마다 왕복하지 않게)
+          batch_size: 50
   cloud:
     openfeign:
       client:
@@ -75,14 +80,14 @@ travelpay:
         enabled: true
         # 이전 주기가 끝난 뒤부터 다음 주기까지의 간격
         fixed-delay: 1s
-        batch-size: 200
+        batch-size: 500
     charge:
       saga:
         consumer:
           # 끄면 충전 SAGA 컨슈머가 시작하지 않는다 (테스트용)
           enabled: true
           # 컨슈머 스레드 수 (1 이상). 토픽 파티션 수(3)보다 크면 남는 컨슈머는 유휴
-          concurrency: 1
+          concurrency: 3
       recovery:
         # 처리 중 상태로 멈춘 충전을 다시 실행. 끄면 복구 스케줄러가 등록되지 않는다 (테스트용)
         enabled: true

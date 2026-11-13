@@ -181,9 +181,9 @@ Content-Type: application/json
 
 | 단계 | 내용 |
 |---|---|
-| Outbox 발행기 | 1초 간격(이전 주기 종료 후), 한 번에 200건. `PENDING`을 `retry_count`·`created_at` 순으로 `FOR UPDATE SKIP LOCKED`로 잠그고 보냅니다. 성공하면 `PUBLISHED`, 실패하면 `retry_count + 1` |
+| Outbox 발행기 | 1초 간격(이전 주기 종료 후), 한 번에 500건. `PENDING`을 `retry_count`·`created_at` 순으로 `FOR UPDATE SKIP LOCKED`로 잠그고 보냅니다. 성공하면 `PUBLISHED`, 실패하면 `retry_count + 1` |
 | 토픽 | `wallet.charge.requested`(파티션 3). 키 `chargeId`, 헤더 `eventId`(Outbox ID). 값은 `chargeId`·`walletId`·`userId`·`amount`·`currency`·`bankCode`·`bankRequestId`(계좌번호 없음) |
-| 컨슈머 | 그룹 `wallet-charge-saga`, 동시성 1, 레코드 단위 커밋, `auto-offset-reset: earliest`. `chargeId`로 SAGA 실행기를 부릅니다 |
+| 컨슈머 | 그룹 `wallet-charge-saga`, 동시성 3, 레코드 단위 커밋, `auto-offset-reset: earliest`. `chargeId`로 SAGA 실행기를 부릅니다 |
 | 컨슈머 오류 | DB 장애 같은 인프라 예외만 1초 간격 2회 다시 실행하고, 그래도 실패하면 ERROR 후 넘깁니다(멈춘 건은 복구 스케줄러가 처리). 메시지 형식 이상·허용되지 않은 전이는 바로 넘깁니다 |
 
 같은 이벤트를 다시 받아도 실행기가 충전 상태를 보고 판단하므로(종료 상태면 아무것도 안 함) 이벤트 중복 제거는 하지 않습니다. `eventId`는 상태 이력 `trace_id`에 남깁니다.
@@ -304,7 +304,7 @@ reference가 원장의 멱등 키라 같은 충전을 다시 보내도 한 번�
   - 읽기 제한은 읽기 한 번당 제한이라 응답이 조금씩 흘러오면 호출이 6초보다 길어질 수 있고, 그 경우 이 상한은 보장되지 않습니다. 지갑의 은행 호출 시간은 측정하지 않았습니다.
   - 장애 은행 하나 기준입니다. 동시에 n개 은행이 응답 없이 붙잡으면 한 poll 묶음 안의 실패 호출이 그만큼 늘어 상한도 줄어듭니다. 읽기 제한·poll 간격(`max.poll.interval.ms`)·poll 레코드 수(`max.poll.records`)를 바꾸면 다시 계산합니다.
 - **10초**: 관례적인 초기값입니다(결제 원장 서킷과 같음). 지수 증가는 넣지 않았습니다. 늘릴 근거가 없어 측정 뒤 판단합니다.
-- **반열림 1건**: SAGA 컨슈머 동시성이 1이라 은행 호출이 동시에 여러 건 나가지 않습니다. 시험 호출 1건으로 충분하고, 장애가 이어지면 그 1건만 타임아웃을 기다립니다.
+- **반열림 1건**: 반열림 시험 호출은 은행별 서킷 하나(싱글톤 레지스트리)에서 1건으로 제한되며, 컨슈머 동시성과 관계없습니다. 동시성 3 측정(2026-11-13)에서도 반열림 때마다 시험 호출은 1건만 나갔습니다.
 
 느린 호출 판정을 끄는 이유와 방법:
 
@@ -372,7 +372,7 @@ reference가 원장의 멱등 키라 같은 충전을 다시 보내도 한 번�
 - 서킷이 반열림인 은행은 제외하지 않습니다. 복구 대상이 시험 호출로 나가야 닫힐 수 있기 때문입니다.
 - 한계: 원장 묶음이 멈춘 주기에도 은행 묶음 대상은 출금 뒤 원장을 부릅니다. SAGA 컨슈머와 같은 동작이고, 출금 성공 뒤 `CREDIT_PROCESSING` 전이가 원장 호출 전에 커밋되므로 정합성 문제는 없습니다. 원장 호출은 복구 스케줄러 안에서만 장애를 감지하며, 은행 호출은 컨슈머·스케줄러 모두 [은행 서킷 브레이커](#은행-서킷-브레이커)를 거칩니다.
 - 한 건의 예외가 같은 배치의 다른 건을 멈추지 않습니다. 배치마다 `group`·`found`·`claimed`·`claimMissed`·`bankSkipped`·`failed`·`unknownStop`·`excludedBanks`·`elapsedMs`를 INFO로 남기고, 결과 모름 연속으로 원장 묶음이나 은행 하나를 멈추면 WARN을 남깁니다.
-- 스케줄러 스레드 풀은 2입니다(`spring.task.scheduling.pool.size`). 복구 배치가 길어도 Outbox 발행이 막히지 않게 하기 위해서입니다.
+- 스케줄러 스레드 풀은 3입니다(`spring.task.scheduling.pool.size`). 복구 배치가 길어도 Outbox 발행이 막히지 않게 하기 위해서입니다.
 - 컨슈머와 스케줄러가 같은 충전을 동시에 실행해도 조건부 UPDATE로 한쪽만 전이합니다.
 
 | 지표 | 의미 |

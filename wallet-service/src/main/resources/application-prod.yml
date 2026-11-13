@@ -18,6 +18,11 @@ spring:
     open-in-view: false
     hibernate:
       ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          # 변경 감지 UPDATE·INSERT를 묶어 보낸다 (Outbox 발행 최대 500건의 상태 변경이 커밋 직전에 행마다 왕복하지 않게)
+          batch_size: 50
   cloud:
     openfeign:
       client:
@@ -74,12 +79,12 @@ travelpay:
       publisher:
         enabled: true
         fixed-delay: 1s
-        batch-size: 200
+        batch-size: 500
     charge:
       saga:
         consumer:
           enabled: true
-          concurrency: 1
+          concurrency: 3
       recovery:
         enabled: true
         fixed-delay: 10s

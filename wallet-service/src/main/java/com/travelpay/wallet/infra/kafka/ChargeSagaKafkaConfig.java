@@ -13,7 +13,7 @@ import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.util.backoff.FixedBackOff;
 
 /**
- * 충전 SAGA 컨슈머 컨테이너. 동시성은 travelpay.wallet.charge.saga.consumer.concurrency (기본 1), 레코드 단위 커밋.
+ * 충전 SAGA 컨슈머 컨테이너. 동시성은 travelpay.wallet.charge.saga.consumer.concurrency (기본 3), 레코드 단위 커밋.
  * 충전당 메시지는 접수 때 1건이고 단계 전이는 이전 상태 조건부라, 동시 처리해도 같은 충전이 두 번 진행되지 않는다.
  * 결과 모름은 실행기가 예외 없이 끝내므로 여기까지 오는 예외는 DB 장애 등 인프라 예외다.
  * 그런 예외만 1초 간격 2회 다시 실행하고, 그래도 실패하면 ERROR를 남기고 넘긴다 (멈춘 건은 복구 스케줄러가 처리).
@@ -32,7 +32,7 @@ public class ChargeSagaKafkaConfig {
     public ConcurrentKafkaListenerContainerFactory<Object, Object> chargeSagaListenerContainerFactory(
             ConsumerFactory<Object, Object> consumerFactory,
             @Value("${travelpay.wallet.charge.saga.consumer.enabled:true}") boolean enabled,
-            @Value("${travelpay.wallet.charge.saga.consumer.concurrency:1}") int concurrency) {
+            @Value("${travelpay.wallet.charge.saga.consumer.concurrency:3}") int concurrency) {
         if (concurrency < 1) {
             throw new IllegalStateException(
                     "travelpay.wallet.charge.saga.consumer.concurrency는 1 이상이어야 함 value=" + concurrency);

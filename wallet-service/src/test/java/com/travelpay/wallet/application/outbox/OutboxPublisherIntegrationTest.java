@@ -2,11 +2,15 @@ package com.travelpay.wallet.application.outbox;
 
 import com.travelpay.wallet.infra.kafka.KafkaOutboxMessageSender;
 import com.travelpay.wallet.infra.kafka.WalletKafkaTopicConfig;
+import jakarta.persistence.EntityManagerFactory;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.hibernate.SessionEventListener;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +39,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -52,7 +57,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         "travelpay.wallet.outbox.publisher.enabled=false",
         "travelpay.wallet.charge.recovery.enabled=false",
         "travelpay.wallet.charge.reconciliation.enabled=false",
-        "travelpay.wallet.charge.saga.consumer.enabled=false"
+        "travelpay.wallet.charge.saga.consumer.enabled=false",
+        "spring.jpa.properties.hibernate.generate_statistics=true",
+        // Hibernate 통계에는 batch 실행 횟수가 없어 세션 이벤트로 센다
+        "spring.jpa.properties.hibernate.session.events.auto="
+                + "com.travelpay.wallet.application.outbox.OutboxPublisherIntegrationTest$JdbcBatchCounter"
 })
 class OutboxPublisherIntegrationTest {
 
@@ -82,6 +91,19 @@ class OutboxPublisherIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private EntityManagerFactory entityManagerFactory;
+
+    /** 세션마다 Hibernate가 만든다. 발행기 외 JPA 세션이 없도록 스케줄러·컨슈머는 꺼 둔 상태에서만 센다 */
+    public static class JdbcBatchCounter implements SessionEventListener {
+        static final AtomicInteger BATCHES = new AtomicInteger();
+
+        @Override
+        public void jdbcExecuteBatchStart() {
+            BATCHES.incrementAndGet();
+        }
+    }
 
     @BeforeEach
     void setUp() {
@@ -204,6 +226,30 @@ class OutboxPublisherIntegrationTest {
         assertEquals(2, records.size());
         assertEquals(eventId.toString(), eventIdOf(records.get(0)));
         assertEquals(eventId.toString(), eventIdOf(records.get(1)));
+    }
+
+    @Test
+    void 대기_120건의_상태_변경은_JDBC_batch_50건씩_3번으로_나간다() {
+        int count = 120;
+        Set<UUID> eventIds = new HashSet<>();
+        Instant base = Instant.now();
+        for (int i = 0; i < count; i++) {
+            eventIds.add(insertPending(UUID.randomUUID(), base.plusMillis(i)));
+        }
+        Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        statistics.clear();
+        JdbcBatchCounter.BATCHES.set(0);
+
+        assertEquals(count, publisher.publishPending(count));
+
+        assertEquals(count, statistics.getEntityUpdateCount());
+        // 50 + 50 + 20
+        assertEquals(3, JdbcBatchCounter.BATCHES.get());
+        // 조회 1 + UPDATE 문장 1 (batch마다 다시 준비하지 않음)
+        assertEquals(2, statistics.getPrepareStatementCount());
+        assertEquals(count, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM outbox_events WHERE status = 'PUBLISHED'", Integer.class));
+        assertEquals(count, consume(eventIds, count).size());
     }
 
     private UUID insertPending(UUID aggregateId, Instant createdAt) {
