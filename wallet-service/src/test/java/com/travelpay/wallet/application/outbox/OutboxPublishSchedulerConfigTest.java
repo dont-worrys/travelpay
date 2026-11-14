@@ -4,6 +4,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -45,7 +47,7 @@ class OutboxPublishSchedulerConfigTest {
 
     private void assertPublishesWith(OutboxPublishScheduler scheduler, OutboxPublisher publisher, int batchSize) {
         scheduler.publish();
-        verify(publisher, atLeastOnce()).publishPending(batchSize);
+        verify(publisher, atLeastOnce()).publishPending(eq(batchSize), anyList());
     }
 
     private void assertStartupFails(String property, String value) {

@@ -188,6 +188,23 @@ Content-Type: application/json
 
 - 발행 결과(`PUBLISHED`·`retry_count`)는 엔티티 변경으로 커밋 때 한꺼번에 flush됩니다. JDBC batch(`spring.jpa.properties.hibernate.jdbc.batch_size: 50`, `application.yml`·`application-prod.yml`)로 50건씩 묶어 보내므로 batch 500이면 UPDATE가 10번에 나갑니다. Outbox 트랜잭션 제한 10초 중 응답 대기가 최대 8초라, 남은 시간 안에 UPDATE와 커밋을 끝내기 위해서입니다. `order_inserts`·`order_updates`는 켜지 않습니다(엔티티에 연관관계가 없어 정렬로 얻는 것이 없음). 같은 이벤트를 다시 받아도 실행기가 충전 상태를 보고 판단하므로(종료 상태면 아무것도 안 함) 이벤트 중복 제거는 하지 않습니다. `eventId`는 상태 이력 `trace_id`에 남깁니다.
 
+#### 발행 트랜잭션이 롤백될 때
+
+실험(`OutboxTxTimeoutExperimentTest`, 기본 `test`에서 빠지는 `@Tag("performance")`)으로 확인한 동작입니다.
+
+| 조건 | 결과 |
+|---|---|
+| UPDATE 실행 중에 트랜잭션 제한(10초)의 남은 시간이 다함 | SQL이 취소되고(SQLState `57014`, `QueryTimeoutException`) 롤백됩니다. 이미 Kafka로 보낸 행도 `PENDING`으로 남습니다. 남은 시간을 어느 계층(Spring·Hibernate)이 JDBC에 넘기는지는 확인하지 않았습니다 |
+| UPDATE는 끝났고 커밋 단계에서 늦어짐(지연 제약 트리거로 재현) | 이번 실험에서는 10초를 넘겨도 취소되지 않고 커밋됐습니다. 커밋 단계 지연이 언제나 제한을 받지 않는다는 뜻은 아닙니다 |
+
+롤백되면 `retry_count` 증가도 함께 사라져, 조회 순서(`retry_count`·`created_at`)상 같은 batch가 다음 주기에도 맨 앞에서 다시 선택됩니다. 이를 완화하려고 스케줄러는 발행이 예외로 끝나고 이번 주기에 잠가 가져온 행이 있으면, 새 트랜잭션에서 그 id 중 `PENDING`인 행만 `retry_count + 1` 합니다(`FOR UPDATE SKIP LOCKED`로 다른 발행기가 잠근 행은 기다리지 않고 건너뜀). 로그에 batch 크기와 변경 건수(0건 포함)를 남깁니다. 다음 주기에 뒤 행이 먼저 선택되게 하는 보정일 뿐, 뒤 행의 발행을 보장하지는 않습니다.
+
+- 보정 트랜잭션도 실패하면(DB가 계속 느림) 지금과 같이 같은 batch가 다시 선택됩니다. 보정 실패는 별도 WARN으로 남고 원래 발행 실패 로그를 덮지 않습니다.
+- 다른 발행기가 잠근 행은 건너뛰므로 보정되지 않을 수 있습니다. 그 행은 잠근 발행기가 커밋하면 그 결과대로, 롤백하면 그 발행기의 보정을 따릅니다.
+- 이미 Kafka로 보낸 행은 다음에 다시 보내므로 중복 발행은 그대로입니다.
+- 롤링 배포 중 보정이 없는 이전 버전 발행기와 섞이면, 이전 버전 쪽 롤백에는 보정이 빠집니다.
+- 보정 변경 0건이 이미 `PUBLISHED`라서인지 잠겨서 건너뛴 것인지는 구분하지 못합니다.
+
 ### SAGA 단계
 
 실행기는 현재 상태의 단계를 실행하고 성공하면 다음 단계를 이어서 실행합니다. 은행·원장 호출은 트랜잭션 밖에서 하고, 상태 변경만 짧은 트랜잭션(3초)으로 합니다. 상태 변경은 `WHERE id = ? AND status = ?` 조건부 UPDATE이며, 0행이면(다른 실행기가 먼저 진행) 외부 호출 없이 멈춥니다.
@@ -613,7 +630,7 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 ./gradlew :wallet-service:test
 ```
 
-- DB 없이 실행: `BankAccountTest`, `AesGcmAccountNumberCipherTest`, `BankClientAdapterTest`, `BankFaultInjectionTest`, `BankFeignClientFaultHeaderTest`, `LedgerAccountClientAdapterTest`, `LedgerTransactionClientAdapterTest`, `UserFundingIdentityClientAdapterTest`, `ChargeRecoverySchedulerConfigTest`, `ChargeRecoverySchedulerTest`(한 주기 처리·8초 마감·묶음별 중단·지표 갱신), `WalletServiceInternalBalancesTest`.
+- DB 없이 실행: `BankAccountTest`, `AesGcmAccountNumberCipherTest`, `BankClientAdapterTest`, `BankFaultInjectionTest`, `BankFeignClientFaultHeaderTest`, `LedgerAccountClientAdapterTest`, `LedgerTransactionClientAdapterTest`, `UserFundingIdentityClientAdapterTest`, `ChargeRecoverySchedulerConfigTest`, `ChargeRecoverySchedulerTest`(한 주기 처리·8초 마감·묶음별 중단·지표 갱신), `OutboxPublishSchedulerTest`(롤백 시에만 보정 호출, 보정 예외를 밖으로 던지지 않음), `WalletServiceInternalBalancesTest`.
 - 통합 테스트는 Testcontainers로 PostgreSQL 컨테이너(`postgres:18.6-bookworm`)를 띄우고 Flyway를 적용해 실행합니다. `OutboxPublisherIntegrationTest`는 Kafka 컨테이너(`apache/kafka:4.2.2`)도 띄웁니다. `.env`나 로컬 compose는 필요 없고 Docker만 실행 중이면 됩니다. Docker가 없으면 건너뜁니다(통과가 아님).
 
 | 통합 테스트 | 범위 |
@@ -622,7 +639,7 @@ Mock Bank 동작(POST에 `Mock-Fault` 헤더가 있을 때, 처리·커밋이 �
 | `ChargeSagaFeignIntegrationTest` | Feign 실패가 실제 어댑터를 거쳐 환불·`MANUAL_REVIEW`·결과 모름으로 이어지는지(대역은 Feign 클라이언트) |
 | `ChargeStatusTransitionerIntegrationTest` | 조건부 상태 전이(접수 단계로 만든 `REQUESTED`부터) |
 | `ChargeRecoverySchedulerIntegrationTest` | 복구 대상 대기 시간·선점·재실행·단계 묶음별 조회·한 주기 이어서 처리·결과 모름 3연속 중단·멈춘 충전 지표(은행·원장은 대역, `recover()` 직접 호출) |
-| `OutboxPublisherIntegrationTest` | 실제 Kafka로 발행, Outbox 상태, Kafka 중단 시 동작, 상태 변경이 JDBC batch로 묶이는지(120건 → batch 3번) |
+| `OutboxPublisherIntegrationTest` | 실제 Kafka로 발행, Outbox 상태, Kafka 중단 시 동작, 상태 변경이 JDBC batch로 묶이는지(120건 → batch 3번), 시간 초과 롤백 뒤 보정으로 다음 주기에 뒤 행 발행, 보정 쿼리 대상(지정 id·`PENDING`·잠긴 행 건너뜀) |
 | `OutboxPublishOrderIntegrationTest` | `PENDING` 조회 순서(재시도 적은 순 → 오래된 순) |
 | `ChargeQueryIntegrationTest` | 충전 내역 조회 API(회원·관리자) |
 | `ConnectionIsolationIntegrationTest` | 서버 기본 격리 수준을 serializable로 띄운 PostgreSQL에서도 쓰기·조회 트랜잭션이 READ COMMITTED인지(Hikari 설정 적용 확인) |
