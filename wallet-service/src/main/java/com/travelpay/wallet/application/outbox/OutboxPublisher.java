@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -40,10 +41,41 @@ public class OutboxPublisher {
     /** @return 발행에 성공한 건수 */
     @Transactional(timeout = TX_TIMEOUT_SECONDS)
     public int publishPending(int batchSize) {
+        return publish(batchSize, null);
+    }
+
+    /**
+     * publishPending(int)과 같고, 잠가 가져온 행의 id를 picked에 담는다.
+     * 트랜잭션이 롤백되어 예외가 나도 호출자가 picked로 그 batch를 보정할 수 있게 한다.
+     */
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
+    public int publishPending(int batchSize, List<UUID> picked) {
+        return publish(batchSize, picked);
+    }
+
+    /**
+     * 롤백된 batch 중 아직 PENDING인 행의 retry_count를 1 올린다. 다른 발행기가 잠근 행은 건너뛴다.
+     * 롤백되면 retry_count 증가도 사라져 다음 주기에 같은 batch가 맨 앞에서 다시 선택되는 것을 완화한다.
+     * @return 변경 건수
+     */
+    @Transactional(timeout = TX_TIMEOUT_SECONDS)
+    public int increaseRetryCountIfPending(List<UUID> ids) {
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        return outboxEventRepository.increaseRetryCountIfPending(ids);
+    }
+
+    private int publish(int batchSize, List<UUID> picked) {
         Instant startedAt = Instant.now();
         List<OutboxEvent> events = outboxEventRepository.findPendingForUpdate(batchSize);
         if (events.isEmpty()) {
             return 0;
+        }
+        if (picked != null) {
+            for (OutboxEvent event : events) {
+                picked.add(event.getId());
+            }
         }
 
         Instant sendDeadline = startedAt.plus(SEND_BUDGET);
