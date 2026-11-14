@@ -284,6 +284,77 @@ class OutboxPublisherIntegrationTest {
     }
 
     @Test
+    void 특정_행_때문에_롤백이_반복돼도_보정으로_새_정상_행은_계속_발행한다() {
+        Instant base = Instant.now();
+        UUID bad = insertPending(UUID.randomUUID(), base);
+        UUID first = insertPending(UUID.randomUUID(), base.plusMillis(1));
+        OutboxPublishScheduler scheduler = new OutboxPublishScheduler(publisher, 1);
+
+        // 불량 행의 PUBLISHED UPDATE만 실패시킨다. 시퀀스는 롤백되지 않아 트리거 실행(=롤백) 횟수로 쓴다
+        jdbcTemplate.execute("CREATE SEQUENCE bad_outbox_row_hits");
+        jdbcTemplate.execute("""
+                CREATE OR REPLACE FUNCTION fail_bad_outbox_row() RETURNS trigger AS $$
+                BEGIN
+                    PERFORM nextval('bad_outbox_row_hits');
+                    RAISE EXCEPTION 'outbox 불량 행 상태 변경 실패 (테스트)';
+                END;
+                $$ LANGUAGE plpgsql
+                """);
+        jdbcTemplate.execute("""
+                CREATE TRIGGER fail_bad_outbox_row BEFORE UPDATE ON outbox_events
+                FOR EACH ROW WHEN (NEW.status = 'PUBLISHED' AND OLD.id = '%s'::uuid)
+                EXECUTE FUNCTION fail_bad_outbox_row()
+                """.formatted(bad));
+        try {
+            // 1회차: 불량 행 선택 → 롤백 → 보정으로 retry 1
+            scheduler.publish();
+            assertEquals(1L, badRowFailures());
+            assertBadRow(bad, 1);
+            assertEquals("PENDING", outboxRow(first).get("status"));
+            assertEquals(0, outboxRow(first).get("retry_count"));
+
+            // 2회차: retry 0인 A 선택 → 발행
+            scheduler.publish();
+            assertEquals(1L, badRowFailures());
+            assertEquals("PUBLISHED", outboxRow(first).get("status"));
+            assertEquals(List.of(first.toString()), eventIdsOf(consume(Set.of(first), 1)));
+
+            // 3회차: retry 0인 행이 없어 불량 행 재선택 → 두 번째 롤백 → retry 2
+            scheduler.publish();
+            assertEquals(2L, badRowFailures());
+            assertBadRow(bad, 2);
+
+            // 4회차: 새 정상 행 B(retry 0)가 불량 행보다 먼저 선택 → 발행
+            UUID second = insertPending(UUID.randomUUID(), Instant.now());
+            scheduler.publish();
+            assertEquals(2L, badRowFailures());
+            assertEquals("PUBLISHED", outboxRow(second).get("status"));
+            assertEquals(List.of(second.toString()), eventIdsOf(consume(Set.of(second), 1)));
+            assertBadRow(bad, 2);
+        } finally {
+            jdbcTemplate.execute("DROP TRIGGER IF EXISTS fail_bad_outbox_row ON outbox_events");
+            jdbcTemplate.execute("DROP FUNCTION IF EXISTS fail_bad_outbox_row()");
+            jdbcTemplate.execute("DROP SEQUENCE IF EXISTS bad_outbox_row_hits");
+        }
+    }
+
+    private long badRowFailures() {
+        Map<String, Object> seq = jdbcTemplate.queryForMap("SELECT last_value, is_called FROM bad_outbox_row_hits");
+        return Boolean.TRUE.equals(seq.get("is_called")) ? ((Number) seq.get("last_value")).longValue() : 0;
+    }
+
+    private void assertBadRow(UUID bad, int retryCount) {
+        Map<String, Object> row = outboxRow(bad);
+        assertEquals("PENDING", row.get("status"));
+        assertNull(row.get("published_at"));
+        assertEquals(retryCount, row.get("retry_count"));
+    }
+
+    private static List<String> eventIdsOf(List<ConsumerRecord<String, String>> records) {
+        return records.stream().map(OutboxPublisherIntegrationTest::eventIdOf).toList();
+    }
+
+    @Test
     void 보정은_지정한_id_중_잠기지_않은_PENDING만_올린다() throws Exception {
         Instant base = Instant.now();
         UUID pending = insertPending(UUID.randomUUID(), base);
